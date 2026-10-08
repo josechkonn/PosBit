@@ -168,9 +168,27 @@ async function startNextServer(databaseUrl) {
     throw new Error(`server.js no encontrado en: ${serverJs}`);
   }
 
+  // Secret persistente para Better Auth en el cliente de escritorio
+  const secretPath = path.join(app.getPath('userData'), '.auth-secret');
+  let authSecret = process.env.BETTER_AUTH_SECRET;
+  if (!authSecret) {
+    if (fs.existsSync(secretPath)) {
+      authSecret = fs.readFileSync(secretPath, 'utf-8').trim();
+    } else {
+      authSecret = require('crypto').randomBytes(32).toString('hex');
+      try {
+        fs.writeFileSync(secretPath, authSecret, 'utf-8');
+      } catch (err) {
+        console.error('[PosBit] Error guardando .auth-secret:', err);
+      }
+    }
+  }
+
   const env = {
     ...process.env,
     DATABASE_URL: databaseUrl,
+    BETTER_AUTH_SECRET: authSecret,
+    BETTER_AUTH_URL: appUrl,
     PORT: String(port),
     HOSTNAME: '127.0.0.1',
     NODE_ENV: 'production',

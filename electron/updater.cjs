@@ -78,7 +78,11 @@ function setupUpdater(mainWindow) {
   });
 
   autoUpdater.on('error', (err) => {
-    console.error('[Updater] Error:', err.message);
+    if (err.message && err.message.includes('404')) {
+      console.log('[Updater] Sin releases publicadas aún en GitHub (404)');
+    } else {
+      console.error('[Updater] Error:', err.message);
+    }
   });
 
   // --- Verificación periódica ---
