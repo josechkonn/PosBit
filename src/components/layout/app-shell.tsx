@@ -3,7 +3,7 @@
 import { useState } from "react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { ChevronRight, LogOut } from "lucide-react";
+import { LogOut } from "lucide-react";
 import { Sidebar } from "./sidebar";
 import { Topbar } from "./topbar";
 import { ToastProvider } from "@/components/ui/toast";
@@ -52,9 +52,6 @@ export function AppShell({ children, user }: { children: React.ReactNode; user: 
                 </span>
                 <span className="text-sm font-bold tracking-tight text-foreground">PosBit</span>
               </Link>
-
-              <ChevronRight size={12} className="text-muted-foreground" />
-              <span className="text-xs font-medium text-foreground">Punto de Venta</span>
 
               <div className="flex-1" />
 

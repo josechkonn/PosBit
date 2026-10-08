@@ -8,7 +8,6 @@ import { EmptyState } from "@/components/ui/empty-state";
 import { Field, Label } from "@/components/ui/label";
 import { Input } from "@/components/ui/input";
 import { Modal } from "@/components/ui/modal";
-import { PageHeader } from "@/components/ui/page-header";
 import { SearchBar } from "@/components/ui/search-bar";
 import { Select } from "@/components/ui/select";
 import { Combobox } from "@/components/ui/combobox";
@@ -568,11 +567,8 @@ export default function PuntoDeVentaPage() {
 
   if (loading) {
     return (
-      <div className="print:hidden">
-        <PageHeader title="Punto de Venta" subtitle="Registra una venta directamente desde aquí" />
-        <div className="flex h-64 items-center justify-center">
-          <p className="text-muted-foreground">Cargando productos...</p>
-        </div>
+      <div className="print:hidden flex h-64 items-center justify-center">
+        <p className="text-muted-foreground">Cargando productos...</p>
       </div>
     );
   }
@@ -652,18 +648,9 @@ export default function PuntoDeVentaPage() {
   return (
     <>
       <div className="print:hidden">
-        <PageHeader
-          title="Punto de Venta"
-          subtitle="Registra una venta directamente desde aquí"
-          action={
-            <Button variant="outline" onClick={() => setShowHoldListModal(true)}>
-              <FolderOpen size={14} className="mr-1.5" />
-              Recuperar Venta {heldCarts.length > 0 && `(${heldCarts.length})`}
-            </Button>
-          }
-        />
-
-        <div className="grid grid-cols-1 gap-5 lg:h-[calc(100vh-190px)] lg:grid-cols-12">
+        {/* Sin page header: la cuadrícula ocupa el viewport exacto
+            (100vh − header h-14 56px − padding main p-5 40px) */}
+        <div className="grid grid-cols-1 gap-5 lg:h-[calc(100vh-96px)] lg:grid-cols-12">
           {/* ═══════════ PRODUCT CATALOG (8 COLS) ═══════════ */}
           <div className="flex flex-col gap-3.5 min-w-0 lg:col-span-8">
             <div className="flex gap-3">
@@ -746,6 +733,9 @@ export default function PuntoDeVentaPage() {
                 )}
               </div>
               <div className="flex items-center gap-3">
+                <button onClick={() => setShowHoldListModal(true)} className="text-xs text-primary hover:underline font-medium flex items-center gap-1">
+                  <FolderOpen size={12} /> Recuperar {heldCarts.length > 0 && `(${heldCarts.length})`}
+                </button>
                 {cart.length > 0 && (
                   <button onClick={() => setShowHoldSaveModal(true)} className="text-xs text-amber-500 hover:underline font-medium flex items-center gap-1">
                     <Pause size={12} /> Pausar
