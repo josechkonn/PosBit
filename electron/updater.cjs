@@ -24,9 +24,21 @@ function setupUpdater(mainWindow) {
   autoUpdater.autoInstallOnAppQuit = true;    // Instalar al cerrar si hay update
   autoUpdater.allowDowngrade = false;
 
-  // Logs
-  autoUpdater.logger = require('electron-log');
-  autoUpdater.logger.transports.file.level = 'info';
+  // Logs (filtrando el stacktrace 404 cuando no hay releases)
+  const log = require('electron-log');
+  autoUpdater.logger = {
+    info: (...args) => log.info(...args),
+    warn: (...args) => log.warn(...args),
+    error: (...args) => {
+      const msg = args.map(a => typeof a === 'object' ? (a.stack || a.message || JSON.stringify(a)) : String(a)).join(' ');
+      if (msg.includes('404') || msg.includes('releases.atom')) {
+        log.info('[Updater] Sin versiones publicadas aún en GitHub (404)');
+      } else {
+        log.error(...args);
+      }
+    },
+    debug: (...args) => log.debug(...args),
+  };
 
   // --- Eventos ---
 
