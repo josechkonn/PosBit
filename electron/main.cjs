@@ -225,6 +225,13 @@ async function startNextServer(databaseUrl) {
   // Esperar a que el servidor responda
   splashStatus('Cargando interfaz...');
   await waitForServer(port);
+
+  // Pre-calentar la interfaz en segundo plano para que la primera carga sea instantánea
+  try {
+    require('http').get(appUrl, () => {}).on('error', () => {});
+  } catch {
+    /* ignore */
+  }
 }
 
 // =====================================================================
