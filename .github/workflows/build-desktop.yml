@@ -147,7 +147,7 @@ jobs:
       - name: Generate .ico icon
         shell: pwsh
         run: |
-          npm install --no-save png-to-ico
+          npm install --no-save sharp png-to-ico
           node scripts/generate-icon.cjs
 
       # ---------------------------------------------------------------
