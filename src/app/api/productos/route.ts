@@ -10,11 +10,26 @@ export async function GET(request: Request) {
     await requireSession();
     const { searchParams } = new URL(request.url);
     const page = Math.max(1, parseInt(searchParams.get("page") || "1", 10));
-    const limit = Math.min(100, Math.max(1, parseInt(searchParams.get("limit") || "20", 10)));
+    const searchParam = (searchParams.get("search") || searchParams.get("q") || "").trim();
+    const hasSearch = searchParam.length > 0;
+
+    const limitParam = searchParams.get("limit");
+    const limit = limitParam ? Math.min(1000, Math.max(1, parseInt(limitParam, 10))) : 20;
     const offset = (page - 1) * limit;
 
+    let whereClause = "WHERE p.activo = true";
+    let params: any[] = [limit, offset];
+
+    if (hasSearch) {
+      whereClause += ` AND (p.nombre ILIKE $3 OR p.codigo ILIKE $3 OR c.nombre ILIKE $3 OR m.nombre ILIKE $3 OR p.descripcion ILIKE $3)`;
+      params.push(`%${searchParam}%`);
+    }
+
     const totalRow = await queryOne<{ count: string }>(
-      `SELECT COUNT(*) as count FROM productos WHERE activo = true`
+      hasSearch
+        ? `SELECT COUNT(*) as count FROM productos p LEFT JOIN categorias c ON p.categoria_id = c.id LEFT JOIN marcas m ON p.marca_id = m.id WHERE p.activo = true AND (p.nombre ILIKE $1 OR p.codigo ILIKE $1 OR c.nombre ILIKE $1 OR m.nombre ILIKE $1 OR p.descripcion ILIKE $1)`
+        : `SELECT COUNT(*) as count FROM productos WHERE activo = true`,
+      hasSearch ? [`%${searchParam}%`] : []
     );
     const total = Number(totalRow?.count || 0);
 
@@ -43,11 +58,11 @@ export async function GET(request: Request) {
       LEFT JOIN proveedores pr ON p.proveedor_id = pr.id
       LEFT JOIN producto_precios pp ON p.id = pp.producto_id
       LEFT JOIN monedas mo ON pp.moneda_id = mo.id
-      WHERE p.activo = true
+      ${whereClause}
       GROUP BY p.id, c.nombre, m.nombre, pr.nombre
       ORDER BY p.codigo ASC, p.id ASC
       LIMIT $1 OFFSET $2
-    `, [limit, offset]);
+    `, params);
 
     const monedas = await query(`SELECT id, codigo, simbolo, tasa, tasa_ref_moneda_id, decimales, es_base FROM monedas WHERE activo = true ORDER BY es_base DESC, codigo ASC, id ASC`);
 

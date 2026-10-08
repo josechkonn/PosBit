@@ -1,7 +1,7 @@
 "use client";
 
-import { useState, useEffect, useCallback, useMemo } from "react";
-import { Download, Filter, Plus, X } from "lucide-react";
+import { useState, useEffect, useCallback, useMemo, useRef } from "react";
+import { Download, Filter, Plus, X, Barcode } from "lucide-react";
 import { ActionButtons } from "@/components/ui/action-buttons";
 import { StatusBadge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -85,28 +85,85 @@ export default function ProductosPage() {
   const [categorias, setCategorias] = useState<Array<{ id: number; nombre: string }>>([]);
   const [marcas, setMarcas] = useState<Array<{ id: number; nombre: string }>>([]);
 
-  const fetchData = useCallback(async (page: number) => {
+  const barcodeBuffer = useRef("");
+  const lastKeyTime = useRef(0);
+  const { toast } = useToast();
+
+  const fetchData = useCallback(async (page: number, queryStr?: string) => {
     setLoading(true);
     try {
-      const res = await fetch(`/api/productos?page=${page}&limit=${PAGE_SIZE}`);
+      const q = (queryStr !== undefined ? queryStr : search).trim();
+      const url = q
+        ? `/api/productos?page=1&limit=1000&search=${encodeURIComponent(q)}`
+        : `/api/productos?page=${page}&limit=${PAGE_SIZE}`;
+      const res = await fetch(url);
       if (res.ok) {
         const data = await res.json();
-        setProductos(data.productos);
-        setMonedas(data.monedas);
-        setPagination(data.pagination);
+        setProductos(data.productos || []);
+        setMonedas(data.monedas || []);
+        setPagination(data.pagination || { page: 1, limit: PAGE_SIZE, total: 0, totalPages: 0 });
       }
     } catch (error) {
       console.error("Error al obtener productos:", error);
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [search]);
 
   useEffect(() => {
     fetchData(currentPage);
-    fetch("/api/categorias").then((r) => r.json()).then(setCategorias).catch(() => {});
-    fetch("/api/marcas").then((r) => r.json()).then(setMarcas).catch(() => {});
-  }, [currentPage, fetchData]);
+  }, [currentPage, search, fetchData]);
+
+  useEffect(() => {
+    fetch("/api/categorias").then((r) => (r.ok ? r.json() : [])).then(setCategorias).catch(() => {});
+    fetch("/api/marcas").then((r) => (r.ok ? r.json() : [])).then(setMarcas).catch(() => {});
+  }, []);
+
+  // Escáner de código de barras físico (hardware barcode listener)
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      // Si el modal de edición/creación de producto está abierto, no interferir
+      if (modalOpen) return;
+
+      const isInput = e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement || e.target instanceof HTMLSelectElement;
+
+      // Si el usuario ya está escribiendo o enfocado en un input (ej. la barra de búsqueda),
+      // dejamos que el input reciba el texto normalmente y capturamos el "Enter" enviado por el escáner
+      if (isInput) {
+        if (e.key === "Enter") {
+          const val = (e.target as HTMLInputElement).value?.trim();
+          if (val) {
+            fetchData(1, val);
+          }
+        }
+        return;
+      }
+
+      // Si NO hay ningún input enfocado (usuario en la pantalla general), capturar ráfaga de teclas del lector
+      const now = Date.now();
+      if (now - lastKeyTime.current > 100) {
+        barcodeBuffer.current = ""; // Reset si pasaron más de 100ms
+      }
+      lastKeyTime.current = now;
+
+      if (e.key === "Enter") {
+        const code = barcodeBuffer.current.trim();
+        if (code) {
+          e.preventDefault();
+          setSearch(code);
+          fetchData(1, code).then(() => {
+            toast(`Código escaneado: "${code}"`, "info");
+          });
+        }
+        barcodeBuffer.current = "";
+      } else if (e.key.length === 1) {
+        barcodeBuffer.current += e.key;
+      }
+    };
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [modalOpen, fetchData, toast]);
 
   const activeFiltersCount =
     (selectedCategoria ? 1 : 0) +
@@ -274,11 +331,16 @@ export default function ProductosPage() {
     setSelectedProducto(null);
   };
 
-  const { toast } = useToast();
-
   const handleSuccess = (message: string) => {
     fetchData(currentPage);
     toast(message, "success");
+  };
+
+  const handleSearchKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      fetchData(1, search.trim());
+    }
   };
 
   return (
@@ -295,9 +357,10 @@ export default function ProductosPage() {
 
       <div className="mb-4 flex flex-wrap items-center gap-3">
         <SearchBar
-          placeholder="Buscar: harina, arroz, 789..."
+          placeholder="Escanear código de barras o buscar por nombre/código..."
           value={search}
           onChange={(e) => setSearch(e.target.value)}
+          onKeyDown={handleSearchKeyDown}
         />
         <Button
           variant={showFilters || activeFiltersCount > 0 ? "primary" : "outline"}
