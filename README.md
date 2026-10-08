@@ -19,15 +19,17 @@ npm run dev
 
 Abre http://localhost:3000 — te pedirá iniciar sesión.
 
-**Credenciales demo:**
+**Credenciales iniciales:**
 
-| Rol      | Email                 | Contraseña   |
-|----------|-----------------------|--------------|
-| admin    | `admin@admin.com`     | `123123123`  |
-| cajero | `vendedor@stockpro.bo`| `Vendedor123`|
+| Rol      | Email             | Contraseña |
+|----------|-------------------|------------|
+| admin    | `admin@admin.com` | `123123123`|
 
 El usuario `admin` se crea automáticamente al arrancar el servidor (init de la BD);
 `cajero` es el rol por defecto al registrarse en `/registro`.
+
+> La BD arranca limpia: solo `configuración`, 3 monedas, 3 cajas, 9 métodos de pago
+> y el admin. No hay seed de datos de prueba.
 
 ## Autenticación
 
@@ -70,7 +72,6 @@ src/
 │   ├── auth.ts             # Better Auth: pg + email/password + campo role
 │   ├── auth-client.ts      # Cliente React (signIn/signUp/signOut/useSession)
 │   ├── auth-server.ts      # requireSession() / requireRole() — server-only
-│   ├── mock-data.ts        # Datos de ejemplo + tipos derivados
 │   ├── format.ts           # fmt (moneda) y fmtDate
 │   ├── chart-colors.ts     # Espejo de --chart-* para recharts
 │   └── utils.ts            # cn(), userInitials()

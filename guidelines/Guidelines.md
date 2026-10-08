@@ -77,7 +77,6 @@ src/
 │   ├── auth.ts               # Config Better Auth (pg + email/password + role)
 │   ├── auth-client.ts        # Cliente React (signIn/signUp/signOut/useSession)
 │   ├── auth-server.ts        # requireSession() / requireRole() (server-only)
-│   ├── mock-data.ts          # Datos mock + tipos derivados
 │   ├── format.ts             # fmt() moneda es-BO, fmtDate()
 │   ├── chart-colors.ts       # Espejo hex de --chart-* (recharts no acepta clases)
 │   └── utils.ts              # cn(), userInitials()
@@ -108,7 +107,8 @@ src/
 - Navegación con `<Link>`; la config de menús vive en `components/layout/nav.ts`
   (al añadir una ruta nueva, registrarla ahí para sidebar + breadcrumb).
 - Alias de imports: `@/*` → `./src/*`.
-- Datos nuevos → `lib/mock-data.ts`; tipo derivado con `(typeof arr)[number]`.
+- Los datos viven en Postgres y se leen con `query()` / `queryOne()` de `src/lib/db.ts`;
+  tipo derivado con `(typeof arr)[number]` cuando se trabaja con arrays locales.
 
 ## Flujo de verificación (tras cada cambio)
 
