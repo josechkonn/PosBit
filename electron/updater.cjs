@@ -161,6 +161,9 @@ async function promptInstall(info) {
  * Verificar manualmente (desde menú o acción del usuario).
  */
 function checkForUpdatesManual() {
+  const log = require('electron-log');
+  log.info('[Updater] Comprobación manual solicitada...');
+  
   autoUpdater.checkForUpdates().then((result) => {
     if (!result || !result.updateInfo) {
       dialog.showMessageBox(parentWindow, {
@@ -171,11 +174,16 @@ function checkForUpdatesManual() {
       });
     }
   }).catch((err) => {
+    log.error('[Updater] Error en comprobación manual:', err);
+    let detailMsg = err.message;
+    if (err.message && err.message.includes('404')) {
+      detailMsg = 'No se encontraron releases en GitHub (Error 404). Si el repositorio es Privado, la API de GitHub bloquea la consulta anónima de actualizaciones.';
+    }
     dialog.showMessageBox(parentWindow, {
       type: 'error',
-      title: 'Error al verificar',
-      message: 'No se pudo verificar actualizaciones.',
-      detail: err.message,
+      title: 'Error al verificar actualizaciones',
+      message: 'No se pudo verificar si hay nuevas actualizaciones.',
+      detail: detailMsg,
       buttons: ['OK'],
     });
   });
