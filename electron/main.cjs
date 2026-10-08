@@ -17,7 +17,15 @@ const { spawn } = require('child_process');
 const net = require('net');
 const fs = require('fs');
 
+// Configurar logs en archivo (%APPDATA%/posbit/logs/main.log)
+const log = require('electron-log');
+log.transports.file.level = 'info';
+log.transports.console.level = 'info';
+Object.assign(console, log.functions);
+
 const isDev = !app.isPackaged;
+log.info(`[PosBit] Iniciando aplicación (isDev: ${isDev}, v${app.getVersion()})`);
+log.info(`[PosBit] Log file: ${log.transports.file.getFile().path}`);
 
 // --- Estado global ---
 /** @type {BrowserWindow | null} */ let mainWindow = null;
@@ -61,21 +69,22 @@ function waitForServer(port, maxAttempts = 60) {
     const tryConnect = () => {
       attempts++;
       const req = require('http').get(`http://127.0.0.1:${port}`, (res) => {
+        console.log(`[Next] Servidor respondió con status ${res.statusCode}`);
         resolve();
       });
-      req.on('error', () => {
+      req.on('error', (err) => {
         if (attempts >= maxAttempts) {
-          reject(new Error(`El servidor Next.js no respondió después de ${maxAttempts} intentos`));
+          reject(new Error(`El servidor Next.js no respondió tras ${maxAttempts} intentos (${err.message})`));
         } else {
-          setTimeout(tryConnect, 500);
+          setTimeout(tryConnect, 1000);
         }
       });
-      req.setTimeout(2000, () => {
+      req.setTimeout(10000, () => {
         req.destroy();
         if (attempts >= maxAttempts) {
-          reject(new Error('Timeout esperando servidor Next.js'));
+          reject(new Error('Timeout esperando respuesta del servidor Next.js (10s por intento)'));
         } else {
-          setTimeout(tryConnect, 500);
+          setTimeout(tryConnect, 1000);
         }
       });
     };
@@ -394,9 +403,10 @@ app.whenReady().then(async () => {
       splashWindow.destroy();
     }
 
+    const logPath = log.transports.file.getFile().path;
     dialog.showErrorBox(
       'Error al iniciar PosBit',
-      `No se pudo iniciar la aplicación:\n\n${err.message}\n\nRevisa los logs para más detalles.`
+      `No se pudo iniciar la aplicación:\n\n${err.message}\n\nLos detalles se guardaron en:\n${logPath}`
     );
 
     app.quit();
