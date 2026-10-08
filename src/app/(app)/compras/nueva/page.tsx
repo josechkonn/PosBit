@@ -26,6 +26,7 @@ import { useToast } from "@/components/ui/toast";
 import { cn } from "@/lib/utils";
 import { aBase, convertir, redondear, tasaUsd, tasaUsdDocumento } from "@/lib/money";
 import { ProductoModal } from "@/components/producto/producto-modal";
+import { MetodoPagoSelect } from "@/components/ui/metodo-pago-select";
 
 /* ───── Types ───── */
 
@@ -776,18 +777,15 @@ export default function NuevaCompraPage() {
             <label className="mb-1 block text-xs font-medium text-muted-foreground">
               Método <span className="text-red-400">*</span>
             </label>
-            <select
-              value={metodoPagoId || ""}
-              onChange={(e) => setMetodoPagoId(e.target.value ? parseInt(e.target.value) : null)}
-              className="h-10 w-full rounded border border-border bg-background px-3 text-sm focus:border-primary focus:outline-none focus:ring-1 focus:ring-ring"
-            >
-              <option value="">Seleccionar método...</option>
-              {metodosPago.map((m) => (
-                <option key={m.id} value={m.id}>
-                  {m.nombre} {m.moneda_codigo ? `(${m.moneda_simbolo} ${m.moneda_codigo})` : ""}
-                </option>
-              ))}
-            </select>
+            <MetodoPagoSelect
+              metodos={metodosPago}
+              value={metodoPagoId}
+              onChange={setMetodoPagoId}
+              allowEmptyLabel="Seleccionar método..."
+              placeholder="Seleccionar método..."
+              className="w-full"
+              ariaLabel="Método de pago"
+            />
 
             {selectedMoneda && (
               <div className="mt-3 space-y-2">

@@ -5,7 +5,7 @@ import { Modal } from "@/components/ui/modal";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Field } from "@/components/ui/label";
-import { Select } from "@/components/ui/select";
+import { MetodoPagoSelect } from "@/components/ui/metodo-pago-select";
 import { fmt } from "@/lib/format";
 import { convertir } from "@/lib/money";
 
@@ -244,14 +244,14 @@ export function AbonoModal({ open, credito, onClose, onSuccess }: AbonoModalProp
           <Input value={fecha} onChange={(e) => setFecha(e.target.value)} type="date" />
         </Field>
         <Field label="Método de pago (opcional)">
-          <Select value={metodoPagoId} onChange={(e) => handleMetodoChange(e.target.value)}>
-            <option value="">Sin método de pago</option>
-            {metodosPago.map((m) => (
-              <option key={m.id} value={m.id}>
-                {m.nombre} ({m.moneda_codigo})
-              </option>
-            ))}
-          </Select>
+          <MetodoPagoSelect
+            metodos={metodosPago}
+            value={metodoPagoId || null}
+            onChange={(id) => handleMetodoChange(id === null ? "" : String(id))}
+            allowEmptyLabel="Sin método de pago"
+            placeholder="Sin método de pago"
+            className="w-full"
+          />
         </Field>
         <Field label="Observaciones">
           <textarea

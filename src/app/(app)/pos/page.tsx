@@ -9,7 +9,7 @@ import { Field, Label } from "@/components/ui/label";
 import { Input } from "@/components/ui/input";
 import { Modal } from "@/components/ui/modal";
 import { SearchBar } from "@/components/ui/search-bar";
-import { Select } from "@/components/ui/select";
+import { MetodoPagoSelect } from "@/components/ui/metodo-pago-select";
 import { Combobox } from "@/components/ui/combobox";
 import { useToast } from "@/components/ui/toast";
 import { fmt, fmtDateTime } from "@/lib/format";
@@ -686,18 +686,14 @@ export default function PuntoDeVentaPage() {
                 onChange={(e) => setSearch(e.target.value)}
               />
               <div className="flex items-center gap-2 flex-shrink-0">
-                <Select
-                  value={metodoPagoSeleccionado?.toString() || ""}
-                  onChange={(e) => handleSelectMetodo(parseInt(e.target.value))}
-                  className="w-auto bg-card font-medium text-sm"
-                  aria-label="Método de pago"
-                >
-                  {metodosPago.map((m) => (
-                    <option key={m.id} value={m.id}>
-                      {m.nombre} ({m.moneda_codigo})
-                    </option>
-                  ))}
-                </Select>
+                <MetodoPagoSelect
+                  metodos={metodosPago}
+                  value={metodoPagoSeleccionado}
+                  onChange={(id) => id !== null && handleSelectMetodo(id)}
+                  placeholder="Método de pago"
+                  triggerClassName="bg-card font-medium"
+                  ariaLabel="Método de pago"
+                />
               </div>
             </div>
 
@@ -1110,28 +1106,19 @@ export default function PuntoDeVentaPage() {
                   return (
                     <div key={l.key} className="rounded-lg border border-border/60 bg-muted/20 px-2.5 py-2">
                       <div className="flex items-center gap-2">
-                        <Select
-                          value={String(l.metodo?.id ?? "")}
-                          onChange={(e) => {
-                            const id = parseInt(e.target.value, 10);
+                        <MetodoPagoSelect
+                          metodos={metodosPago}
+                          value={l.metodo?.id ?? null}
+                          onChange={(id) =>
                             setLineasPago((prev) =>
-                              prev.map((p) => (p.key === l.key ? { ...p, metodoId: Number.isFinite(id) ? id : null } : p))
-                            );
-                          }}
-                          className="h-9 flex-1 bg-card"
-                          aria-label="Método de pago de la línea"
-                        >
-                          {!l.metodo && (
-                            <option value="" disabled>
-                              Seleccione método
-                            </option>
-                          )}
-                          {metodosPago.map((m) => (
-                            <option key={m.id} value={m.id}>
-                              {m.nombre} ({m.moneda_codigo})
-                            </option>
-                          ))}
-                        </Select>
+                              prev.map((p) => (p.key === l.key ? { ...p, metodoId: id } : p))
+                            )
+                          }
+                          className="h-9 min-w-0 flex-1"
+                          triggerClassName="bg-card"
+                          placeholder="Seleccione método"
+                          ariaLabel="Método de pago de la línea"
+                        />
                         <Input
                           className="h-9 w-32 text-right font-mono"
                           type="number"
