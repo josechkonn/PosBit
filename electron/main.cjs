@@ -63,30 +63,39 @@ function findAvailablePort() {
   });
 }
 
-function waitForServer(port, maxAttempts = 60) {
+function waitForServer(port, maxAttempts = 150) {
   return new Promise((resolve, reject) => {
     let attempts = 0;
     const tryConnect = () => {
       attempts++;
-      const req = require('http').get(`http://127.0.0.1:${port}`, (res) => {
-        console.log(`[Next] Servidor respondió con status ${res.statusCode}`);
+      const socket = new net.Socket();
+      socket.setTimeout(1000);
+
+      socket.on('connect', () => {
+        socket.destroy();
+        console.log(`[Next] Servidor listo en puerto ${port}`);
         resolve();
       });
-      req.on('error', (err) => {
+
+      socket.on('error', () => {
+        socket.destroy();
         if (attempts >= maxAttempts) {
-          reject(new Error(`El servidor Next.js no respondió tras ${maxAttempts} intentos (${err.message})`));
+          reject(new Error(`El servidor Next.js no respondió tras ${maxAttempts} intentos`));
         } else {
-          setTimeout(tryConnect, 1000);
+          setTimeout(tryConnect, 200);
         }
       });
-      req.setTimeout(10000, () => {
-        req.destroy();
+
+      socket.on('timeout', () => {
+        socket.destroy();
         if (attempts >= maxAttempts) {
-          reject(new Error('Timeout esperando respuesta del servidor Next.js (10s por intento)'));
+          reject(new Error('Timeout esperando respuesta del servidor Next.js'));
         } else {
-          setTimeout(tryConnect, 1000);
+          setTimeout(tryConnect, 200);
         }
       });
+
+      socket.connect(port, '127.0.0.1');
     };
     tryConnect();
   });

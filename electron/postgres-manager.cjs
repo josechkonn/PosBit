@@ -156,6 +156,7 @@ class PostgresManager {
       throw new Error(`No se encontraron binarios de PostgreSQL en ${this.pgBinDir}`);
     }
 
+    const wasInitialized = this.isInitialized;
     await this._initDb();
     this._updatePort();
 
@@ -179,26 +180,28 @@ class PostgresManager {
       'start',
       '-D', this.dataDir,
       '-w',                // esperar a que arranque
-      '-t', '30',          // timeout 30 segundos
+      '-t', '15',          // timeout 15 segundos
       '-o', `-p ${this.port}`,
       '-l', path.join(this.dataDir, 'server.log'),
     ]);
 
     await this._waitForReady();
 
-    // Crear la base de datos 'posbit' si no existe
-    try {
-      await this._exec(this._bin('createdb'), [
-        '-U', 'postgres',
-        '-p', String(this.port),
-        '-h', '127.0.0.1',
-        'posbit',
-      ]);
-      console.log('[PG] Base de datos "posbit" creada');
-    } catch (err) {
-      // 'database "posbit" already exists' es OK
-      if (!err.stderr?.includes('already exists')) {
-        console.warn('[PG] createdb warning:', err.stderr || err.message);
+    // Crear la base de datos 'posbit' solo en la primera inicialización
+    if (!wasInitialized) {
+      try {
+        await this._exec(this._bin('createdb'), [
+          '-U', 'postgres',
+          '-p', String(this.port),
+          '-h', '127.0.0.1',
+          'posbit',
+        ]);
+        console.log('[PG] Base de datos "posbit" creada');
+      } catch (err) {
+        // 'database "posbit" already exists' es OK
+        if (!err.stderr?.includes('already exists')) {
+          console.warn('[PG] createdb warning:', err.stderr || err.message);
+        }
       }
     }
 
