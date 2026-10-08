@@ -9,7 +9,7 @@ import { Topbar } from "./topbar";
 import { ToastProvider } from "@/components/ui/toast";
 import { Avatar } from "@/components/ui/avatar";
 import { signOut } from "@/lib/auth-client";
-import { userInitials } from "@/lib/utils";
+import { cn, userInitials } from "@/lib/utils";
 
 export interface AppUser {
   name: string;
@@ -74,7 +74,17 @@ export function AppShell({ children, user }: { children: React.ReactNode; user: 
           ) : (
             <Topbar user={user} onToggleSidebar={() => setSidebarOpen((o) => !o)} />
           )}
-          <main className="flex-1 overflow-y-auto p-5">{children}</main>
+          <main
+            className={cn(
+              "flex-1 overflow-y-auto p-5",
+              // POS: el viewport manda (100vh). Sin scroll de página; el scroll
+              // solo existe dentro del catálogo y del carrito (flex + min-h-0,
+              // sin cálculos con vh que se desfazan por redondeo/zoom)
+              esPOS && "lg:flex lg:flex-col lg:overflow-hidden"
+            )}
+          >
+            {children}
+          </main>
         </div>
       </div>
     </ToastProvider>

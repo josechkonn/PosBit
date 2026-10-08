@@ -647,10 +647,10 @@ export default function PuntoDeVentaPage() {
 
   return (
     <>
-      <div className="print:hidden">
-        {/* Sin page header: la cuadrícula ocupa el viewport exacto
-            (100vh − header h-14 56px − padding main p-5 40px) */}
-        <div className="grid grid-cols-1 gap-5 lg:h-[calc(100vh-96px)] lg:grid-cols-12">
+      <div className="print:hidden lg:flex lg:min-h-0 lg:flex-1 lg:flex-col">
+        {/* Sin page header y sin scroll de página: la cuadrícula toma el alto
+            restante del viewport vía flex (sin cálculos con vh) */}
+        <div className="grid grid-cols-1 gap-5 lg:min-h-0 lg:flex-1 lg:grid-cols-12">
           {/* ═══════════ PRODUCT CATALOG (8 COLS) ═══════════ */}
           <div className="flex flex-col gap-3.5 min-w-0 lg:col-span-8">
             <div className="flex gap-3">
