@@ -3,7 +3,7 @@ export const dynamic = 'force-dynamic';
 import { NextResponse } from "next/server";
 import { requireSession } from "@/lib/auth-server";
 import { query, queryOne, execute, transaction } from "@/lib/db";
-import { aBase, convertir, tasaUsd, tasaUsdDocumento, monedaDeProducto } from "@/lib/money";
+import { aBase, convertir, redondear, tasaUsd, tasaUsdDocumento, monedaDeProducto } from "@/lib/money";
 
 function generarNumero() {
   const year = new Date().getFullYear();
@@ -50,7 +50,23 @@ export async function GET() {
       ORDER BY vi.venta_id, vi.id
     `);
 
-    return NextResponse.json({ ventas, items });
+    // Líneas de pago por venta (pago mixto en varias monedas)
+    const pagos = await query(`
+      SELECT vp.*, mp.nombre as metodo_pago_nombre, mo.codigo as moneda_codigo, mo.simbolo as moneda_simbolo, mo.decimales as moneda_decimales
+      FROM venta_pagos vp
+      LEFT JOIN metodos_pago mp ON vp.metodo_pago_id = mp.id
+      JOIN monedas mo ON vp.moneda_id = mo.id
+      ORDER BY vp.venta_id, vp.id
+    `);
+    const pagosPorVenta = new Map<number, typeof pagos>();
+    for (const p of pagos) {
+      const lista = pagosPorVenta.get(p.venta_id) || [];
+      lista.push(p);
+      pagosPorVenta.set(p.venta_id, lista);
+    }
+    const ventasConPagos = ventas.map((v) => ({ ...v, pagos: pagosPorVenta.get(v.id) || [] }));
+
+    return NextResponse.json({ ventas: ventasConPagos, items });
   } catch (error) {
     return NextResponse.json({ error: "Error al obtener ventas" }, { status: 500 });
   }
@@ -60,15 +76,16 @@ export async function POST(request: Request) {
   try {
     await requireSession();
     const body = await request.json();
-    const { cliente, cliente_id, tipo_pago, fecha, moneda_id, metodo_pago_id, caja_id, items, observaciones, descuento = 0, tasa: tasaCustom, monto_pagado } = body;
+    const { cliente, cliente_id, tipo_pago, fecha, moneda_id, metodo_pago_id, caja_id, items, observaciones, descuento = 0, tasa: tasaCustom, monto_pagado, pagos } = body;
 
     if (!moneda_id || !items || items.length === 0) {
       return NextResponse.json({ error: "Campos requeridos: moneda_id, items" }, { status: 400 });
     }
 
-    // Solo sirve de respaldo cuando no viene `monto_pagado` (compatibilidad):
-    // crédito = nada pagado, contado = total pagado. Con `monto_pagado` el tipo
-    // de venta se deriva de lo que falta por pagar (deuda > 0 = crédito).
+    // `pagos` (opcional): líneas de pago mixto, cada una con su método/moneda.
+    // Sin `pagos` se comporta como antes: `monto_pagado` si viene; si no,
+    // crédito = nada pagado y contado = total pagado.
+    const lineasPagoReq = Array.isArray(pagos) && pagos.length > 0 ? pagos : null;
     const esCreditoSolicitado = tipo_pago === "Credito" || tipo_pago === "Crédito";
 
     const result = await transaction(async (client) => {
@@ -151,19 +168,100 @@ export async function POST(request: Request) {
       const descuentoBase = aBase(descuento, tasaUsdVenta);
 
       // ── Pago: cuánto aplica a esta venta y cuánto queda como deuda ──
-      // `monto_pagado` opcional (pago parcial): sin él se comporta como antes
-      // (crédito = 0 pagado, contado = total pagado). El exceso no se aplica.
-      const pagado =
-        monto_pagado !== undefined && monto_pagado !== null && Number.isFinite(Number(monto_pagado))
-          ? Math.min(Math.max(0, Number(monto_pagado)), total)
-          : esCreditoSolicitado
-            ? 0
-            : total;
-      const deuda = Math.max(0, Math.round((total - pagado) * 100) / 100);
+      // Con `pagos` (pago mixto) cada línea se convierte a la moneda de la
+      // venta con la tasa efectiva del documento; lo que sobra de una línea se
+      // devuelve como vuelto en SU moneda. Sin `pagos`: `monto_pagado` si viene
+      // (pago parcial); si no, crédito = 0 pagado y contado = total pagado.
+      interface LineaPagoResuelta {
+        metodoId: number;
+        cajaId: number;
+        monedaId: number;
+        tasaUsdLinea: number; // unidades de la moneda del método por 1 USD
+        monto: number; // entregado en la moneda del método
+        montoAplicado: number; // aplicado a la venta (moneda de la venta)
+        vuelto: number; // devuelto en la moneda del método
+        montoBase: number; // entregado en USD
+      }
+      const lineasPago: LineaPagoResuelta[] = [];
+      let pagado = 0; // en moneda de la venta
+      let deuda = total; // en moneda de la venta
+
+      if (lineasPagoReq) {
+        let restante = redondear(total);
+        for (const p of lineasPagoReq) {
+          const montoLinea = redondear(Number(p?.monto));
+          if (!p?.metodo_pago_id || !Number.isFinite(montoLinea) || montoLinea <= 0) continue;
+
+          const metRes = await client.query(
+            `SELECT mp.id, mp.nombre, mp.caja_id, ca.moneda_id
+             FROM metodos_pago mp
+             LEFT JOIN cajas ca ON mp.caja_id = ca.id
+             WHERE mp.id = $1`,
+            [p.metodo_pago_id]
+          );
+          if (metRes.rows.length === 0) {
+            throw new Error("Método de pago no encontrado");
+          }
+          const met = metRes.rows[0];
+          if (!met.caja_id || !met.moneda_id) {
+            throw new Error(`El método de pago "${met.nombre}" no tiene una caja asignada`);
+          }
+          const monedaLinea = monedasCatalogo.find((m: any) => Number(m.id) === Number(met.moneda_id));
+          if (!monedaLinea) {
+            throw new Error("Moneda del método de pago no encontrada");
+          }
+          const tasaUsdLinea = tasaUsd(monedaLinea, monedasCatalogo);
+          const esMonedaVenta = Number(met.moneda_id) === Number(moneda_id);
+
+          // Entregado → moneda de la venta (vía USD con la tasa del documento)
+          const montoVenta = esMonedaVenta
+            ? montoLinea
+            : redondear((montoLinea / tasaUsdLinea) * tasaUsdVenta);
+          const aplicado = Math.min(montoVenta, restante);
+          // Lo aplicado → moneda del método, para saber el vuelto y lo que entra a la caja
+          const aplicadoLinea = esMonedaVenta
+            ? aplicado
+            : redondear((aplicado / tasaUsdVenta) * tasaUsdLinea);
+          const vuelto = redondear(Math.max(0, montoLinea - aplicadoLinea));
+
+          restante = redondear(restante - aplicado);
+          pagado = redondear(pagado + aplicado);
+          lineasPago.push({
+            metodoId: Number(met.id),
+            cajaId: Number(met.caja_id),
+            monedaId: Number(met.moneda_id),
+            tasaUsdLinea,
+            monto: montoLinea,
+            montoAplicado: aplicado,
+            vuelto,
+            montoBase: aBase(montoLinea, tasaUsdLinea),
+          });
+        }
+        deuda = restante;
+      } else {
+        pagado =
+          monto_pagado !== undefined && monto_pagado !== null && Number.isFinite(Number(monto_pagado))
+            ? Math.min(Math.max(0, Number(monto_pagado)), total)
+            : esCreditoSolicitado
+              ? 0
+              : total;
+        deuda = Math.max(0, Math.round((total - pagado) * 100) / 100);
+      }
+
       const pagadoBase = aBase(pagado, tasaUsdVenta);
       const deudaBase = aBase(deuda, tasaUsdVenta);
       // Lo que falta por pagar convierte la venta en crédito (parcial o total)
       const esCredito = deuda > 0.009;
+
+      // El efectivo que de verdad entra por cada línea (entregado − vuelto)
+      const efectivoLinea = (l: LineaPagoResuelta) => redondear(Math.max(0, l.monto - l.vuelto));
+
+      // Con pago mixto la venta hereda método/caja de la primera línea con
+      // efectivo (si el cliente no envió uno explícito)
+      const primeraConEfectivo = lineasPago.find((l) => efectivoLinea(l) > 0.009);
+      const metodoVentaId = metodo_pago_id || primeraConEfectivo?.metodoId || null;
+      const cajaVentaId =
+        pagado > 0.009 ? (caja_id || primeraConEfectivo?.cajaId || null) : null;
 
       if (esCredito) {
         if (!clienteRow) {
@@ -215,10 +313,20 @@ export async function POST(request: Request) {
         `INSERT INTO ventas (numero, cliente, cliente_id, tipo_pago, fecha, moneda_id, metodo_pago_id, caja_id, subtotal, descuento, impuesto, total, total_base, descuento_base, tasa, estado, observaciones) 
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17) 
          RETURNING *`,
-         [generarNumero(), clienteNombre, cliente_id || null, esCredito ? "Credito" : "Contado", fecha || new Date().toISOString().split("T")[0], moneda_id, metodo_pago_id || null, pagado > 0.009 ? (caja_id || null) : null, subtotalTotal, descuento, impuestoTotal, total, totalBase, descuentoBase, tasaAplicada, estadoVenta, observaciones || null]
+         [generarNumero(), clienteNombre, cliente_id || null, esCredito ? "Credito" : "Contado", fecha || new Date().toISOString().split("T")[0], moneda_id, metodoVentaId, cajaVentaId, subtotalTotal, descuento, impuestoTotal, total, totalBase, descuentoBase, tasaAplicada, estadoVenta, observaciones || null]
       );
 
       const venta = ventaRes.rows[0];
+
+      // Cada línea de pago queda registrada en su moneda (pago mixto)
+      for (const l of lineasPago) {
+        const tasaLinea = l.montoAplicado > 0 ? redondear(l.monto / l.montoAplicado, 6) : null;
+        await client.query(
+          `INSERT INTO venta_pagos (venta_id, metodo_pago_id, moneda_id, monto, monto_base, monto_aplicado, vuelto, tasa)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+          [venta.id, l.metodoId, l.monedaId, l.monto, l.montoBase, l.montoAplicado, l.vuelto, tasaLinea]
+        );
+      }
 
       for (const item of items) {
         const producto = await client.query(`SELECT * FROM productos WHERE id = $1`, [item.producto_id]);
@@ -264,25 +372,56 @@ export async function POST(request: Request) {
 
         // El pago inicial queda registrado como abono contra ese crédito
         if (pagado > 0.009) {
-          await client.query(
-            `INSERT INTO abonos (credito_id, cliente_id, retorno_id, fecha, monto, moneda_id, monto_base, metodo_pago_id, caja_id, observaciones)
-             VALUES ($1, $2, NULL, $3, $4, $5, $6, $7, $8, $9)`,
-            [creditoRes.rows[0].id, cliente_id, venta.fecha, pagado, moneda_id, pagadoBase, metodo_pago_id || null, caja_id || null, `Pago inicial venta ${venta.numero}`]
-          );
+          if (lineasPago.length > 0) {
+            // Pago mixto: un abono por cada línea, en la moneda de esa línea
+            for (const l of lineasPago) {
+              const efectivo = efectivoLinea(l);
+              if (efectivo <= 0.009) continue;
+              await client.query(
+                `INSERT INTO abonos (credito_id, cliente_id, retorno_id, fecha, monto, moneda_id, monto_base, metodo_pago_id, caja_id, observaciones)
+                 VALUES ($1, $2, NULL, $3, $4, $5, $6, $7, $8, $9)`,
+                [creditoRes.rows[0].id, cliente_id, venta.fecha, efectivo, l.monedaId, aBase(efectivo, l.tasaUsdLinea), l.metodoId, l.cajaId, `Pago inicial venta ${venta.numero}`]
+              );
+            }
+          } else {
+            await client.query(
+              `INSERT INTO abonos (credito_id, cliente_id, retorno_id, fecha, monto, moneda_id, monto_base, metodo_pago_id, caja_id, observaciones)
+               VALUES ($1, $2, NULL, $3, $4, $5, $6, $7, $8, $9)`,
+              [creditoRes.rows[0].id, cliente_id, venta.fecha, pagado, moneda_id, pagadoBase, metodo_pago_id || null, caja_id || null, `Pago inicial venta ${venta.numero}`]
+            );
+          }
         }
       }
 
-      // Dinero que entra a la caja: el total (contado) o el pago parcial
-      if (caja_id && metodo_pago_id && pagado > 0.009) {
+      // Dinero que entra a la caja: una transacción por línea, en la moneda de
+      // esa línea (el vuelto nunca entra a la caja)
+      const entradasCaja: { cajaId: number; monto: number; monedaId: number; montoBase: number; tasa: number }[] = [];
+      if (lineasPago.length > 0) {
+        for (const l of lineasPago) {
+          const efectivo = efectivoLinea(l);
+          if (efectivo <= 0.009) continue;
+          entradasCaja.push({
+            cajaId: l.cajaId,
+            monto: efectivo,
+            monedaId: l.monedaId,
+            montoBase: aBase(efectivo, l.tasaUsdLinea),
+            tasa: Number(monedasCatalogo.find((m: any) => Number(m.id) === l.monedaId)?.tasa) || 1,
+          });
+        }
+      } else if (caja_id && metodo_pago_id && pagado > 0.009) {
+        entradasCaja.push({ cajaId: Number(caja_id), monto: pagado, monedaId: Number(moneda_id), montoBase: pagadoBase, tasa: tasaAplicada });
+      }
+
+      for (const e of entradasCaja) {
         await client.query(
           `INSERT INTO transacciones (caja_id, fecha, tipo, monto, moneda_id, monto_base, tasa, descripcion, referencia_tipo, referencia_id) 
            VALUES ($1, NOW(), 'Entrada', $2, $3, $4, $5, $6, 'venta', $7)`,
-          [caja_id, pagado, moneda_id, pagadoBase, tasaAplicada, `Cobro venta ${venta.numero}`, venta.id]
+          [e.cajaId, e.monto, e.monedaId, e.montoBase, e.tasa, `Cobro venta ${venta.numero}`, venta.id]
         );
 
         await client.query(
           `UPDATE cajas SET saldo_actual = saldo_actual + $1 WHERE id = $2`,
-          [pagado, caja_id]
+          [e.monto, e.cajaId]
         );
       }
 

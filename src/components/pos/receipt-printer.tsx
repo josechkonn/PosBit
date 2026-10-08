@@ -21,6 +21,10 @@ interface ReceiptProps {
   impuesto: number;
   descuento: number;
   total: number;
+  /** Deuda restante (crédito), en la moneda de la venta */
+  deuda?: number;
+  /** Desglose de pago mixto: cada línea con su moneda y vuelto */
+  pagos?: Array<{ metodo: string; moneda: string; monto: number; vuelto?: number }>;
   empresaNombre?: string;
   empresaRif?: string;
   empresaDireccion?: string;
@@ -41,6 +45,8 @@ export const ReceiptPrinter = forwardRef<HTMLDivElement, ReceiptProps>(
       impuesto,
       descuento,
       total,
+      deuda = 0,
+      pagos = [],
       empresaNombre = "PosBit",
       empresaRif = "J-12345678-9",
       empresaDireccion = "Centro, Ciudad",
@@ -130,6 +136,26 @@ export const ReceiptPrinter = forwardRef<HTMLDivElement, ReceiptProps>(
             <span>TOTAL:</span>
             <span>{monedaSimbolo}{fmt(total, monedaCodigo)}</span>
           </div>
+          {deuda > 0.009 && (
+            <div style={{ display: "flex", justifyContent: "space-between", fontWeight: "bold", marginTop: "3px" }}>
+              <span>POR COBRAR:</span>
+              <span>{fmt(deuda, monedaCodigo)}</span>
+            </div>
+          )}
+          {pagos.length > 0 && (
+            <div style={{ fontSize: "11px", marginTop: "6px" }}>
+              <div style={{ fontWeight: "bold" }}>PAGOS:</div>
+              {pagos.map((p, i) => (
+                <div key={i} style={{ display: "flex", justifyContent: "space-between" }}>
+                  <span>{p.metodo} ({p.moneda})</span>
+                  <span>
+                    {fmt(p.monto, p.moneda)}
+                    {(p.vuelto ?? 0) > 0.009 ? ` · vuelto ${fmt(p.vuelto ?? 0, p.moneda)}` : ""}
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
         </div>
 
         <div style={{ borderBottom: "1px dashed #000", margin: "10px 0" }}></div>

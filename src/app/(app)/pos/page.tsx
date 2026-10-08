@@ -71,6 +71,13 @@ interface CartItem {
   qty: number;
 }
 
+// Línea de pago mixto: una o varias, cada una en la moneda de SU método
+interface LineaPago {
+  key: number;
+  metodoId: number | null; // null = usa el método de la venta (select del header)
+  montoStr: string; // vacío = paga el resto que queda; "0" = no aporta
+}
+
 interface PorCobrarItem {
   codigo: string;
   simbolo: string;
@@ -118,10 +125,15 @@ export default function PuntoDeVentaPage() {
   const [metodoPagoSeleccionado, setMetodoPagoSeleccionado] = useState<number | null>(null);
   const [cajaSeleccionada, setCajaSeleccionada] = useState<number | null>(null);
 
-  // Pago: monto aplicado a la venta y efectivo entregado por el cliente.
-  // montoPagadoStr vacío = paga el total completo. Menos que el total = el resto queda como deuda.
-  const [montoPagadoStr, setMontoPagadoStr] = useState<string>("");
-  const [recibidoStr, setRecibidoStr] = useState<string>("");
+  // Pago mixto: líneas de pago; cada una en la moneda de su método de pago.
+  // montoStr vacío = paga el resto que queda; "0" = no aporta nada.
+  const [lineasPago, setLineasPago] = useState<LineaPago[]>([{ key: 1, metodoId: null, montoStr: "" }]);
+  const lineaSeq = useRef(2);
+  const nuevaLineaPago = (montoStr = ""): LineaPago => ({
+    key: lineaSeq.current++,
+    metodoId: null,
+    montoStr,
+  });
   const [clienteId, setClienteId] = useState("");
   const [ajusteLimite, setAjusteLimite] = useState("");
   const [ajustandoLimite, setAjustandoLimite] = useState(false);
@@ -385,40 +397,58 @@ export default function PuntoDeVentaPage() {
   
   const total = Math.max(0, subtotal - descuento + tax);
 
-  // ═══════════ Pago: monto pagado, deuda pendiente y vuelto ═══════════
-  // Vacío = se considera el total completo. Menos que el total = el resto queda como deuda.
-  const montoPagado = useMemo(() => {
-    const s = montoPagadoStr.trim();
-    if (s === "") return total; // por defecto se paga todo
-    const n = parseFloat(s);
-    if (!Number.isFinite(n) || n <= 0) return 0;
-    return Math.min(n, total); // el exceso no se aplica a la venta (eso es vuelto)
-  }, [montoPagadoStr, total]);
+  // ═══════════ Pago mixto: líneas en varias monedas ═══════════
+  // Cada línea se convierte a la moneda de la venta con la tasa efectiva del
+  // documento (vía USD) y se aplica al saldo restante. Lo que sobra de una
+  // línea no se pierde: se devuelve como vuelto en LA MONEDA DE ESA LÍNEA.
+  const pagosResueltos = useMemo(() => {
+    const monedaVenta = monedas.find((m) => m.codigo === monedaSeleccionada);
+    const tasaCustomNum = parseFloat(tasaCustomStr);
+    const tasaDoc = monedaVenta
+      ? tasaUsdDocumento(monedaVenta, Number.isFinite(tasaCustomNum) && tasaCustomNum > 0 ? tasaCustomNum : null, monedas)
+      : 1;
 
-  const montoPagadoExcede = useMemo(() => {
-    const n = parseFloat(montoPagadoStr);
-    return montoPagadoStr.trim() !== "" && Number.isFinite(n) && n > total + 0.009;
-  }, [montoPagadoStr, total]);
+    let restante = redondear(total);
+    return lineasPago.map((l) => {
+      const metodo = metodosPago.find((m) => m.id === (l.metodoId ?? metodoPagoSeleccionado)) || null;
+      const monedaLinea = monedas.find((m) => m.codigo === metodo?.moneda_codigo) || null;
+      const tasaLinea = monedaLinea ? tasaUsd(monedaLinea, monedas) : 1;
+      const esMonedaVenta = !!monedaLinea && !!monedaVenta && monedaLinea.id === monedaVenta.id;
+      const decLinea = Number(monedaLinea?.decimales ?? 2);
+      const restanteAntes = restante;
 
+      const vacio = l.montoStr.trim() === "";
+      const n = parseFloat(l.montoStr);
+      // Vacío = paga el resto que queda (en la moneda de esta línea).
+      // Se redondea hacia arriba para que alcance a cubrir el saldo exacto.
+      let monto = 0;
+      if (vacio) {
+        monto = esMonedaVenta ? restante : (restante / tasaDoc) * tasaLinea;
+        if (Number.isFinite(monto)) monto = Math.ceil(monto * 100) / 100;
+        else monto = 0;
+      } else if (Number.isFinite(n) && n > 0) {
+        monto = redondear(n, decLinea);
+      }
+
+      // Entregado → moneda de la venta; lo aplicado se devuelve a la línea
+      const montoVenta = esMonedaVenta ? monto : redondear((monto / tasaLinea) * tasaDoc);
+      const aplicado = Math.min(montoVenta, restante);
+      const aplicadoLinea = esMonedaVenta ? aplicado : redondear((aplicado / tasaDoc) * tasaLinea);
+      const vuelto = redondear(Math.max(0, monto - aplicadoLinea));
+      restante = redondear(restante - aplicado);
+
+      return { key: l.key, metodo, monedaLinea, vacio, monto, montoVenta, aplicado, vuelto, restanteAntes };
+    });
+  }, [lineasPago, total, monedas, metodosPago, monedaSeleccionada, tasaCustomStr, metodoPagoSeleccionado]);
+
+  const pagadoTotal = useMemo(
+    () => redondear(pagosResueltos.reduce((s, l) => s + l.aplicado, 0)),
+    [pagosResueltos]
+  );
   // Lo que no se paga ahora queda como deuda del cliente (crédito parcial o total)
-  const deudaVenta = useMemo(() => Math.max(0, Math.round((total - montoPagado) * 100) / 100), [total, montoPagado]);
+  const deudaVenta = useMemo(() => Math.max(0, redondear(total - pagadoTotal)), [total, pagadoTotal]);
   const esCredito = deudaVenta > 0.009;
-
-  const efectivoRecibido = useMemo(() => {
-    const n = parseFloat(recibidoStr);
-    return Number.isFinite(n) && n > 0 ? n : 0;
-  }, [recibidoStr]);
-
-  // Vuelto a entregar al cliente (todo en la moneda de la venta)
-  const vuelto = useMemo(
-    () => Math.max(0, Math.round((efectivoRecibido - montoPagado) * 100) / 100),
-    [efectivoRecibido, montoPagado]
-  );
-  // El efectivo entregado no alcanza a cubrir lo que dice haber pagado
-  const efectivoFaltante = useMemo(
-    () => (efectivoRecibido > 0 && efectivoRecibido < montoPagado - 0.009 ? Math.round((montoPagado - efectivoRecibido) * 100) / 100 : 0),
-    [efectivoRecibido, montoPagado]
-  );
+  const lineasPagoInvalidas = pagosResueltos.some((l) => !l.metodo);
 
   const handleHoldCart = () => {
     if (cart.length === 0) return;
@@ -455,23 +485,12 @@ export default function PuntoDeVentaPage() {
   const handleCheckout = async () => {
     if (cart.length === 0) return;
     if (!metodoPagoSeleccionado) return;
-    if (efectivoFaltante > 0) {
-      toast(`El efectivo recibido no alcanza: faltan ${fmt(efectivoFaltante, monedaSeleccionada)}`, "error");
+    // Cada línea de pago necesita un método de pago (de él depende la moneda)
+    if (lineasPagoInvalidas) {
+      toast("Cada línea de pago necesita un método de pago", "error");
       return;
     }
-    // Si se registra dinero entrante (contado o abono inicial) tiene que haber caja
-    if (montoPagado > 0 && !cajaSeleccionada) return;
     if (esCredito && !clienteId) return;
-
-    const metodoActual = metodosPago.find((m) => m.id === metodoPagoSeleccionado);
-    if (
-      metodoActual?.moneda_codigo &&
-      monedaSeleccionada &&
-      metodoActual.moneda_codigo !== monedaSeleccionada
-    ) {
-      toast("El método de pago debe tener la misma moneda que la venta", "error");
-      return;
-    }
 
     setSubmitting(true);
     try {
@@ -494,10 +513,14 @@ export default function PuntoDeVentaPage() {
           moneda_id: moneda?.id,
           metodo_pago_id: metodoPagoSeleccionado,
           // Dinero que entra a la caja: el total (contado) o el pago parcial
-          caja_id: montoPagado > 0 ? cajaSeleccionada : null,
+          caja_id: pagadoTotal > 0 ? cajaSeleccionada : null,
           descuento,
-          // Pago parcial: lo no pagado se registra como deuda del cliente
-          monto_pagado: montoPagado,
+          // Pago mixto: cada línea con su método/moneda; el servidor convierte,
+          // aplica al saldo y calcula el vuelto por línea
+          pagos: pagosResueltos.filter((l) => l.metodo && l.monto > 0).map((l) => ({
+            metodo_pago_id: l.metodo!.id,
+            monto: l.monto,
+          })),
           // Tasa personalizada (opcional); vacío = tasa por defecto de la moneda
           tasa: Number.isFinite(tasaCustomNum) && tasaCustomNum > 0 ? tasaCustomNum : null,
           items,
@@ -521,15 +544,22 @@ export default function PuntoDeVentaPage() {
           impuesto: tax,
           descuento,
           total,
-          montoPagado,
+          montoPagado: pagadoTotal,
           deuda: deudaVenta,
-          vuelto,
+          // Desglose de pago mixto: entregado/vuelto por línea (cada moneda lo suyo)
+          pagos: pagosResueltos
+            .filter((l) => l.metodo && l.monto > 0)
+            .map((l) => ({
+              metodo: l.metodo!.nombre,
+              moneda: l.monedaLinea?.codigo || monedaSeleccionada,
+              monto: l.monto,
+              vuelto: l.vuelto,
+            })),
         });
 
         setCart([]);
         setClienteId("");
-        setMontoPagadoStr("");
-        setRecibidoStr("");
+        setLineasPago([nuevaLineaPago()]);
         setDescuento(0);
         setDescuentoStr("");
         setTasaCustomStr("");
@@ -573,12 +603,7 @@ export default function PuntoDeVentaPage() {
     );
   }
 
-  const selectedMetodoObj = metodosPago.find((m) => m.id === metodoPagoSeleccionado);
   const clienteObj = clientes.find((c) => c.id === parseInt(clienteId, 10));
-  const metodoMonedaOK =
-    !selectedMetodoObj?.moneda_codigo ||
-    !monedaSeleccionada ||
-    selectedMetodoObj.moneda_codigo === monedaSeleccionada;
 
   // Límite de crédito y deuda del cliente en la moneda de esta venta
   const deudaMoneda =
@@ -842,10 +867,8 @@ export default function PuntoDeVentaPage() {
                   submitting ||
                   cart.length === 0 ||
                   !metodoPagoSeleccionado ||
-                  !metodoMonedaOK ||
-                  (esCredito && !clienteObj) ||
-                  efectivoFaltante > 0 ||
-                  (montoPagado > 0 && !cajaSeleccionada)
+                  lineasPagoInvalidas ||
+                  (esCredito && !clienteObj)
                 }
               >
                 {submitting ? "Registrando..." : esCredito ? "Vender a Crédito" : "Registrar Venta"}
@@ -870,10 +893,7 @@ export default function PuntoDeVentaPage() {
               <Label>Forma de pago</Label>
               <div className="mt-1 grid grid-cols-2 gap-1 rounded-lg bg-muted p-1">
                 <button
-                  onClick={() => {
-                    setMontoPagadoStr("");
-                    setRecibidoStr("");
-                  }}
+                  onClick={() => setLineasPago([nuevaLineaPago()])}
                   className={`rounded-md py-1.5 text-xs font-semibold transition-colors ${
                     !esCredito ? "bg-card text-primary shadow-sm" : "text-muted-foreground hover:text-foreground"
                   }`}
@@ -881,10 +901,7 @@ export default function PuntoDeVentaPage() {
                   Contado
                 </button>
                 <button
-                  onClick={() => {
-                    setMontoPagadoStr("0");
-                    setRecibidoStr("");
-                  }}
+                  onClick={() => setLineasPago([nuevaLineaPago("0")])}
                   className={`rounded-md py-1.5 text-xs font-semibold transition-colors ${
                     esCredito ? "bg-card text-warning-strong shadow-sm" : "text-muted-foreground hover:text-foreground"
                   }`}
@@ -893,7 +910,8 @@ export default function PuntoDeVentaPage() {
                 </button>
               </div>
               <p className="mt-1 text-[11px] leading-tight text-muted-foreground">
-                «Contado» paga el total y «Crédito» deja todo como deuda. Escribe un monto menor al total para un pago parcial.
+                «Contado» paga el total y «Crédito» deja todo como deuda. En «Pagos» puedes escribir montos
+                parciales o agregar líneas en otras monedas (pago mixto).
               </p>
             </div>
             <Field label={esCredito ? "Cliente (obligatorio)" : "Cliente (opcional)"}>
@@ -1071,18 +1089,103 @@ export default function PuntoDeVentaPage() {
               <span className="font-mono text-primary text-lg">{fmt(total, monedaSeleccionada)}</span>
             </div>
 
-            {/* ── Pago parcial: cuánto aplica a esta venta ── */}
-            <Field label={`Monto pagado ahora (${monedaSeleccionada || "—"})`}>
-              <Input
-                className="text-right font-mono"
-                type="number"
-                step="any"
-                min="0"
-                value={montoPagadoStr}
-                placeholder={fmt(total, monedaSeleccionada)}
-                onChange={(e) => setMontoPagadoStr(e.target.value)}
-              />
-              <div className="mt-1 flex flex-wrap items-center gap-1.5 text-[11px]">
+            {/* ── Pagos: una o varias líneas, cada una en su moneda ── */}
+            <div>
+              <div className="flex items-center justify-between">
+                <Label>Pagos {monedaSeleccionada ? `(${monedaSeleccionada} de la venta)` : ""}</Label>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="h-7 gap-1 px-2 text-xs"
+                  onClick={() => setLineasPago((prev) => [...prev, nuevaLineaPago()])}
+                >
+                  <Plus size={13} /> Agregar pago
+                </Button>
+              </div>
+
+              <div className="mt-2 space-y-2">
+                {pagosResueltos.map((l) => {
+                  const lineaInput = lineasPago.find((p) => p.key === l.key);
+                  const codLinea = l.monedaLinea?.codigo || monedaSeleccionada;
+                  return (
+                    <div key={l.key} className="rounded-lg border border-border/60 bg-muted/20 px-2.5 py-2">
+                      <div className="flex items-center gap-2">
+                        <Select
+                          value={String(l.metodo?.id ?? "")}
+                          onChange={(e) => {
+                            const id = parseInt(e.target.value, 10);
+                            setLineasPago((prev) =>
+                              prev.map((p) => (p.key === l.key ? { ...p, metodoId: Number.isFinite(id) ? id : null } : p))
+                            );
+                          }}
+                          className="h-9 flex-1 bg-card"
+                          aria-label="Método de pago de la línea"
+                        >
+                          {!l.metodo && (
+                            <option value="" disabled>
+                              Seleccione método
+                            </option>
+                          )}
+                          {metodosPago.map((m) => (
+                            <option key={m.id} value={m.id}>
+                              {m.nombre} ({m.moneda_codigo})
+                            </option>
+                          ))}
+                        </Select>
+                        <Input
+                          className="h-9 w-32 text-right font-mono"
+                          type="number"
+                          step="any"
+                          min="0"
+                          value={lineaInput?.montoStr ?? ""}
+                          placeholder="el resto"
+                          onChange={(e) => {
+                            const v = e.target.value;
+                            setLineasPago((prev) => prev.map((p) => (p.key === l.key ? { ...p, montoStr: v } : p)));
+                          }}
+                          aria-label={`Monto entregado en ${codLinea || "la moneda del método"}`}
+                        />
+                        {pagosResueltos.length > 1 && (
+                          <button
+                            onClick={() => setLineasPago((prev) => prev.filter((p) => p.key !== l.key))}
+                            className="rounded-md p-1.5 text-muted-foreground transition-colors hover:bg-danger-soft hover:text-danger"
+                            title="Quitar línea de pago"
+                          >
+                            <X size={14} />
+                          </button>
+                        )}
+                      </div>
+
+                      {/* Qué moneda entra, cuánto aplica a la venta y qué vuelto da */}
+                      <div className="mt-1.5 flex flex-wrap items-center gap-1.5 text-[11px]">
+                        <span className="font-mono font-semibold">
+                          {fmt(l.monto, codLinea)}
+                          {l.vacio ? " (el resto)" : ""}
+                        </span>
+                        {!l.vacio && l.monto > 0 && codLinea !== monedaSeleccionada && (
+                          <span className="text-muted-foreground">≈ {fmt(l.montoVenta, monedaSeleccionada)}</span>
+                        )}
+                        {l.aplicado > 0.009 && (
+                          <span className="rounded-md border border-success-border bg-success-soft px-1.5 py-0.5 font-semibold text-success-strong">
+                            Aplica {fmt(l.aplicado, monedaSeleccionada)}
+                          </span>
+                        )}
+                        {l.vuelto > 0.009 && (
+                          <span className="rounded-md border border-info-border bg-info-soft px-1.5 py-0.5 font-semibold text-info-strong">
+                            Vuelto {fmt(l.vuelto, codLinea)}
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+
+              {/* Resumen del cobro */}
+              <div className="mt-2 flex flex-wrap items-center gap-1.5 text-[11px]">
+                <span className="rounded-md border border-border bg-card px-2 py-0.5 font-semibold">
+                  Pagado: {fmt(pagadoTotal, monedaSeleccionada)}
+                </span>
                 {deudaVenta > 0.009 ? (
                   <span className="rounded-md border border-warning-border bg-warning-soft px-2 py-0.5 font-semibold text-warning-strong">
                     Deuda restante: {fmt(deudaVenta, monedaSeleccionada)}
@@ -1092,68 +1195,14 @@ export default function PuntoDeVentaPage() {
                     Pago completo
                   </span>
                 )}
-                {montoPagadoExcede && (
-                  <span className="rounded-md border border-info-border bg-info-soft px-2 py-0.5 font-semibold text-info-strong">
-                    Se aplica el total; usa «Efectivo recibido» para el vuelto
-                  </span>
-                )}
-                <span className="text-muted-foreground">Vacío = paga el total completo.</span>
               </div>
-            </Field>
-
-            {/* ── Vuelto: lo que el cliente entrega de más ── */}
-            {montoPagado > 0 && (
-              <Field label={`Efectivo recibido del cliente (${monedaSeleccionada || "—"})`}>
-                <Input
-                  className="text-right font-mono"
-                  type="number"
-                  step="any"
-                  min="0"
-                  value={recibidoStr}
-                  placeholder="0.00"
-                  onChange={(e) => setRecibidoStr(e.target.value)}
-                />
-                <div className="mt-1 flex flex-wrap items-center gap-1.5 text-[11px]">
-                  {vuelto > 0.009 && (
-                    <span className="rounded-md border border-success-border bg-success-soft px-2 py-0.5 font-semibold text-success-strong">
-                      Vuelto a entregar: {fmt(vuelto, monedaSeleccionada)}
-                    </span>
-                  )}
-                  {efectivoFaltante > 0 && (
-                    <span className="rounded-md border border-danger/30 bg-danger-soft px-2 py-0.5 font-semibold text-danger-strong">
-                      Faltan {fmt(efectivoFaltante, monedaSeleccionada)} de efectivo
-                    </span>
-                  )}
-                  {vuelto <= 0.009 && efectivoFaltante <= 0 && (
-                    <span className="text-muted-foreground">
-                      Sin vuelto. Déjalo vacío si el pago no es en efectivo.
-                    </span>
-                  )}
-                </div>
-              </Field>
-            )}
+              <p className="mt-1 text-[11px] leading-tight text-muted-foreground">
+                Deja el monto vacío para pagar el resto; «0» no aporta nada. Si una línea excede lo que falta,
+                el vuelto se entrega en la moneda de esa línea.
+              </p>
+            </div>
 
             <div className="space-y-2 pt-2">
-              <Field
-                label={
-                  esCredito
-                    ? `Método de pago (crédito en ${monedaSeleccionada || "—"})`
-                    : "Método de pago"
-                }
-              >
-                <Select value={metodoPagoSeleccionado?.toString() || ""} onChange={(e) => handleSelectMetodo(parseInt(e.target.value))}>
-                  {metodosPago.map((m) => (
-                    <option key={m.id} value={m.id}>{m.nombre} ({m.moneda_codigo})</option>
-                  ))}
-                </Select>
-              </Field>
-
-              {!metodoMonedaOK && (
-                <p className="rounded-lg border border-danger/20 bg-danger-soft px-3 py-2 text-xs text-danger">
-                  El método de pago debe tener la misma moneda que el crédito ({monedaSeleccionada}).
-                </p>
-              )}
-
               {esCredito && (
                 <p className="rounded-lg border border-border/60 bg-muted/30 px-3 py-2 text-xs text-muted-foreground">
                   La parte no pagada se registra como deuda del cliente en {monedaSeleccionada}. Podrás cobrarla desde el módulo de Créditos.
@@ -1296,12 +1345,24 @@ export default function PuntoDeVentaPage() {
                   <span className="font-mono font-semibold text-warning-strong">{fmt(lastSaleData?.deuda ?? 0, lastSaleData?.monedaCodigo)}</span>
                 </div>
               )}
-              {(lastSaleData?.vuelto ?? 0) > 0.009 && (
-                <div className="flex justify-between">
-                  <span className="text-muted-foreground">Vuelto a entregar:</span>
-                  <span className="font-mono font-semibold text-success-strong">{fmt(lastSaleData?.vuelto ?? 0, lastSaleData?.monedaCodigo)}</span>
-                </div>
-              )}
+              {/* Pago mixto: qué entregó el cliente y qué vuelto queda por moneda */}
+              {(lastSaleData?.pagos ?? []).length > 1 &&
+                (lastSaleData?.pagos ?? []).map((p: any, i: number) => (
+                  <div key={`pago-${i}`} className="flex justify-between">
+                    <span className="text-muted-foreground">{p.metodo} ({p.moneda}):</span>
+                    <span className="font-mono font-semibold">{fmt(p.monto, p.moneda)}</span>
+                  </div>
+                ))}
+              {(lastSaleData?.pagos ?? [])
+                .filter((p: any) => (p.vuelto ?? 0) > 0.009)
+                .map((p: any, i: number) => (
+                  <div key={`vuelto-${i}`} className="flex justify-between">
+                    <span className="text-muted-foreground">Vuelto {p.metodo}:</span>
+                    <span className="font-mono font-semibold text-success-strong">
+                      {fmt(p.vuelto, p.moneda)} {p.moneda}
+                    </span>
+                  </div>
+                ))}
               <div className="flex justify-between">
                 <span className="text-muted-foreground">Cliente:</span>
                 <span>{lastSaleData?.clienteNombre}</span>
@@ -1326,6 +1387,8 @@ export default function PuntoDeVentaPage() {
           impuesto={lastSaleData.impuesto}
           descuento={lastSaleData.descuento}
           total={lastSaleData.total}
+          deuda={lastSaleData.deuda}
+          pagos={lastSaleData.pagos}
         />
       )}
     </>

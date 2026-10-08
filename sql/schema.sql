@@ -417,6 +417,29 @@ CREATE TABLE IF NOT EXISTS abonos (
 );
 
 -- ============================================================================
+-- 12.8 PAGOS DE VENTAS (permite pago mixto: una venta cobrada en varias monedas)
+-- ============================================================================
+-- Una venta puede tener varios pagos; cada línea guarda lo entregado en la
+-- moneda de SU método de pago y cuánto de eso aplicó a la venta (convertido a
+-- la moneda de la venta). El excedente queda en `vuelto` (en la moneda del
+-- método). Ej.: venta 40.000 COP → línea COP 20.000 + línea BS 5.000
+-- (= 16.000 COP) y la deuda restante es 4.000 COP.
+CREATE TABLE IF NOT EXISTS venta_pagos (
+    id SERIAL PRIMARY KEY,
+    venta_id INTEGER NOT NULL REFERENCES ventas(id) ON DELETE CASCADE,
+    metodo_pago_id INTEGER REFERENCES metodos_pago(id) ON DELETE SET NULL,
+    moneda_id INTEGER NOT NULL REFERENCES monedas(id) ON DELETE RESTRICT,
+    monto DECIMAL(18, 2) NOT NULL DEFAULT 0.00,          -- entregado en la moneda del método
+    monto_base DECIMAL(18, 2) NOT NULL DEFAULT 0.00,     -- entregado en USD
+    monto_aplicado DECIMAL(18, 2) NOT NULL DEFAULT 0.00, -- aplicado a la venta (moneda de la venta)
+    vuelto DECIMAL(18, 2) NOT NULL DEFAULT 0.00,         -- devuelto en la moneda del método
+    tasa DECIMAL(18, 6),                                 -- tasa usada: unidades del método por 1 unidad de la venta
+    creado_en TIMESTAMP NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_venta_pagos_venta ON venta_pagos(venta_id);
+
+-- ============================================================================
 -- 13. KARDEX (movimientos de inventario)
 -- ============================================================================
 CREATE TABLE IF NOT EXISTS kardex (
