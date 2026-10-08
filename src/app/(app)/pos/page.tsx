@@ -975,78 +975,8 @@ export default function PuntoDeVentaPage() {
           className="max-w-4xl w-[95vw]"
         >
           <div className="grid grid-cols-1 md:grid-cols-12 gap-6">
-            {/* COLUMNA IZQUIERDA: Desglose de Productos y Totales (md:col-span-5) */}
-            <div className="md:col-span-5 flex flex-col justify-between border-b md:border-b-0 md:border-r border-border pb-4 md:pb-0 md:pr-5">
-              <div className="space-y-3">
-                <div className="flex items-center justify-between">
-                  <span className="text-xs font-bold uppercase tracking-wider text-muted-foreground">
-                    Resumen del Pedido
-                  </span>
-                  <span className="text-xs font-semibold px-2 py-0.5 rounded-full bg-primary/10 text-primary">
-                    {cart.reduce((s, c) => s + c.qty, 0)} ítem(s)
-                  </span>
-                </div>
-
-                {/* Desglose de Productos */}
-                <div className="max-h-[300px] overflow-y-auto space-y-2 pr-1 divide-y divide-border/30 rounded-lg border border-border/60 bg-muted/20 p-2.5">
-                  {cart.map((c) => (
-                    <div key={`checkout-item-${c.product.id}`} className="pt-2 first:pt-0">
-                      <div className="flex justify-between items-start text-xs">
-                        <span className="font-semibold text-foreground line-clamp-1 flex-1 pr-2">
-                          {c.product.nombre}
-                        </span>
-                        <span className="font-mono font-semibold shrink-0">
-                          {fmt(getPrecio(c.product) * c.qty, monedaSeleccionada)}
-                        </span>
-                      </div>
-                      <div className="flex justify-between items-center text-[11px] text-muted-foreground mt-0.5">
-                        <span className="font-mono">{c.product.codigo}</span>
-                        <span>{c.qty} × {fmt(getPrecio(c.product), monedaSeleccionada)}</span>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              </div>
-
-              {/* Totales y Descuento */}
-              <div className="mt-4 pt-3 border-t border-border space-y-2 text-xs">
-                <div className="flex justify-between text-muted-foreground">
-                  <span>Subtotal</span>
-                  <span className="font-mono">{fmt(subtotal, monedaSeleccionada)}</span>
-                </div>
-                {tax > 0 && (
-                  <div className="flex justify-between text-muted-foreground">
-                    <span>IVA (16%)</span>
-                    <span className="font-mono">{fmt(tax, monedaSeleccionada)}</span>
-                  </div>
-                )}
-                <div className="flex items-center justify-between text-muted-foreground">
-                  <span>Descuento ({monedaSeleccionada})</span>
-                  <Input
-                    className="w-20 h-6 text-right font-mono text-xs p-1"
-                    value={descuentoStr}
-                    placeholder="0.00"
-                    onChange={(e) => {
-                      setDescuentoStr(e.target.value);
-                      const val = parseFloat(e.target.value);
-                      setDescuento(isNaN(val) ? 0 : val);
-                    }}
-                  />
-                </div>
-
-                <div className="flex justify-between items-baseline pt-2 border-t border-border/80">
-                  <span className="font-bold text-sm text-foreground">TOTAL A PAGAR</span>
-                  <div className="text-right">
-                    <span className="text-2xl font-bold font-mono text-primary block">
-                      {fmt(total, monedaSeleccionada)}
-                    </span>
-                  </div>
-                </div>
-              </div>
-            </div>
-
-            {/* COLUMNA DERECHA: Cliente, Métodos de Pago y Botones Directos (md:col-span-7) */}
-            <div className="md:col-span-7 space-y-4">
+            {/* COLUMNA IZQUIERDA: Cliente, Métodos de Pago y Botones Directos (md:col-span-7) */}
+            <div className="md:col-span-7 space-y-4 border-b md:border-b-0 md:border-r border-border pb-4 md:pb-0 md:pr-5">
               {/* Cliente Selector */}
               <Field label="Cliente de la Venta">
                 <div className="flex items-center gap-2">
@@ -1234,6 +1164,76 @@ export default function PuntoDeVentaPage() {
                 <Button variant="outline" className="w-full h-9 text-xs" onClick={cerrarCheckout} disabled={submitting}>
                   Cancelar
                 </Button>
+              </div>
+            </div>
+
+            {/* COLUMNA DERECHA: Desglose de Productos y Totales (md:col-span-5) */}
+            <div className="md:col-span-5 flex flex-col justify-between">
+              <div className="space-y-3">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs font-bold uppercase tracking-wider text-muted-foreground">
+                    Resumen del Pedido
+                  </span>
+                  <span className="text-xs font-semibold px-2 py-0.5 rounded-full bg-primary/10 text-primary">
+                    {cart.reduce((s, c) => s + c.qty, 0)} ítem(s)
+                  </span>
+                </div>
+
+                {/* Desglose de Productos */}
+                <div className="max-h-[300px] overflow-y-auto space-y-2 pr-1 divide-y divide-border/30 rounded-lg border border-border/60 bg-muted/20 p-2.5">
+                  {cart.map((c) => (
+                    <div key={`checkout-item-${c.product.id}`} className="pt-2 first:pt-0">
+                      <div className="flex justify-between items-start text-xs">
+                        <span className="font-semibold text-foreground line-clamp-1 flex-1 pr-2">
+                          {c.product.nombre}
+                        </span>
+                        <span className="font-mono font-semibold shrink-0">
+                          {fmt(getPrecio(c.product) * c.qty, monedaSeleccionada)}
+                        </span>
+                      </div>
+                      <div className="flex justify-between items-center text-[11px] text-muted-foreground mt-0.5">
+                        <span className="font-mono">{c.product.codigo}</span>
+                        <span>{c.qty} × {fmt(getPrecio(c.product), monedaSeleccionada)}</span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              {/* Totales y Descuento */}
+              <div className="mt-4 pt-3 border-t border-border space-y-2 text-xs">
+                <div className="flex justify-between text-muted-foreground">
+                  <span>Subtotal</span>
+                  <span className="font-mono">{fmt(subtotal, monedaSeleccionada)}</span>
+                </div>
+                {tax > 0 && (
+                  <div className="flex justify-between text-muted-foreground">
+                    <span>IVA (16%)</span>
+                    <span className="font-mono">{fmt(tax, monedaSeleccionada)}</span>
+                  </div>
+                )}
+                <div className="flex items-center justify-between text-muted-foreground">
+                  <span>Descuento ({monedaSeleccionada})</span>
+                  <Input
+                    className="w-20 h-6 text-right font-mono text-xs p-1"
+                    value={descuentoStr}
+                    placeholder="0.00"
+                    onChange={(e) => {
+                      setDescuentoStr(e.target.value);
+                      const val = parseFloat(e.target.value);
+                      setDescuento(isNaN(val) ? 0 : val);
+                    }}
+                  />
+                </div>
+
+                <div className="flex justify-between items-baseline pt-2 border-t border-border/80">
+                  <span className="font-bold text-sm text-foreground">TOTAL A PAGAR</span>
+                  <div className="text-right">
+                    <span className="text-2xl font-bold font-mono text-primary block">
+                      {fmt(total, monedaSeleccionada)}
+                    </span>
+                  </div>
+                </div>
               </div>
             </div>
           </div>
