@@ -378,8 +378,12 @@ app.whenReady().then(async () => {
 
     // 5. Auto-updater (solo en producción)
     if (!isDev) {
-      const { setupUpdater } = require('./updater.cjs');
-      setupUpdater(mainWindow);
+      try {
+        const { setupUpdater } = require('./updater.cjs');
+        setupUpdater(mainWindow);
+      } catch (updaterErr) {
+        console.error('[PosBit] Error al inicializar auto-updater:', updaterErr);
+      }
     }
 
     console.log('[PosBit] Aplicación lista');
