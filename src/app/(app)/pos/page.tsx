@@ -119,6 +119,7 @@ export default function PuntoDeVentaPage() {
   const [metodosPago, setMetodosPago] = useState<MetodoPago[]>([]);
   const [cajas, setCajas] = useState<Caja[]>([]);
   const [clientes, setClientes] = useState<Cliente[]>([]);
+  const [failedImages, setFailedImages] = useState<Record<number, boolean>>({});
 
   // Selection state
   const [monedaSeleccionada, setMonedaSeleccionada] = useState<string>("");
@@ -247,9 +248,9 @@ export default function PuntoDeVentaPage() {
       lastKeyTime.current = now;
 
       if (e.key === "Enter") {
-        const code = barcodeBuffer.current;
+        const code = barcodeBuffer.current.trim().toLowerCase();
         if (code) {
-          const product = productos.find((p) => p.codigo === code);
+          const product = productos.find((p) => p.codigo.trim().toLowerCase() === code);
           if (product && product.stock > 0) {
             addToCart(product);
             toast(`Producto agregado: ${product.nombre}`, "success");
@@ -268,6 +269,34 @@ export default function PuntoDeVentaPage() {
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [productos]);
+
+  const handleSearchKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      const queryStr = search.trim().toLowerCase();
+      if (!queryStr) return;
+
+      let match = productos.find(
+        (p) => p.codigo.trim().toLowerCase() === queryStr
+      );
+
+      if (!match && filtered.length === 1) {
+        match = filtered[0];
+      }
+
+      if (match) {
+        if (match.stock > 0) {
+          addToCart(match);
+          toast(`Producto agregado: ${match.nombre}`, "success");
+          setSearch("");
+        } else {
+          toast(`Sin existencias: ${match.nombre}`, "warning");
+        }
+      } else {
+        toast(`Producto no encontrado: ${search}`, "error");
+      }
+    }
+  };
 
   const handleSelectMetodo = (metodoId: number) => {
     const metodo = metodosPago.find((m) => m.id === metodoId);
@@ -680,10 +709,12 @@ export default function PuntoDeVentaPage() {
           <div className="flex flex-col gap-3.5 min-w-0 lg:col-span-8">
             <div className="flex gap-3">
               <SearchBar
-                placeholder="Buscar: harina, arroz, código (Lector de Barras listo)..."
+                placeholder="Escanear código de barras o buscar producto..."
+                containerClassName="w-full flex-1"
                 className="w-full bg-card py-2.5"
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
+                onKeyDown={handleSearchKeyDown}
               />
               <div className="flex items-center gap-2 flex-shrink-0">
                 <MetodoPagoSelect
@@ -702,18 +733,19 @@ export default function PuntoDeVentaPage() {
                 <button
                   key={p.id}
                   onClick={() => addToCart(p)}
-                  className="group flex flex-col justify-between rounded-xl border border-border bg-card p-3 text-left transition-all hover:border-primary hover:shadow-md"
+                  className="group flex flex-col justify-between rounded-xl border border-border bg-card p-3.5 text-left transition-all hover:border-primary hover:shadow-md w-full"
                 >
-                  <div>
-                    <div className="mb-2.5 flex h-28 w-full items-center justify-center overflow-hidden rounded-lg bg-muted/40 group-hover:bg-primary/5 relative">
-                      {p.imagen ? (
+                  <div className="w-full">
+                    <div className="mb-2.5 flex h-32 w-full items-center justify-center overflow-hidden rounded-lg bg-muted/40 group-hover:bg-primary/5 relative">
+                      {p.imagen && !failedImages[p.id] ? (
                         <img
                           src={p.imagen}
                           alt={p.nombre}
-                          className="h-28 w-full object-contain p-1 transition-transform group-hover:scale-105"
+                          className="h-32 w-full object-contain p-2 transition-transform duration-200 group-hover:scale-105"
+                          onError={() => setFailedImages((prev) => ({ ...prev, [p.id]: true }))}
                         />
                       ) : (
-                        <Package size={32} className="text-muted-foreground/40" />
+                        <Package size={36} className="text-muted-foreground/40" />
                       )}
                       {!p.iva_incluido && (
                         <span className="absolute top-1.5 right-1.5 rounded-sm bg-warning/90 px-1.5 py-0.5 text-[10px] font-semibold leading-none text-warning-foreground shadow-sm">
@@ -724,17 +756,17 @@ export default function PuntoDeVentaPage() {
                     <div className="text-sm font-semibold leading-tight text-foreground line-clamp-2">
                       {p.nombre}
                     </div>
-                    <div className="mt-0.5 font-mono text-xs text-muted-foreground">
+                    <div className="mt-1 font-mono text-xs text-muted-foreground">
                       {p.codigo}
                     </div>
                   </div>
 
-                  <div className="mt-2.5 flex items-center justify-between border-t border-border/40 pt-2">
-                    <span className="font-mono text-base font-bold text-primary">
+                  <div className="mt-3 flex flex-wrap items-center justify-between gap-1.5 border-t border-border/40 pt-2.5 w-full">
+                    <span className="font-mono text-sm sm:text-base font-bold text-primary truncate min-w-0">
                       {fmt(getPrecio(p), monedaSeleccionada)}
                     </span>
-                    <span className="text-xs font-medium text-muted-foreground bg-muted/60 px-1.5 py-0.5 rounded">
-                      Existencias: {p.stock}
+                    <span className="text-[11px] font-medium text-muted-foreground bg-muted/80 px-2 py-0.5 rounded-md shrink-0">
+                      Stock: {p.stock}
                     </span>
                   </div>
                 </button>
