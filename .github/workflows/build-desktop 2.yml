@@ -28,7 +28,7 @@ permissions:
   contents: write  # Necesario para crear releases
 
 env:
-  NODE_VERSION: '22.15.0'
+  NODE_VERSION: '20.18.1'
   PG_VERSION: '16.4-1'
 
 jobs:
@@ -54,15 +54,9 @@ jobs:
 
       # ---------------------------------------------------------------
       # 3. Instalar dependencias
-      #    --ignore-scripts evita compilar better-sqlite3 (devDep de
-      #    @better-auth/cli) que necesita Visual Studio. No se usa en
-      #    producción — la app usa PostgreSQL.
       # ---------------------------------------------------------------
       - name: Install dependencies
-        run: npm ci --ignore-scripts
-
-      - name: Setup Electron binary
-        run: node node_modules/electron/install.js
+        run: npm ci
 
       # ---------------------------------------------------------------
       # 4. Descargar Node.js portable para Windows (se bundlea en la app)
@@ -140,16 +134,7 @@ jobs:
           echo "tag=v$version" >> $env:GITHUB_OUTPUT
 
       # ---------------------------------------------------------------
-      # 8. Generar icon.ico desde icon.png
-      # ---------------------------------------------------------------
-      - name: Generate .ico icon
-        shell: pwsh
-        run: |
-          npm install --no-save png-to-ico
-          node scripts/generate-icon.cjs
-
-      # ---------------------------------------------------------------
-      # 9. Build Electron + Instalador Windows
+      # 8. Build Electron + Instalador Windows
       # ---------------------------------------------------------------
       - name: Build Electron installer
         run: npx electron-builder --win --publish never
