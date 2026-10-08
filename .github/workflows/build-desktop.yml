@@ -1,0 +1,194 @@
+# ============================================================================
+# PosBit Desktop — Build & Release para Windows
+# ============================================================================
+# Se ejecuta cuando se hace push o merge a la rama 'main'.
+# 
+# Flujo:
+#   1. Descarga Node.js portable para Windows
+#   2. Descarga PostgreSQL portable para Windows  
+#   3. Construye Next.js en modo standalone
+#   4. Construye la app Electron con electron-builder
+#   5. Crea un GitHub Release con el instalador (.exe) y archivos delta (.blockmap)
+#
+# Los usuarios con PosBit instalado recibirán automáticamente una notificación
+# de que hay una nueva versión disponible.
+# ============================================================================
+
+name: Build Desktop & Release
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - '**.md'
+      - '.github/ISSUE_TEMPLATE/**'
+  workflow_dispatch:  # Permite ejecutar manualmente desde GitHub
+
+permissions:
+  contents: write  # Necesario para crear releases
+
+env:
+  NODE_VERSION: '20.18.1'
+  PG_VERSION: '16.4-1'
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    timeout-minutes: 30
+
+    steps:
+      # ---------------------------------------------------------------
+      # 1. Checkout
+      # ---------------------------------------------------------------
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # ---------------------------------------------------------------
+      # 2. Setup Node.js (para el build)
+      # ---------------------------------------------------------------
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      # ---------------------------------------------------------------
+      # 3. Instalar dependencias
+      # ---------------------------------------------------------------
+      - name: Install dependencies
+        run: npm ci
+
+      # ---------------------------------------------------------------
+      # 4. Descargar Node.js portable para Windows (se bundlea en la app)
+      # ---------------------------------------------------------------
+      - name: Download Node.js portable
+        shell: pwsh
+        run: |
+          $nodeUrl = "https://nodejs.org/dist/v${{ env.NODE_VERSION }}/node-v${{ env.NODE_VERSION }}-win-x64.zip"
+          Write-Host "Downloading Node.js from $nodeUrl"
+          
+          New-Item -ItemType Directory -Force -Path "resources/node"
+          Invoke-WebRequest -Uri $nodeUrl -OutFile "node-portable.zip" -UseBasicParsing
+          
+          Expand-Archive -Path "node-portable.zip" -DestinationPath "node-temp" -Force
+          
+          # Solo copiar node.exe (lo mínimo necesario)
+          Copy-Item "node-temp/node-v${{ env.NODE_VERSION }}-win-x64/node.exe" -Destination "resources/node/node.exe"
+          
+          # Limpiar
+          Remove-Item -Recurse -Force "node-temp", "node-portable.zip"
+          
+          Write-Host "Node.js portable listo: $(Get-Item resources/node/node.exe | Select-Object -ExpandProperty Length) bytes"
+
+      # ---------------------------------------------------------------
+      # 5. Descargar PostgreSQL portable para Windows
+      # ---------------------------------------------------------------
+      - name: Download PostgreSQL portable
+        shell: pwsh
+        run: |
+          $pgUrl = "https://get.enterprisedb.com/postgresql/postgresql-${{ env.PG_VERSION }}-windows-x64-binaries.zip"
+          Write-Host "Downloading PostgreSQL from $pgUrl"
+          
+          Invoke-WebRequest -Uri $pgUrl -OutFile "pg-portable.zip" -UseBasicParsing
+          
+          Expand-Archive -Path "pg-portable.zip" -DestinationPath "pg-temp" -Force
+          
+          New-Item -ItemType Directory -Force -Path "resources/postgres"
+          
+          # Copiar solo los componentes esenciales
+          $pgRoot = "pg-temp/pgsql"
+          Copy-Item -Recurse "$pgRoot/bin" -Destination "resources/postgres/bin"
+          Copy-Item -Recurse "$pgRoot/lib" -Destination "resources/postgres/lib"
+          Copy-Item -Recurse "$pgRoot/share" -Destination "resources/postgres/share"
+          
+          # Limpiar archivos innecesarios para reducir tamaño
+          Get-ChildItem -Recurse "resources/postgres" -Include "*.pdb","*.map" | Remove-Item -Force
+          
+          # Limpiar descarga
+          Remove-Item -Recurse -Force "pg-temp", "pg-portable.zip"
+          
+          $size = (Get-ChildItem -Recurse "resources/postgres" | Measure-Object -Property Length -Sum).Sum / 1MB
+          Write-Host "PostgreSQL portable listo: $([math]::Round($size, 1)) MB"
+
+      # ---------------------------------------------------------------
+      # 6. Build Next.js (standalone)
+      # ---------------------------------------------------------------
+      - name: Build Next.js
+        run: npm run build
+        env:
+          # Variables de entorno necesarias para el build (no se usan en runtime)
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/posbit
+          BUILD_STANDALONE: "1"
+
+      # ---------------------------------------------------------------
+      # 7. Obtener versión del package.json
+      # ---------------------------------------------------------------
+      - name: Get version
+        id: version
+        shell: pwsh
+        run: |
+          $pkg = Get-Content package.json | ConvertFrom-Json
+          $version = $pkg.version
+          Write-Host "Version: $version"
+          echo "version=$version" >> $env:GITHUB_OUTPUT
+          echo "tag=v$version" >> $env:GITHUB_OUTPUT
+
+      # ---------------------------------------------------------------
+      # 8. Generar icon.ico desde icon.png
+      # ---------------------------------------------------------------
+      - name: Generate .ico icon
+        shell: pwsh
+        run: |
+          npm install --no-save png-to-ico
+          node scripts/generate-icon.cjs
+
+      # ---------------------------------------------------------------
+      # 9. Build Electron + Instalador Windows
+      # ---------------------------------------------------------------
+      - name: Build Electron installer
+        run: npx electron-builder --win --publish never
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # ---------------------------------------------------------------
+      # 9. Listar artefactos generados
+      # ---------------------------------------------------------------
+      - name: List artifacts
+        shell: pwsh
+        run: |
+          Write-Host "=== Artefactos generados ==="
+          Get-ChildItem -Recurse "dist-electron" -File | ForEach-Object {
+            $size = [math]::Round($_.Length / 1MB, 2)
+            Write-Host "  $($_.Name) — $size MB"
+          }
+
+      # ---------------------------------------------------------------
+      # 10. Crear GitHub Release
+      # ---------------------------------------------------------------
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: PosBit ${{ steps.version.outputs.tag }}
+          body: |
+            ## PosBit ${{ steps.version.outputs.tag }}
+
+            ### 📦 Instalación
+            Descarga `PosBit-Setup-${{ steps.version.outputs.version }}.exe` y ejecútalo.
+            El instalador configurará todo automáticamente.
+
+            ### 🔄 Actualización
+            Si ya tienes PosBit instalado, la aplicación te notificará automáticamente
+            de esta actualización. Solo haz clic en "Descargar ahora" cuando aparezca.
+
+            ---
+            *Build automático desde commit ${{ github.sha }}*
+          draft: false
+          prerelease: false
+          files: |
+            dist-electron/*.exe
+            dist-electron/*.exe.blockmap
+            dist-electron/latest.yml
+          fail_on_unmatched_files: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

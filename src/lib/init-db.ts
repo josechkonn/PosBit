@@ -41,7 +41,19 @@ export async function ensureDatabase(): Promise<void> {
   try {
     await appPool.query("SELECT pg_advisory_lock($1)", [LOCK_ID]);
 
-    const schemaPath = join(process.cwd(), "sql", "schema.sql");
+    // Buscar schema.sql en múltiples ubicaciones:
+    // - process.cwd()/sql/schema.sql (desarrollo con next dev)
+    // - ../sql/schema.sql relativo a este archivo (standalone build)
+    // - sql/schema.sql en el directorio de trabajo del standalone server
+    const candidates = [
+      join(process.cwd(), "sql", "schema.sql"),
+      join(__dirname, "..", "..", "sql", "schema.sql"),
+      join(__dirname, "..", "sql", "schema.sql"),
+    ];
+    const schemaPath = candidates.find((p) => {
+      try { readFileSync(p, "utf-8"); return true; } catch { return false; }
+    });
+    if (!schemaPath) throw new Error(`schema.sql no encontrado. Buscado en: ${candidates.join(", ")}`);
     const schema = readFileSync(schemaPath, "utf-8");
     await appPool.query(schema);
     console.log("Tablas y datos iniciales verificados.");

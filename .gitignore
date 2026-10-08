@@ -39,3 +39,8 @@ Thumbs.db
 
 # Scratch (scripts locales de migración con conexiones hardcodeadas)
 /scratch/
+
+# Electron
+/dist-electron/
+/resources/node/
+/resources/postgres/

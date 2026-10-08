@@ -1,0 +1,201 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>PosBit</title>
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap');
+
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    body {
+      font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      height: 100vh;
+      background: transparent;
+      -webkit-app-region: drag;
+      user-select: none;
+      overflow: hidden;
+    }
+
+    .splash {
+      width: 440px;
+      height: 320px;
+      background: linear-gradient(145deg, rgba(15, 23, 42, 0.97), rgba(30, 41, 59, 0.95));
+      border-radius: 24px;
+      border: 1px solid rgba(99, 102, 241, 0.25);
+      box-shadow:
+        0 32px 64px rgba(0, 0, 0, 0.5),
+        0 0 80px rgba(99, 102, 241, 0.1),
+        inset 0 1px 0 rgba(255, 255, 255, 0.05);
+      backdrop-filter: blur(20px);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      position: relative;
+      overflow: hidden;
+    }
+
+    /* Fondo animado con gradientes */
+    .splash::before {
+      content: '';
+      position: absolute;
+      top: -50%;
+      left: -50%;
+      width: 200%;
+      height: 200%;
+      background: conic-gradient(
+        from 0deg,
+        transparent 0deg,
+        rgba(99, 102, 241, 0.06) 60deg,
+        transparent 120deg,
+        rgba(168, 85, 247, 0.04) 180deg,
+        transparent 240deg,
+        rgba(59, 130, 246, 0.06) 300deg,
+        transparent 360deg
+      );
+      animation: rotate 12s linear infinite;
+    }
+
+    @keyframes rotate {
+      to { transform: rotate(360deg); }
+    }
+
+    .content {
+      position: relative;
+      z-index: 1;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 28px;
+    }
+
+    /* Logo / Icono */
+    .logo-container {
+      width: 80px;
+      height: 80px;
+      border-radius: 20px;
+      background: linear-gradient(135deg, #6366f1, #8b5cf6, #a855f7);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      box-shadow:
+        0 8px 32px rgba(99, 102, 241, 0.4),
+        0 0 0 1px rgba(99, 102, 241, 0.2);
+      animation: pulse-glow 2.5s ease-in-out infinite;
+    }
+
+    @keyframes pulse-glow {
+      0%, 100% { box-shadow: 0 8px 32px rgba(99, 102, 241, 0.4), 0 0 0 1px rgba(99, 102, 241, 0.2); }
+      50% { box-shadow: 0 8px 48px rgba(99, 102, 241, 0.6), 0 0 0 1px rgba(99, 102, 241, 0.4); }
+    }
+
+    .logo-icon {
+      font-size: 36px;
+      font-weight: 700;
+      color: white;
+      letter-spacing: -1px;
+      text-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
+    }
+
+    /* Título */
+    .title {
+      text-align: center;
+    }
+
+    .title h1 {
+      font-size: 28px;
+      font-weight: 700;
+      background: linear-gradient(135deg, #e2e8f0, #f8fafc);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      letter-spacing: -0.5px;
+    }
+
+    .title p {
+      font-size: 12px;
+      color: rgba(148, 163, 184, 0.7);
+      margin-top: 4px;
+      font-weight: 400;
+      letter-spacing: 2px;
+      text-transform: uppercase;
+    }
+
+    /* Loading */
+    .loading {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 14px;
+    }
+
+    .loader {
+      width: 200px;
+      height: 3px;
+      background: rgba(99, 102, 241, 0.15);
+      border-radius: 4px;
+      overflow: hidden;
+      position: relative;
+    }
+
+    .loader::after {
+      content: '';
+      position: absolute;
+      top: 0;
+      left: -40%;
+      width: 40%;
+      height: 100%;
+      background: linear-gradient(90deg, transparent, #6366f1, #a855f7, transparent);
+      border-radius: 4px;
+      animation: slide 1.5s ease-in-out infinite;
+    }
+
+    @keyframes slide {
+      0% { left: -40%; }
+      100% { left: 100%; }
+    }
+
+    #status {
+      font-size: 12px;
+      color: rgba(148, 163, 184, 0.6);
+      transition: opacity 0.3s ease;
+      min-height: 16px;
+    }
+
+    /* Versión */
+    .version {
+      position: absolute;
+      bottom: 16px;
+      right: 20px;
+      font-size: 10px;
+      color: rgba(100, 116, 139, 0.5);
+      z-index: 1;
+    }
+  </style>
+</head>
+<body>
+  <div class="splash">
+    <div class="content">
+      <div class="logo-container">
+        <span class="logo-icon">PB</span>
+      </div>
+
+      <div class="title">
+        <h1>PosBit</h1>
+        <p>Sistema de Gestión</p>
+      </div>
+
+      <div class="loading">
+        <div class="loader"></div>
+        <span id="status">Iniciando...</span>
+      </div>
+    </div>
+
+    <span class="version">v1.0.0</span>
+  </div>
+</body>
+</html>
