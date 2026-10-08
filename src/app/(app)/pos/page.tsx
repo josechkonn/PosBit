@@ -543,15 +543,23 @@ export default function PuntoDeVentaPage() {
     setShowClienteModal(false);
   };
 
-  const handleCheckout = async () => {
+  const handleCheckout = async (modeOverride?: "completo" | "credito") => {
     if (cart.length === 0) return;
-    if (!metodoPagoSeleccionado) return;
-    // Cada línea de pago necesita un método de pago (de él depende la moneda)
-    if (lineasPagoInvalidas) {
-      toast("Cada línea de pago necesita un método de pago", "error");
+
+    const isDirectCredito = modeOverride === "credito";
+    const isDirectCompleto = modeOverride === "completo";
+    const isCreditoFinal = isDirectCredito || (!modeOverride && esCredito);
+
+    if (isCreditoFinal && !clienteId) {
+      toast("Debes seleccionar un cliente para registrar una venta a crédito", "error");
       return;
     }
-    if (esCredito && !clienteId) return;
+
+    const metodoIdFinal = metodoPagoSeleccionado || metodosPago[0]?.id;
+    if (!metodoIdFinal && !isDirectCredito) {
+      toast("Selecciona un método de pago", "error");
+      return;
+    }
 
     setSubmitting(true);
     try {
@@ -565,24 +573,38 @@ export default function PuntoDeVentaPage() {
         subtotal: getPrecio(c.product) * c.qty,
       }));
 
+      let pagosToSend: Array<{ metodo_pago_id: number; monto: number }> = [];
+      let montoPagadoFinal = pagadoTotal;
+      let deudaFinal = deudaVenta;
+
+      if (isDirectCompleto) {
+        pagosToSend = [{ metodo_pago_id: metodoIdFinal!, monto: total }];
+        montoPagadoFinal = total;
+        deudaFinal = 0;
+      } else if (isDirectCredito) {
+        pagosToSend = [];
+        montoPagadoFinal = 0;
+        deudaFinal = total;
+      } else {
+        pagosToSend = pagosResueltos
+          .filter((l) => l.metodo && l.monto > 0)
+          .map((l) => ({
+            metodo_pago_id: l.metodo!.id,
+            monto: l.monto,
+          }));
+      }
+
       const res = await fetch("/api/ventas", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          cliente_id: esCredito ? parseInt(clienteId, 10) : null,
-          tipo_pago: esCredito ? "Credito" : "Contado",
+          cliente_id: clienteId ? parseInt(clienteId, 10) : null,
+          tipo_pago: isCreditoFinal ? "Credito" : "Contado",
           moneda_id: moneda?.id,
-          metodo_pago_id: metodoPagoSeleccionado,
-          // Dinero que entra a la caja: el total (contado) o el pago parcial
-          caja_id: pagadoTotal > 0 ? cajaSeleccionada : null,
+          metodo_pago_id: metodoIdFinal,
+          caja_id: montoPagadoFinal > 0 ? cajaSeleccionada : null,
           descuento,
-          // Pago mixto: cada línea con su método/moneda; el servidor convierte,
-          // aplica al saldo y calcula el vuelto por línea
-          pagos: pagosResueltos.filter((l) => l.metodo && l.monto > 0).map((l) => ({
-            metodo_pago_id: l.metodo!.id,
-            monto: l.monto,
-          })),
-          // Tasa personalizada (opcional); vacío = tasa por defecto de la moneda
+          pagos: pagosToSend,
           tasa: Number.isFinite(tasaCustomNum) && tasaCustomNum > 0 ? tasaCustomNum : null,
           items,
         }),
@@ -590,13 +612,14 @@ export default function PuntoDeVentaPage() {
 
       if (res.ok) {
         const data = await res.json();
-        // Prepare data for receipt printing
         const clienteObj = clientes.find((c) => c.id === parseInt(clienteId, 10));
+        const metodoObj = metodosPago.find((m) => m.id === metodoIdFinal);
+
         setLastSaleData({
           ventaNumero: data.venta?.numero || data.numero || "N/A",
           fecha: data.venta?.fecha || new Date().toISOString(),
           clienteNombre: clienteObj?.nombre || "Consumidor Final",
-          tipoPago: esCredito ? "Crédito" : "Contado",
+          tipoPago: isCreditoFinal ? "Crédito" : "Contado",
           monedaCodigo: monedaSeleccionada,
           monedaSimbolo: moneda?.simbolo || "$",
           tasaAplicada: tasaEfectiva,
@@ -605,17 +628,20 @@ export default function PuntoDeVentaPage() {
           impuesto: tax,
           descuento,
           total,
-          montoPagado: pagadoTotal,
-          deuda: deudaVenta,
-          // Desglose de pago mixto: entregado/vuelto por línea (cada moneda lo suyo)
-          pagos: pagosResueltos
-            .filter((l) => l.metodo && l.monto > 0)
-            .map((l) => ({
-              metodo: l.metodo!.nombre,
-              moneda: l.monedaLinea?.codigo || monedaSeleccionada,
-              monto: l.monto,
-              vuelto: l.vuelto,
-            })),
+          montoPagado: montoPagadoFinal,
+          deuda: deudaFinal,
+          pagos: isDirectCompleto
+            ? [{ metodo: metodoObj?.nombre || "Efectivo", moneda: monedaSeleccionada, monto: total, vuelto: 0 }]
+            : isDirectCredito
+              ? []
+              : pagosResueltos
+                  .filter((l) => l.metodo && l.monto > 0)
+                  .map((l) => ({
+                    metodo: l.metodo!.nombre,
+                    moneda: l.monedaLinea?.codigo || monedaSeleccionada,
+                    monto: l.monto,
+                    vuelto: l.vuelto,
+                  })),
         });
 
         setCart([]);
@@ -626,7 +652,7 @@ export default function PuntoDeVentaPage() {
         setTasaCustomStr("");
         setShowCheckout(false);
         setShowClienteModal(false);
-        setShowReceiptModal(true); // Open the receipt modal instead of just toast
+        setShowReceiptModal(true);
         
         // Refresh products stock
         const prodRes = await fetch("/api/productos?limit=1000");
@@ -946,410 +972,269 @@ export default function PuntoDeVentaPage() {
           open={showCheckout}
           onClose={cerrarCheckout}
           title="Finalizar Venta"
-          className="max-w-2xl w-[95vw]"
-          footer={
-            <>
-              <Button variant="outline" className="flex-1" onClick={cerrarCheckout}>Cancelar</Button>
-              <Button
-                className="flex-1"
-                onClick={handleCheckout}
-                disabled={
-                  submitting ||
-                  cart.length === 0 ||
-                  !metodoPagoSeleccionado ||
-                  lineasPagoInvalidas ||
-                  (esCredito && !clienteObj)
-                }
-              >
-                {submitting ? "Registrando..." : esCredito ? "Vender a Crédito" : "Registrar Venta"}
-              </Button>
-            </>
-          }
+          className="max-w-4xl w-[95vw]"
         >
-          <div className="space-y-4">
-            {/* Header / Resumen del Total */}
-            <div className="rounded-xl border border-border/80 bg-card p-4 shadow-sm space-y-3">
-              <div className="flex items-center justify-between">
-                <div>
-                  <span className="text-[11px] font-semibold text-muted-foreground uppercase tracking-wider">Total a Pagar ({monedaSeleccionada})</span>
-                  <p className="text-2xl font-bold font-mono text-primary mt-0.5">{fmt(total, monedaSeleccionada)}</p>
+          <div className="grid grid-cols-1 md:grid-cols-12 gap-6">
+            {/* COLUMNA IZQUIERDA: Desglose de Productos y Totales (md:col-span-5) */}
+            <div className="md:col-span-5 flex flex-col justify-between border-b md:border-b-0 md:border-r border-border pb-4 md:pb-0 md:pr-5">
+              <div className="space-y-3">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs font-bold uppercase tracking-wider text-muted-foreground">
+                    Resumen del Pedido
+                  </span>
+                  <span className="text-xs font-semibold px-2 py-0.5 rounded-full bg-primary/10 text-primary">
+                    {cart.reduce((s, c) => s + c.qty, 0)} ítem(s)
+                  </span>
                 </div>
-                <div className="text-right">
-                  <span className="text-[11px] font-semibold text-muted-foreground uppercase tracking-wider">Monto Ingresado</span>
-                  <p className="text-xl font-bold font-mono text-foreground mt-0.5">{fmt(pagadoTotal, monedaSeleccionada)}</p>
+
+                {/* Desglose de Productos */}
+                <div className="max-h-[300px] overflow-y-auto space-y-2 pr-1 divide-y divide-border/30 rounded-lg border border-border/60 bg-muted/20 p-2.5">
+                  {cart.map((c) => (
+                    <div key={`checkout-item-${c.product.id}`} className="pt-2 first:pt-0">
+                      <div className="flex justify-between items-start text-xs">
+                        <span className="font-semibold text-foreground line-clamp-1 flex-1 pr-2">
+                          {c.product.nombre}
+                        </span>
+                        <span className="font-mono font-semibold shrink-0">
+                          {fmt(getPrecio(c.product) * c.qty, monedaSeleccionada)}
+                        </span>
+                      </div>
+                      <div className="flex justify-between items-center text-[11px] text-muted-foreground mt-0.5">
+                        <span className="font-mono">{c.product.codigo}</span>
+                        <span>{c.qty} × {fmt(getPrecio(c.product), monedaSeleccionada)}</span>
+                      </div>
+                    </div>
+                  ))}
                 </div>
               </div>
 
-              {/* Indicador de Estado (Vuelto, Pago Completo o Deuda) */}
-              <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-border/50">
-                <span className="text-xs text-muted-foreground">{cart.reduce((s, c) => s + c.qty, 0)} ítem(s) en carrito</span>
-                {deudaVenta <= 0.009 && pagosResueltos.some(l => l.vuelto > 0.009) ? (
-                  <span className="rounded-lg bg-info-soft border border-info-border px-3 py-1 text-xs font-bold text-info-strong flex items-center gap-1.5">
-                    💵 Vuelto: {fmt(pagosResueltos.reduce((s, l) => s + l.vuelto, 0), monedaSeleccionada)}
-                  </span>
-                ) : deudaVenta <= 0.009 ? (
-                  <span className="rounded-lg bg-success-soft border border-success-border px-3 py-1 text-xs font-bold text-success-strong flex items-center gap-1.5">
-                    <Check size={14} /> Pago Completo
-                  </span>
-                ) : (
-                  <span className="rounded-lg bg-warning-soft border border-warning-border px-3 py-1 text-xs font-bold text-warning-strong flex items-center gap-1.5">
-                    ⚠️ Deuda a Crédito: {fmt(deudaVenta, monedaSeleccionada)}
-                  </span>
+              {/* Totales y Descuento */}
+              <div className="mt-4 pt-3 border-t border-border space-y-2 text-xs">
+                <div className="flex justify-between text-muted-foreground">
+                  <span>Subtotal</span>
+                  <span className="font-mono">{fmt(subtotal, monedaSeleccionada)}</span>
+                </div>
+                {tax > 0 && (
+                  <div className="flex justify-between text-muted-foreground">
+                    <span>IVA (16%)</span>
+                    <span className="font-mono">{fmt(tax, monedaSeleccionada)}</span>
+                  </div>
                 )}
-              </div>
-            </div>
-
-            {/* Acciones Rápidas de Cobro */}
-            <div className="space-y-1.5">
-              <Label className="text-xs font-semibold text-muted-foreground">Acciones rápidas de cobro</Label>
-              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="sm"
-                  className="h-9 font-semibold text-xs border-primary/40 text-primary hover:bg-primary/10"
-                  onClick={setPagarCompleto}
-                >
-                  💵 Pagar Completo
-                </Button>
-
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="sm"
-                  className="h-9 font-semibold text-xs border-warning-strong/40 text-warning-strong hover:bg-warning-soft"
-                  onClick={setCreditoTotal}
-                >
-                  📝 Todo a Crédito
-                </Button>
-
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="sm"
-                  className="h-9 font-mono text-xs"
-                  onClick={() => addQuickMonto(10)}
-                >
-                  +$10 / 10
-                </Button>
-
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="sm"
-                  className="h-9 font-mono text-xs"
-                  onClick={() => addQuickMonto(50)}
-                >
-                  +$50 / 50
-                </Button>
-              </div>
-            </div>
-
-            <Field label={esCredito ? "Cliente (obligatorio para venta a crédito)" : "Cliente (opcional)"}>
-              <div className="flex items-center gap-2">
-                <div className="flex-1">
-                  <Combobox
-                    value={String(clienteId)}
-                    onChange={setClienteId}
-                    placeholder="Consumidor Final"
-                    options={[
-                      { value: "", label: "Consumidor Final" },
-                      ...clientes.map((c) => ({
-                        value: String(c.id),
-                        label: `${c.nombre} ${c.documento ? `— ${c.documento}` : ""}`,
-                      })),
-                    ]}
+                <div className="flex items-center justify-between text-muted-foreground">
+                  <span>Descuento ({monedaSeleccionada})</span>
+                  <Input
+                    className="w-20 h-6 text-right font-mono text-xs p-1"
+                    value={descuentoStr}
+                    placeholder="0.00"
+                    onChange={(e) => {
+                      setDescuentoStr(e.target.value);
+                      const val = parseFloat(e.target.value);
+                      setDescuento(isNaN(val) ? 0 : val);
+                    }}
                   />
                 </div>
-                <Button variant="outline" size="icon" className="h-9 w-9 shrink-0" onClick={() => setShowClienteModal(true)} title="Nuevo Cliente">
-                  <UserPlus size={16} className="text-primary" />
-                </Button>
-              </div>
-            </Field>
 
-            {esCredito && clienteObj && (
-              <div className={`rounded-lg border px-3 py-2.5 text-xs ${!clienteObj.recibe_credito ? "border-danger/20 bg-danger-soft text-danger" : "border-warning/20 bg-warning-soft text-warning-strong"}`}>
-                {!clienteObj.recibe_credito ? (
-                  <div className="flex items-start gap-2">
-                    <X size={14} className="mt-0.5 shrink-0" />
-                    <div>
-                      <p className="font-semibold">Este cliente no tiene crédito habilitado</p>
-                      <p className="mt-0.5 text-[11px] opacity-80">
-                        Actívalo en Clientes → Editar para poder venderle a crédito.
-                      </p>
-                    </div>
+                <div className="flex justify-between items-baseline pt-2 border-t border-border/80">
+                  <span className="font-bold text-sm text-foreground">TOTAL A PAGAR</span>
+                  <div className="text-right">
+                    <span className="text-2xl font-bold font-mono text-primary block">
+                      {fmt(total, monedaSeleccionada)}
+                    </span>
                   </div>
-                ) : (
-                  <div className="flex flex-col gap-2.5">
-                    {/* 1) Deuda del cliente: una línea por moneda */}
-                    <div>
-                      <div className="flex items-baseline justify-between gap-2">
-                        <span className="text-[10px] font-bold uppercase tracking-wider opacity-70">
-                          Deuda del cliente
-                        </span>
-                        {monedaSeleccionada && (
-                          <span className="text-[10px] opacity-60">esta venta en {monedaSeleccionada}</span>
-                        )}
-                      </div>
-                      <div className="mt-1 flex flex-wrap gap-1.5">
-                        {lineasDeuda.length > 0 ? (
-                          lineasDeuda.map((d) => (
-                            <span
-                              key={d.codigo}
-                              className={`rounded-md border px-1.5 py-0.5 font-mono text-[11px] font-semibold ${
-                                d.codigo === monedaSeleccionada
-                                  ? "border-warning-strong/50 bg-card/80"
-                                  : "border-border/50 bg-card/50"
-                              }`}
-                            >
-                              {fmt(d.monto, d.codigo)}
-                            </span>
-                          ))
-                        ) : (
-                          <span className="font-semibold">Sin deuda</span>
-                        )}
+                </div>
+              </div>
+            </div>
+
+            {/* COLUMNA DERECHA: Cliente, Métodos de Pago y Botones Directos (md:col-span-7) */}
+            <div className="md:col-span-7 space-y-4">
+              {/* Cliente Selector */}
+              <Field label="Cliente de la Venta">
+                <div className="flex items-center gap-2">
+                  <div className="flex-1">
+                    <Combobox
+                      value={String(clienteId)}
+                      onChange={setClienteId}
+                      placeholder="Consumidor Final"
+                      options={[
+                        { value: "", label: "Consumidor Final" },
+                        ...clientes.map((c) => ({
+                          value: String(c.id),
+                          label: `${c.nombre} ${c.documento ? `— ${c.documento}` : ""}`,
+                        })),
+                      ]}
+                    />
+                  </div>
+                  <Button variant="outline" size="icon" className="h-9 w-9 shrink-0" onClick={() => setShowClienteModal(true)} title="Nuevo Cliente">
+                    <UserPlus size={16} className="text-primary" />
+                  </Button>
+                </div>
+              </Field>
+
+              {/* Informaciones de Crédito si aplica */}
+              {esCredito && clienteObj && (
+                <div className={`rounded-lg border px-3 py-2 text-xs ${!clienteObj.recibe_credito ? "border-danger/20 bg-danger-soft text-danger" : "border-warning/20 bg-warning-soft text-warning-strong"}`}>
+                  {!clienteObj.recibe_credito ? (
+                    <div className="flex items-start gap-2">
+                      <X size={14} className="mt-0.5 shrink-0" />
+                      <div>
+                        <p className="font-semibold">Este cliente no tiene crédito habilitado</p>
+                        <p className="mt-0.5 text-[11px] opacity-80">
+                          Actívalo en Clientes → Editar para poder venderle a crédito.
+                        </p>
                       </div>
                     </div>
-
-                    {/* 2) Límite y disponible en la moneda de esta venta */}
-                    <div className="divide-y divide-warning-border/50 overflow-hidden rounded-md border border-warning-border/70 bg-card/70">
-                      <div className="flex items-center justify-between px-2.5 py-1.5">
-                        <span className="text-muted-foreground">Límite en {monedaSeleccionada}</span>
-                        <span className="font-mono font-semibold">{fmt(limiteMoneda, monedaSeleccionada)}</span>
+                  ) : (
+                    <div className="flex flex-col gap-1.5">
+                      <div className="flex items-center justify-between">
+                        <span className="text-[10px] font-bold uppercase tracking-wider opacity-70">Deuda actual:</span>
+                        <span className="font-mono font-semibold">{fmt(deudaMoneda, monedaSeleccionada)}</span>
                       </div>
-                      <div className="flex items-center justify-between px-2.5 py-1.5">
-                        <span className="font-semibold">Disponible</span>
-                        <span
-                          className={`font-mono text-sm font-bold ${
-                            disponibleCredito > 0 ? "text-success-strong" : "text-danger-strong"
-                          }`}
-                        >
+                      <div className="flex items-center justify-between">
+                        <span className="text-[10px] font-bold uppercase tracking-wider opacity-70">Crédito disponible:</span>
+                        <span className={`font-mono font-bold ${disponibleCredito > 0 ? "text-success-strong" : "text-danger-strong"}`}>
                           {fmt(disponibleCredito, monedaSeleccionada)}
                         </span>
                       </div>
                     </div>
-
-                    {/* 3) Avisos de crédito */}
-                    {limiteMoneda <= 0 && (
-                      <div className="flex items-center gap-1.5 rounded-md border border-danger/30 bg-danger-soft px-2.5 py-1.5 text-[11px] font-semibold text-danger-strong">
-                        <X size={13} className="shrink-0" />
-                        Sin crédito habilitado en {monedaSeleccionada}
-                      </div>
-                    )}
-                    {limiteMoneda > 0 && deudaVenta - disponibleCredito > 0.009 && (
-                      <div className="flex items-center gap-1.5 rounded-md border border-danger/30 bg-danger-soft px-2.5 py-1.5 text-[11px] font-semibold text-danger-strong">
-                        <X size={13} className="shrink-0" />
-                        Supera el disponible en {monedaSeleccionada}: faltan{" "}
-                        {fmt(deudaVenta - disponibleCredito, monedaSeleccionada)}
-                      </div>
-                    )}
-
-                    {/* 4) Ajustar límite */}
-                    <div>
-                      <span className="text-[10px] font-bold uppercase tracking-wider opacity-70">
-                        Ajustar límite en {monedaSeleccionada}
-                      </span>
-                      <div className="mt-1 flex flex-wrap items-center gap-2">
-                        <Input
-                          className="h-9 w-36 text-right font-mono"
-                          type="number"
-                          min={0}
-                          step="0.01"
-                          value={ajusteLimite}
-                          onChange={(e) => setAjusteLimite(e.target.value)}
-                          placeholder="0.00"
-                          disabled={ajustandoLimite}
-                          aria-label={`Monto para subir o bajar el límite en ${monedaSeleccionada}`}
-                        />
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          className="h-9 w-9 shrink-0 p-0 text-base font-bold"
-                          disabled={ajustandoLimite}
-                          onClick={() => ajustarLimite(-1)}
-                          title="Bajar el límite de crédito"
-                        >
-                          −
-                        </Button>
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          className="h-9 w-9 shrink-0 p-0 text-base font-bold"
-                          disabled={ajustandoLimite}
-                          onClick={() => ajustarLimite(1)}
-                          title="Subir el límite de crédito"
-                        >
-                          +
-                        </Button>
-                      </div>
-                      <p className="mt-1 text-[10px] leading-tight opacity-70">
-                        Escribe un monto y usa − o + para bajar o subir el límite de este cliente.
-                      </p>
-                    </div>
-                  </div>
-                )}
-              </div>
-            )}
-
-            <div className="flex items-center justify-between text-sm text-muted-foreground mt-2">
-              <span>Descuento ({monedaSeleccionada})</span>
-              <Input
-                className="w-24 h-7 text-right font-mono"
-                value={descuentoStr}
-                placeholder="0.00"
-                onChange={(e) => {
-                  setDescuentoStr(e.target.value);
-                  const val = parseFloat(e.target.value);
-                  setDescuento(isNaN(val) ? 0 : val);
-                }}
-              />
-            </div>
-
-            <div className="flex justify-between text-sm text-muted-foreground">
-              <span>Subtotal</span>
-              <span className="font-mono">{fmt(subtotal, monedaSeleccionada)}</span>
-            </div>
-            
-            <div className="flex justify-between text-sm text-muted-foreground">
-              <span>IVA (16%)</span>
-              <span className="font-mono">{fmt(tax, monedaSeleccionada)}</span>
-            </div>
-            
-            <div className="flex justify-between border-t border-border pt-2 text-base font-semibold">
-              <span>Total ({monedaSeleccionada})</span>
-              <span className="font-mono text-primary text-lg">{fmt(total, monedaSeleccionada)}</span>
-            </div>
-
-            {/* ── Pagos: una o varias líneas, cada una en su moneda ── */}
-            <div>
-              <div className="flex items-center justify-between">
-                <Label>Pagos {monedaSeleccionada ? `(${monedaSeleccionada} de la venta)` : ""}</Label>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  className="h-7 gap-1 px-2 text-xs"
-                  onClick={() => setLineasPago((prev) => [...prev, nuevaLineaPago()])}
-                >
-                  <Plus size={13} /> Agregar pago
-                </Button>
-              </div>
-
-              <div className="mt-2 space-y-2">
-                {pagosResueltos.map((l) => {
-                  const lineaInput = lineasPago.find((p) => p.key === l.key);
-                  const codLinea = l.monedaLinea?.codigo || monedaSeleccionada;
-                  return (
-                    <div key={l.key} className="rounded-lg border border-border/60 bg-muted/20 px-2.5 py-2">
-                      <div className="flex items-center gap-2">
-                        <MetodoPagoSelect
-                          metodos={metodosPago}
-                          value={l.metodo?.id ?? null}
-                          onChange={(id) =>
-                            setLineasPago((prev) =>
-                              prev.map((p) => (p.key === l.key ? { ...p, metodoId: id } : p))
-                            )
-                          }
-                          className="h-9 min-w-0 flex-1"
-                          triggerClassName="bg-card"
-                          placeholder="Seleccione método"
-                          ariaLabel="Método de pago de la línea"
-                        />
-                        <Input
-                          className="h-9 w-32 text-right font-mono"
-                          type="number"
-                          step="any"
-                          min="0"
-                          value={lineaInput?.montoStr ?? ""}
-                          placeholder="el resto"
-                          onChange={(e) => {
-                            const v = e.target.value;
-                            setLineasPago((prev) => prev.map((p) => (p.key === l.key ? { ...p, montoStr: v } : p)));
-                          }}
-                          aria-label={`Monto entregado en ${codLinea || "la moneda del método"}`}
-                        />
-                        {pagosResueltos.length > 1 && (
-                          <button
-                            onClick={() => setLineasPago((prev) => prev.filter((p) => p.key !== l.key))}
-                            className="rounded-md p-1.5 text-muted-foreground transition-colors hover:bg-danger-soft hover:text-danger"
-                            title="Quitar línea de pago"
-                          >
-                            <X size={14} />
-                          </button>
-                        )}
-                      </div>
-
-                      {/* Qué moneda entra, cuánto aplica a la venta y qué vuelto da */}
-                      <div className="mt-1.5 flex flex-wrap items-center gap-1.5 text-[11px]">
-                        <span className="font-mono font-semibold">
-                          {fmt(l.monto, codLinea)}
-                          {l.vacio ? " (el resto)" : ""}
-                        </span>
-                        {!l.vacio && l.monto > 0 && codLinea !== monedaSeleccionada && (
-                          <span className="text-muted-foreground">≈ {fmt(l.montoVenta, monedaSeleccionada)}</span>
-                        )}
-                        {l.aplicado > 0.009 && (
-                          <span className="rounded-md border border-success-border bg-success-soft px-1.5 py-0.5 font-semibold text-success-strong">
-                            Aplica {fmt(l.aplicado, monedaSeleccionada)}
-                          </span>
-                        )}
-                        {l.vuelto > 0.009 && (
-                          <span className="rounded-md border border-info-border bg-info-soft px-1.5 py-0.5 font-semibold text-info-strong">
-                            Vuelto {fmt(l.vuelto, codLinea)}
-                          </span>
-                        )}
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-
-              {/* Resumen del cobro */}
-              <div className="mt-2 flex flex-wrap items-center gap-1.5 text-[11px]">
-                <span className="rounded-md border border-border bg-card px-2 py-0.5 font-semibold">
-                  Pagado: {fmt(pagadoTotal, monedaSeleccionada)}
-                </span>
-                {deudaVenta > 0.009 ? (
-                  <span className="rounded-md border border-warning-border bg-warning-soft px-2 py-0.5 font-semibold text-warning-strong">
-                    Deuda restante: {fmt(deudaVenta, monedaSeleccionada)}
-                  </span>
-                ) : (
-                  <span className="rounded-md border border-success-border bg-success-soft px-2 py-0.5 font-semibold text-success-strong">
-                    Pago completo
-                  </span>
-                )}
-              </div>
-              <p className="mt-1 text-[11px] leading-tight text-muted-foreground">
-                Deja el monto vacío para pagar el resto; «0» no aporta nada. Si una línea excede lo que falta,
-                el vuelto se entrega en la moneda de esa línea.
-              </p>
-            </div>
-
-            <div className="space-y-2 pt-2">
-              {esCredito && (
-                <p className="rounded-lg border border-border/60 bg-muted/30 px-3 py-2 text-xs text-muted-foreground">
-                  La parte no pagada se registra como deuda del cliente en {monedaSeleccionada}. Podrás cobrarla desde el módulo de Créditos.
-                </p>
-              )}
-
-              {monedaSeleccionada && (
-                <div>
-                  <div className="flex items-center justify-between text-sm text-muted-foreground">
-                    <span>Tasa {monedaSeleccionada} (opcional)</span>
-                    <Input
-                      className="w-28 h-7 text-right font-mono"
-                      type="number"
-                      step="any"
-                      min="0"
-                      value={tasaCustomStr}
-                      placeholder={tasaPorDefecto}
-                      onChange={(e) => setTasaCustomStr(e.target.value)}
-                    />
-                  </div>
-                  <p className="mt-1 text-[11px] leading-tight text-muted-foreground">
-                    Vacío = tasa por defecto ({tasaPorDefecto}). Al cambiarla se recalculan los precios en pantalla.
-                  </p>
+                  )}
                 </div>
               )}
+
+              {/* Sección de Métodos de Pago */}
+              <div className="space-y-2 bg-card border border-border/80 rounded-xl p-3 shadow-xs">
+                <div className="flex items-center justify-between">
+                  <Label className="text-xs font-semibold">Método de Pago</Label>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="h-7 gap-1 px-2 text-[11px]"
+                    onClick={() => setLineasPago((prev) => [...prev, nuevaLineaPago()])}
+                  >
+                    <Plus size={12} /> Agregar línea
+                  </Button>
+                </div>
+
+                <div className="space-y-2">
+                  {pagosResueltos.map((l) => {
+                    const lineaInput = lineasPago.find((p) => p.key === l.key);
+                    const codLinea = l.monedaLinea?.codigo || monedaSeleccionada;
+                    return (
+                      <div key={l.key} className="rounded-lg border border-border/60 bg-muted/30 px-2.5 py-2">
+                        <div className="flex items-center gap-2">
+                          <MetodoPagoSelect
+                            metodos={metodosPago}
+                            value={l.metodo?.id ?? null}
+                            onChange={(id) =>
+                              setLineasPago((prev) =>
+                                prev.map((p) => (p.key === l.key ? { ...p, metodoId: id } : p))
+                              )
+                            }
+                            className="h-9 min-w-0 flex-1"
+                            triggerClassName="bg-card"
+                            placeholder="Seleccione método"
+                            ariaLabel="Método de pago de la línea"
+                          />
+                          <Input
+                            className="h-9 w-28 text-right font-mono text-xs"
+                            type="number"
+                            step="any"
+                            min="0"
+                            value={lineaInput?.montoStr ?? ""}
+                            placeholder="el resto"
+                            onChange={(e) => {
+                              const v = e.target.value;
+                              setLineasPago((prev) => prev.map((p) => (p.key === l.key ? { ...p, montoStr: v } : p)));
+                            }}
+                          />
+                          {pagosResueltos.length > 1 && (
+                            <button
+                              onClick={() => setLineasPago((prev) => prev.filter((p) => p.key !== l.key))}
+                              className="rounded-md p-1.5 text-muted-foreground hover:bg-danger-soft hover:text-danger cursor-pointer"
+                              title="Quitar línea"
+                            >
+                              <X size={14} />
+                            </button>
+                          )}
+                        </div>
+
+                        <div className="mt-1 flex items-center justify-between text-[11px]">
+                          <span className="font-mono text-muted-foreground">
+                            Ingresado: {fmt(l.monto, codLinea)}
+                          </span>
+                          {l.vuelto > 0.009 && (
+                            <span className="font-semibold text-info-strong bg-info-soft px-1.5 rounded">
+                              Vuelto: {fmt(l.vuelto, codLinea)}
+                            </span>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+
+                <div className="flex items-center justify-between pt-1 text-xs">
+                  <span className="text-muted-foreground">Monto Ingresado:</span>
+                  <span className="font-mono font-bold text-foreground">{fmt(pagadoTotal, monedaSeleccionada)}</span>
+                </div>
+              </div>
+
+              {/* Tasa de Cambio Personalizada (Opcional) */}
+              {monedaSeleccionada && (
+                <div className="flex items-center justify-between text-xs text-muted-foreground">
+                  <span>Tasa {monedaSeleccionada} (opcional)</span>
+                  <Input
+                    className="w-24 h-7 text-right font-mono text-xs"
+                    type="number"
+                    step="any"
+                    min="0"
+                    value={tasaCustomStr}
+                    placeholder={tasaPorDefecto}
+                    onChange={(e) => setTasaCustomStr(e.target.value)}
+                  />
+                </div>
+              )}
+
+              {/* BOTONES PRINCIPALES DE ACCIÓN DIRECTA DE COBRO */}
+              <div className="pt-2 space-y-2">
+                <div className="grid grid-cols-2 gap-3">
+                  {/* Botón Verde Claro: Pagar Completo (sin icono) */}
+                  <button
+                    type="button"
+                    disabled={submitting || cart.length === 0}
+                    onClick={() => handleCheckout("completo")}
+                    className="w-full h-14 bg-emerald-500 hover:bg-emerald-600 active:scale-[0.98] text-white font-bold text-base rounded-xl shadow-md transition-all disabled:opacity-50 cursor-pointer flex items-center justify-center"
+                  >
+                    {submitting ? "Procesando..." : "Pagar Completo"}
+                  </button>
+
+                  {/* Botón Rojo Claro: Todo a Crédito (sin icono) */}
+                  <button
+                    type="button"
+                    disabled={submitting || cart.length === 0}
+                    onClick={() => handleCheckout("credito")}
+                    className="w-full h-14 bg-rose-500 hover:bg-rose-600 active:scale-[0.98] text-white font-bold text-base rounded-xl shadow-md transition-all disabled:opacity-50 cursor-pointer flex items-center justify-center"
+                  >
+                    {submitting ? "Procesando..." : "Todo a Crédito"}
+                  </button>
+                </div>
+
+                {/* Si ingresó montos manuales mixtos, botón secundario de confirmación */}
+                {lineasPago.some((p) => p.montoStr !== "") && (
+                  <Button
+                    variant="outline"
+                    className="w-full h-10 font-semibold text-xs border-primary/40 text-primary"
+                    disabled={submitting || cart.length === 0 || lineasPagoInvalidas || (esCredito && !clienteObj)}
+                    onClick={() => handleCheckout()}
+                  >
+                    Registrar Pago Personalizado ({fmt(pagadoTotal, monedaSeleccionada)})
+                  </Button>
+                )}
+
+                {/* Opción de cancelar */}
+                <Button variant="outline" className="w-full h-9 text-xs" onClick={cerrarCheckout} disabled={submitting}>
+                  Cancelar
+                </Button>
+              </div>
             </div>
           </div>
         </Modal>
