@@ -189,6 +189,7 @@ async function startNextServer(databaseUrl) {
     DATABASE_URL: databaseUrl,
     BETTER_AUTH_SECRET: authSecret,
     BETTER_AUTH_URL: appUrl,
+    USER_DATA_PATH: app.getPath('userData'),
     PORT: String(port),
     HOSTNAME: '127.0.0.1',
     NODE_ENV: 'production',

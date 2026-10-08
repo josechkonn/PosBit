@@ -536,7 +536,12 @@ export function ProductoModal({ open, mode, producto, monedas: monedasProp, defa
           const imgFormData = new FormData();
           imgFormData.append("file", pendingImageFile);
           imgFormData.append("producto_id", data.id.toString());
-          await fetch("/api/productos/imagen", { method: "POST", body: imgFormData });
+          const imgRes = await fetch("/api/productos/imagen", { method: "POST", body: imgFormData });
+          if (!imgRes.ok) {
+            const imgErr = await imgRes.json().catch(() => ({}));
+            console.error("Error al subir imagen del producto:", imgErr);
+            throw new Error(imgErr.error || "Se creó el producto pero falló la carga de la imagen");
+          }
         }
       } else if (mode === "edit" && producto) {
         body.id = producto.id;

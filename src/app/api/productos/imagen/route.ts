@@ -6,6 +6,13 @@ import { writeFile, mkdir } from "fs/promises";
 import { join } from "path";
 import { queryOne } from "@/lib/db";
 
+function getUploadDir() {
+  if (process.env.USER_DATA_PATH) {
+    return join(process.env.USER_DATA_PATH, "uploads", "images", "productos");
+  }
+  return join(process.cwd(), "public", "images", "productos");
+}
+
 export async function POST(request: Request) {
   try {
     await requireSession();
@@ -38,7 +45,7 @@ export async function POST(request: Request) {
     // Generate filename
     const ext = file.name.split(".").pop() || "jpg";
     const filename = `prod-${productoId}-${Date.now()}.${ext}`;
-    const uploadDir = join(process.cwd(), "public", "images", "productos");
+    const uploadDir = getUploadDir();
 
     // Ensure directory exists
     await mkdir(uploadDir, { recursive: true });
@@ -78,13 +85,21 @@ export async function DELETE(request: Request) {
     }
 
     if (producto.imagen) {
-      // Remove image file
-      const filePath = join(process.cwd(), "public", producto.imagen);
-      try {
+      // Remove image file from both locations if present
+      const filename = producto.imagen.split("/").pop();
+      if (filename) {
         const { unlink } = await import("fs/promises");
-        await unlink(filePath);
-      } catch {
-        // File might not exist, ignore
+        const paths = [
+          join(getUploadDir(), filename),
+          join(process.cwd(), "public", "images", "productos", filename),
+        ];
+        for (const p of paths) {
+          try {
+            await unlink(p);
+          } catch {
+            // File might not exist in this location, ignore
+          }
+        }
       }
 
       // Clear image from DB

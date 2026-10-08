@@ -109,6 +109,16 @@ interface HeldCart {
   timestamp: string;
 }
 
+function deduplicateById<T extends { id: any }>(list: T[]): T[] {
+  const seen = new Set<string>();
+  return list.filter((item) => {
+    const idStr = String(item.id);
+    if (seen.has(idStr)) return false;
+    seen.add(idStr);
+    return true;
+  });
+}
+
 export default function PuntoDeVentaPage() {
   const { toast } = useToast();
 
@@ -196,7 +206,7 @@ export default function PuntoDeVentaPage() {
     const fetchData = async () => {
       try {
         const [prodRes, metodosRes, cajasRes] = await Promise.all([
-          fetch("/api/productos"),
+          fetch("/api/productos?limit=1000"),
           fetch("/api/metodos-pago"),
           fetch("/api/cajas"),
         ]);
@@ -204,7 +214,7 @@ export default function PuntoDeVentaPage() {
         await fetchClientes();
 
         const prodData = await prodRes.json();
-        setProductos(prodData.productos || []);
+        setProductos(deduplicateById(prodData.productos || []));
         setMonedas(prodData.monedas || []);
 
         const metodosData = await metodosRes.json();
@@ -365,55 +375,60 @@ export default function PuntoDeVentaPage() {
   }, [monedas, monedaSeleccionada]);
 
   const addToCart = (p: Producto) => {
-    const item = cart.find((c) => c.product.id === p.id);
-    if (item) {
-      if (item.qty + 1 > p.stock) {
-        toast(`Las existencias máximas para ${p.nombre} son ${p.stock}`, "warning");
-        return;
+    const targetId = String(p.id);
+    setCart((prev) => {
+      const existing = prev.find((c) => String(c.product.id) === targetId);
+      if (existing) {
+        if (existing.qty + 1 > p.stock) {
+          toast(`Las existencias máximas para ${p.nombre} son ${p.stock}`, "warning");
+          return prev;
+        }
+        return prev.map((c) =>
+          String(c.product.id) === targetId ? { ...c, qty: c.qty + 1 } : c
+        );
       }
-      setCart((prev) =>
-        prev.map((c) => (c.product.id === p.id ? { ...c, qty: c.qty + 1 } : c))
-      );
-    } else {
-      setCart((prev) => [...prev, { product: p, qty: 1 }]);
-    }
+      return [...prev, { product: p, qty: 1 }];
+    });
   };
 
-  const removeFromCart = (id: number) => setCart((prev) => prev.filter((c) => c.product.id !== id));
+  const removeFromCart = (id: number | string) =>
+    setCart((prev) => prev.filter((c) => String(c.product.id) !== String(id)));
 
-  const updateQty = (id: number, delta: number) => {
-    const item = cart.find((c) => c.product.id === id);
-    if (!item) return;
-
-    const nextQty = Math.max(1, item.qty + delta);
-    if (nextQty > item.product.stock) {
-      toast(`Las existencias máximas para ${item.product.nombre} son ${item.product.stock}`, "warning");
-      setCart((prev) =>
-        prev.map((c) => (c.product.id === id ? { ...c, qty: item.product.stock } : c))
+  const updateQty = (id: number | string, delta: number) => {
+    const targetId = String(id);
+    setCart((prev) => {
+      const item = prev.find((c) => String(c.product.id) === targetId);
+      if (!item) return prev;
+      const nextQty = Math.max(1, item.qty + delta);
+      if (nextQty > item.product.stock) {
+        toast(`Las existencias máximas para ${item.product.nombre} son ${item.product.stock}`, "warning");
+        return prev.map((c) =>
+          String(c.product.id) === targetId ? { ...c, qty: item.product.stock } : c
+        );
+      }
+      return prev.map((c) =>
+        String(c.product.id) === targetId ? { ...c, qty: nextQty } : c
       );
-      return;
-    }
-
-    setCart((prev) =>
-      prev.map((c) => (c.product.id === id ? { ...c, qty: nextQty } : c))
-    );
+    });
   };
 
-  const setDirectQty = (id: number, val: number) => {
-    const item = cart.find((c) => c.product.id === id);
-    if (!item) return;
+  const setDirectQty = (id: number | string, val: number) => {
+    const targetId = String(id);
+    setCart((prev) => {
+      const item = prev.find((c) => String(c.product.id) === targetId);
+      if (!item) return prev;
+      const parsed = isNaN(val) ? 1 : val;
+      let targetQty = Math.max(1, parsed);
 
-    const parsed = isNaN(val) ? 1 : val;
-    let targetQty = Math.max(1, parsed);
+      if (targetQty > item.product.stock) {
+        toast(`Las existencias máximas para ${item.product.nombre} son ${item.product.stock}`, "warning");
+        targetQty = item.product.stock;
+      }
 
-    if (targetQty > item.product.stock) {
-      toast(`Las existencias máximas para ${item.product.nombre} son ${item.product.stock}`, "warning");
-      targetQty = item.product.stock;
-    }
-
-    setCart((prev) =>
-      prev.map((c) => (c.product.id === id ? { ...c, qty: targetQty } : c))
-    );
+      return prev.map((c) =>
+        String(c.product.id) === targetId ? { ...c, qty: targetQty } : c
+      );
+    });
   };
 
   const subtotal = useMemo(() => cart.reduce((s, c) => s + getPrecio(c.product) * c.qty, 0), [cart, monedaSeleccionada, monedas, tasaCustomStr]);
@@ -425,6 +440,23 @@ export default function PuntoDeVentaPage() {
   }, [cart, monedaSeleccionada, monedas, tasaCustomStr]);
   
   const total = Math.max(0, subtotal - descuento + tax);
+
+  const setPagarCompleto = () => {
+    setLineasPago([{ key: 1, metodoId: metodoPagoSeleccionado, montoStr: String(total) }]);
+  };
+
+  const setCreditoTotal = () => {
+    setLineasPago([{ key: 1, metodoId: metodoPagoSeleccionado, montoStr: "0" }]);
+  };
+
+  const addQuickMonto = (monto: number) => {
+    setLineasPago((prev) => {
+      if (prev.length === 0) return [{ key: 1, metodoId: metodoPagoSeleccionado, montoStr: String(monto) }];
+      const currentNum = parseFloat(prev[0].montoStr) || 0;
+      const nextNum = Math.round((currentNum + monto) * 100) / 100;
+      return [{ ...prev[0], montoStr: String(nextNum) }, ...prev.slice(1)];
+    });
+  };
 
   // ═══════════ Pago mixto: líneas en varias monedas ═══════════
   // Cada línea se convierte a la moneda de la venta con la tasa efectiva del
@@ -597,10 +629,10 @@ export default function PuntoDeVentaPage() {
         setShowReceiptModal(true); // Open the receipt modal instead of just toast
         
         // Refresh products stock
-        const prodRes = await fetch("/api/productos");
+        const prodRes = await fetch("/api/productos?limit=1000");
         if (prodRes.ok) {
           const prodData = await prodRes.json();
-          setProductos(prodData.productos || []);
+          setProductos(deduplicateById(prodData.productos || []));
         }
 
         // Refrescar deudas y límites de crédito de los clientes
@@ -731,7 +763,7 @@ export default function PuntoDeVentaPage() {
             <div className="grid flex-1 content-start grid-cols-2 sm:grid-cols-3 xl:grid-cols-4 gap-3.5 overflow-y-auto pr-1">
               {filtered.map((p) => (
                 <button
-                  key={p.id}
+                  key={`catalog-${p.id}`}
                   onClick={() => addToCart(p)}
                   className="group flex flex-col justify-between rounded-xl border border-border bg-card p-3.5 text-left transition-all hover:border-primary hover:shadow-md w-full"
                 >
@@ -802,12 +834,42 @@ export default function PuntoDeVentaPage() {
               </div>
             </div>
 
+            {/* Selector de Cliente en Carrito de Venta (Consumidor Final por defecto) */}
+            <div className="border-b border-border bg-muted/20 px-4 py-2.5">
+              <div className="flex items-center gap-2">
+                <div className="flex-1">
+                  <Combobox
+                    value={String(clienteId)}
+                    onChange={setClienteId}
+                    placeholder="Consumidor Final"
+                    options={[
+                      { value: "", label: "Consumidor Final" },
+                      ...clientes.map((c) => ({
+                        value: String(c.id),
+                        label: `${c.nombre} ${c.documento ? `— ${c.documento}` : ""}`,
+                      })),
+                    ]}
+                    className="w-full"
+                  />
+                </div>
+                <Button
+                  variant="outline"
+                  size="icon"
+                  className="h-10 w-10 shrink-0 border-border bg-card hover:bg-muted"
+                  onClick={() => setShowClienteModal(true)}
+                  title="Registrar Nuevo Cliente"
+                >
+                  <UserPlus size={16} className="text-primary" />
+                </Button>
+              </div>
+            </div>
+
             <div className="flex-1 divide-y divide-border overflow-y-auto">
               {cart.length === 0 ? (
                 <EmptyState icon={ShoppingCart} message="Sin productos en el carrito" />
               ) : (
                 cart.map(({ product: p, qty }) => (
-                  <div key={p.id} className="flex items-center gap-3 px-5 py-3">
+                  <div key={`cart-${p.id}`} className="flex items-center gap-3 px-5 py-3">
                     <div className="min-w-0 flex-1">
                       <div className="truncate text-sm font-medium text-foreground">
                         {p.nombre}
@@ -905,50 +967,91 @@ export default function PuntoDeVentaPage() {
           }
         >
           <div className="space-y-4">
-            {/* Total a pagar */}
-            <div className="flex items-center justify-between rounded-xl border border-border/60 bg-muted/30 px-4 py-3">
-              <div>
-                <p className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground">Total a pagar</p>
-                <p className="mt-0.5 text-xs text-muted-foreground">
-                  {cart.reduce((s, c) => s + c.qty, 0)} producto(s) en el carrito
-                </p>
+            {/* Header / Resumen del Total */}
+            <div className="rounded-xl border border-border/80 bg-card p-4 shadow-sm space-y-3">
+              <div className="flex items-center justify-between">
+                <div>
+                  <span className="text-[11px] font-semibold text-muted-foreground uppercase tracking-wider">Total a Pagar ({monedaSeleccionada})</span>
+                  <p className="text-2xl font-bold font-mono text-primary mt-0.5">{fmt(total, monedaSeleccionada)}</p>
+                </div>
+                <div className="text-right">
+                  <span className="text-[11px] font-semibold text-muted-foreground uppercase tracking-wider">Monto Ingresado</span>
+                  <p className="text-xl font-bold font-mono text-foreground mt-0.5">{fmt(pagadoTotal, monedaSeleccionada)}</p>
+                </div>
               </div>
-              <p className="font-mono text-2xl font-bold text-primary">{fmt(total, monedaSeleccionada)}</p>
+
+              {/* Indicador de Estado (Vuelto, Pago Completo o Deuda) */}
+              <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-border/50">
+                <span className="text-xs text-muted-foreground">{cart.reduce((s, c) => s + c.qty, 0)} ítem(s) en carrito</span>
+                {deudaVenta <= 0.009 && pagosResueltos.some(l => l.vuelto > 0.009) ? (
+                  <span className="rounded-lg bg-info-soft border border-info-border px-3 py-1 text-xs font-bold text-info-strong flex items-center gap-1.5">
+                    💵 Vuelto: {fmt(pagosResueltos.reduce((s, l) => s + l.vuelto, 0), monedaSeleccionada)}
+                  </span>
+                ) : deudaVenta <= 0.009 ? (
+                  <span className="rounded-lg bg-success-soft border border-success-border px-3 py-1 text-xs font-bold text-success-strong flex items-center gap-1.5">
+                    <Check size={14} /> Pago Completo
+                  </span>
+                ) : (
+                  <span className="rounded-lg bg-warning-soft border border-warning-border px-3 py-1 text-xs font-bold text-warning-strong flex items-center gap-1.5">
+                    ⚠️ Deuda a Crédito: {fmt(deudaVenta, monedaSeleccionada)}
+                  </span>
+                )}
+              </div>
             </div>
 
-            {/* Forma de pago: preset rápido del monto pagado */}
-            <div>
-              <Label>Forma de pago</Label>
-              <div className="mt-1 grid grid-cols-2 gap-1 rounded-lg bg-muted p-1">
-                <button
-                  onClick={() => setLineasPago([nuevaLineaPago()])}
-                  className={`rounded-md py-1.5 text-xs font-semibold transition-colors ${
-                    !esCredito ? "bg-card text-primary shadow-sm" : "text-muted-foreground hover:text-foreground"
-                  }`}
+            {/* Acciones Rápidas de Cobro */}
+            <div className="space-y-1.5">
+              <Label className="text-xs font-semibold text-muted-foreground">Acciones rápidas de cobro</Label>
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  className="h-9 font-semibold text-xs border-primary/40 text-primary hover:bg-primary/10"
+                  onClick={setPagarCompleto}
                 >
-                  Contado
-                </button>
-                <button
-                  onClick={() => setLineasPago([nuevaLineaPago("0")])}
-                  className={`rounded-md py-1.5 text-xs font-semibold transition-colors ${
-                    esCredito ? "bg-card text-warning-strong shadow-sm" : "text-muted-foreground hover:text-foreground"
-                  }`}
+                  💵 Pagar Completo
+                </Button>
+
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  className="h-9 font-semibold text-xs border-warning-strong/40 text-warning-strong hover:bg-warning-soft"
+                  onClick={setCreditoTotal}
                 >
-                  Crédito
-                </button>
+                  📝 Todo a Crédito
+                </Button>
+
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  className="h-9 font-mono text-xs"
+                  onClick={() => addQuickMonto(10)}
+                >
+                  +$10 / 10
+                </Button>
+
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  className="h-9 font-mono text-xs"
+                  onClick={() => addQuickMonto(50)}
+                >
+                  +$50 / 50
+                </Button>
               </div>
-              <p className="mt-1 text-[11px] leading-tight text-muted-foreground">
-                «Contado» paga el total y «Crédito» deja todo como deuda. En «Pagos» puedes escribir montos
-                parciales o agregar líneas en otras monedas (pago mixto).
-              </p>
             </div>
-            <Field label={esCredito ? "Cliente (obligatorio)" : "Cliente (opcional)"}>
+
+            <Field label={esCredito ? "Cliente (obligatorio para venta a crédito)" : "Cliente (opcional)"}>
               <div className="flex items-center gap-2">
                 <div className="flex-1">
                   <Combobox
                     value={String(clienteId)}
                     onChange={setClienteId}
-                    placeholder="Buscar cliente..."
+                    placeholder="Consumidor Final"
                     options={[
                       { value: "", label: "Consumidor Final" },
                       ...clientes.map((c) => ({
@@ -958,8 +1061,8 @@ export default function PuntoDeVentaPage() {
                     ]}
                   />
                 </div>
-                <Button variant="outline" size="icon" className="h-9 w-9 flex-shrink-0" onClick={() => setShowClienteModal(true)} title="Nuevo Cliente">
-                  <UserPlus size={16} />
+                <Button variant="outline" size="icon" className="h-9 w-9 shrink-0" onClick={() => setShowClienteModal(true)} title="Nuevo Cliente">
+                  <UserPlus size={16} className="text-primary" />
                 </Button>
               </div>
             </Field>
@@ -1249,23 +1352,23 @@ export default function PuntoDeVentaPage() {
               )}
             </div>
           </div>
-
-          {/* Modal anidado: creación de cliente sobre el checkout */}
-          <ClienteModal
-            open={showClienteModal}
-            mode="create"
-            cliente={null}
-            onClose={() => setShowClienteModal(false)}
-            onSuccess={(msg, newClienteData) => {
-              toast(msg, "success");
-              fetchClientes().then(() => {
-                if (newClienteData && newClienteData.id) {
-                  setClienteId(String(newClienteData.id));
-                }
-              });
-            }}
-          />
         </Modal>
+
+        {/* Modal de creación de cliente (disponible desde Carrito de Venta y Checkout) */}
+        <ClienteModal
+          open={showClienteModal}
+          mode="create"
+          cliente={null}
+          onClose={() => setShowClienteModal(false)}
+          onSuccess={(msg, newClienteData) => {
+            toast(msg, "success");
+            fetchClientes().then(() => {
+              if (newClienteData && newClienteData.id) {
+                setClienteId(String(newClienteData.id));
+              }
+            });
+          }}
+        />
 
         {/* Hold Save Modal */}
         <Modal

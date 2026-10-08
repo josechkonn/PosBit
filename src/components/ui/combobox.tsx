@@ -48,9 +48,16 @@ export function Combobox({
   const dropdownRef = useRef<HTMLDivElement>(null);
 
   const selectedOption = options.find((o) => o.value === value);
-  const filtered = options.filter((o) =>
-    o.label.toLowerCase().includes(search.toLowerCase())
-  );
+  const cleanSearch = search.toLowerCase().replace(/[^a-z0-9]/g, "");
+  const filtered = options.filter((o) => {
+    const rawMatch = o.label.toLowerCase().includes(search.toLowerCase());
+    if (rawMatch) return true;
+    if (cleanSearch.length > 0) {
+      const cleanLabel = o.label.toLowerCase().replace(/[^a-z0-9]/g, "");
+      return cleanLabel.includes(cleanSearch);
+    }
+    return false;
+  });
 
   const updatePosition = useCallback(() => {
     const trigger = triggerRef.current;
