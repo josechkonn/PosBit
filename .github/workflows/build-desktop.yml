@@ -124,6 +124,8 @@ jobs:
         env:
           # Variables de entorno necesarias para el build (no se usan en runtime)
           DATABASE_URL: postgresql://postgres:postgres@localhost:5432/posbit
+          BETTER_AUTH_SECRET: build-time-placeholder-secret-not-used-at-runtime
+          BETTER_AUTH_URL: http://localhost:3000
           BUILD_STANDALONE: "1"
 
       # ---------------------------------------------------------------

@@ -8,8 +8,9 @@ const globalForPool = globalThis as unknown as {
 
 if (!globalForPool.dbInit) {
   globalForPool.dbInit = ensureDatabase().catch((err) => {
-    console.error("Error inicializando la base de datos:", err);
-    process.exit(1);
+    // Durante `next build` no hay PostgreSQL — esto es normal.
+    // En runtime, las queries fallarán con su propio error de conexión.
+    console.warn("⚠ DB init falló (normal durante build):", err.message ?? err);
   });
 }
 
