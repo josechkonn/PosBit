@@ -70,8 +70,6 @@ win:
         - x64
   icon: resources/icon.ico
   artifactName: "${productName}-Setup-${version}.${ext}"
-  # Generar blockmap para delta updates
-  differentialPackage: true
 
 nsis:
   oneClick: false
