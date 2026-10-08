@@ -101,7 +101,10 @@ class PostgresManager {
   /**
    * Espera a que PostgreSQL acepte conexiones TCP.
    */
-  _waitForReady(maxAttempts = 30) {
+  /**
+   * Espera a que PostgreSQL acepte conexiones TCP.
+   */
+  _waitForReady(maxAttempts = 100) {
     return new Promise((resolve, reject) => {
       let attempts = 0;
 
@@ -122,7 +125,7 @@ class PostgresManager {
           if (attempts >= maxAttempts) {
             reject(new Error(`PostgreSQL no respondió después de ${maxAttempts} intentos`));
           } else {
-            setTimeout(tryConnect, 500);
+            setTimeout(tryConnect, 200);
           }
         });
 
@@ -131,7 +134,7 @@ class PostgresManager {
           if (attempts >= maxAttempts) {
             reject(new Error(`PostgreSQL timeout después de ${maxAttempts} intentos`));
           } else {
-            setTimeout(tryConnect, 500);
+            setTimeout(tryConnect, 200);
           }
         });
 
@@ -160,32 +163,67 @@ class PostgresManager {
     await this._initDb();
     this._updatePort();
 
-    console.log(`[PG] Iniciando servidor en puerto ${this.port}...`);
+    console.log(`[PG] Verificando estado del servidor en puerto ${this.port}...`);
 
-    // Limpiar posible PID viejo (crash anterior)
+    // Limpiar posible PID viejo (crash anterior) de forma instantánea sin colgar la app
     const pidFile = path.join(this.dataDir, 'postmaster.pid');
+    let needsStart = true;
+
     if (fs.existsSync(pidFile)) {
       try {
-        await this._exec(this._bin('pg_ctl'), [
-          'stop', '-D', this.dataDir, '-m', 'fast', '-w',
-        ]);
-      } catch {
-        // Ignorar si no estaba corriendo
+        const content = fs.readFileSync(pidFile, 'utf-8');
+        const pidLine = content.split('\n')[0].trim();
+        const pid = parseInt(pidLine, 10);
+
+        let isAlive = false;
+        if (pid > 0) {
+          try {
+            process.kill(pid, 0);
+            isAlive = true;
+          } catch {
+            isAlive = false;
+          }
+        }
+
+        if (isAlive) {
+          try {
+            await this._waitForReady(5); // Probar si responde en 1s
+            console.log(`[PG] Servidor PostgreSQL ya estaba corriendo (PID ${pid})`);
+            needsStart = false;
+          } catch {
+            // No responde en el puerto, apagarlo inmediato
+            try {
+              await this._exec(this._bin('pg_ctl'), ['stop', '-D', this.dataDir, '-m', 'immediate']);
+            } catch {
+              /* ignore */
+            }
+            try { fs.unlinkSync(pidFile); } catch { /* ignore */ }
+          }
+        } else {
+          console.log(`[PG] Eliminando PID residual de proceso inactivo (${pid})`);
+          try { fs.unlinkSync(pidFile); } catch { /* ignore */ }
+        }
+      } catch (err) {
+        console.warn('[PG] Error verificando PID file:', err);
         try { fs.unlinkSync(pidFile); } catch { /* ignore */ }
       }
     }
 
-    // Iniciar con pg_ctl
-    await this._exec(this._bin('pg_ctl'), [
-      'start',
-      '-D', this.dataDir,
-      '-w',                // esperar a que arranque
-      '-t', '15',          // timeout 15 segundos
-      '-o', `-p ${this.port}`,
-      '-l', path.join(this.dataDir, 'server.log'),
-    ]);
+    if (needsStart) {
+      console.log(`[PG] Iniciando PostgreSQL en puerto ${this.port}...`);
+      try {
+        await this._exec(this._bin('pg_ctl'), [
+          'start',
+          '-D', this.dataDir,
+          '-o', `-p ${this.port}`,
+          '-l', path.join(this.dataDir, 'server.log'),
+        ]);
+      } catch (err) {
+        console.warn('[PG] pg_ctl start warning:', err.message);
+      }
 
-    await this._waitForReady();
+      await this._waitForReady(100);
+    }
 
     // Crear la base de datos 'posbit' solo en la primera inicialización
     if (!wasInitialized) {
