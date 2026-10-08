@@ -60,13 +60,16 @@ export async function POST(request: Request) {
   try {
     await requireSession();
     const body = await request.json();
-    const { cliente, cliente_id, tipo_pago, fecha, moneda_id, metodo_pago_id, caja_id, items, observaciones, descuento = 0, tasa: tasaCustom } = body;
+    const { cliente, cliente_id, tipo_pago, fecha, moneda_id, metodo_pago_id, caja_id, items, observaciones, descuento = 0, tasa: tasaCustom, monto_pagado } = body;
 
     if (!moneda_id || !items || items.length === 0) {
       return NextResponse.json({ error: "Campos requeridos: moneda_id, items" }, { status: 400 });
     }
 
-    const esCredito = tipo_pago === "Credito" || tipo_pago === "Crédito";
+    // Solo sirve de respaldo cuando no viene `monto_pagado` (compatibilidad):
+    // crédito = nada pagado, contado = total pagado. Con `monto_pagado` el tipo
+    // de venta se deriva de lo que falta por pagar (deuda > 0 = crédito).
+    const esCreditoSolicitado = tipo_pago === "Credito" || tipo_pago === "Crédito";
 
     const result = await transaction(async (client) => {
       const moneda = await client.query(`SELECT * FROM monedas WHERE id = $1`, [moneda_id]);
@@ -112,26 +115,6 @@ export async function POST(request: Request) {
         metodoRow = metodoRes.rows[0];
       }
 
-      if (esCredito) {
-        if (!clienteRow) {
-          throw new Error("Seleccione un cliente para la venta a crédito");
-        }
-        if (!clienteRow.recibe_credito) {
-          throw new Error(`${clienteRow.nombre} no tiene crédito habilitado`);
-        }
-        // El crédito se hace en la moneda de la venta (USD, VES o COP) y el
-        // método de pago debe estar en esa misma moneda
-        if (!metodoRow) {
-          throw new Error("Seleccione el método de pago de la venta a crédito");
-        }
-        if (!metodoRow.caja_moneda_id) {
-          throw new Error("El método de pago seleccionado no tiene una caja asignada");
-        }
-        if (Number(metodoRow.caja_moneda_id) !== Number(moneda_id)) {
-          throw new Error("El método de pago debe tener la misma moneda que el crédito");
-        }
-      }
-
       let subtotalTotal = 0;
       let impuestoTotal = 0;
 
@@ -167,8 +150,42 @@ export async function POST(request: Request) {
       const totalBase = aBase(total, tasaUsdVenta);
       const descuentoBase = aBase(descuento, tasaUsdVenta);
 
+      // ── Pago: cuánto aplica a esta venta y cuánto queda como deuda ──
+      // `monto_pagado` opcional (pago parcial): sin él se comporta como antes
+      // (crédito = 0 pagado, contado = total pagado). El exceso no se aplica.
+      const pagado =
+        monto_pagado !== undefined && monto_pagado !== null && Number.isFinite(Number(monto_pagado))
+          ? Math.min(Math.max(0, Number(monto_pagado)), total)
+          : esCreditoSolicitado
+            ? 0
+            : total;
+      const deuda = Math.max(0, Math.round((total - pagado) * 100) / 100);
+      const pagadoBase = aBase(pagado, tasaUsdVenta);
+      const deudaBase = aBase(deuda, tasaUsdVenta);
+      // Lo que falta por pagar convierte la venta en crédito (parcial o total)
+      const esCredito = deuda > 0.009;
+
       if (esCredito) {
-        // Límite de crédito por moneda: 0 = sin crédito en esa moneda
+        if (!clienteRow) {
+          throw new Error("Seleccione un cliente para la venta a crédito");
+        }
+        if (!clienteRow.recibe_credito) {
+          throw new Error(`${clienteRow.nombre} no tiene crédito habilitado`);
+        }
+        // El crédito se hace en la moneda de la venta (USD, VES o COP) y el
+        // método de pago debe estar en esa misma moneda
+        if (!metodoRow) {
+          throw new Error("Seleccione el método de pago de la venta a crédito");
+        }
+        if (!metodoRow.caja_moneda_id) {
+          throw new Error("El método de pago seleccionado no tiene una caja asignada");
+        }
+        if (Number(metodoRow.caja_moneda_id) !== Number(moneda_id)) {
+          throw new Error("El método de pago debe tener la misma moneda que el crédito");
+        }
+
+        // Límite de crédito por moneda: 0 = sin crédito en esa moneda.
+        // Se valida contra la deuda que queda (total − pago inicial).
         const codigoMoneda = String(moneda.rows[0].codigo || "").toUpperCase();
         const limiteRes = await client.query(
           `SELECT limite FROM cliente_limites_credito WHERE cliente_id = $1 AND moneda_id = $2`,
@@ -185,9 +202,9 @@ export async function POST(request: Request) {
           [cliente_id, moneda_id]
         );
         const deudaMoneda = parseFloat(deudaRes.rows[0]?.deuda || "0");
-        if (deudaMoneda + total > limiteMoneda) {
+        if (deudaMoneda + deuda > limiteMoneda) {
           throw new Error(
-            `Supera el límite de crédito en ${codigoMoneda}: deuda ${deudaMoneda.toFixed(2)} + venta ${total.toFixed(2)} > límite ${limiteMoneda.toFixed(2)}`
+            `Supera el límite de crédito en ${codigoMoneda}: deuda ${deudaMoneda.toFixed(2)} + pendiente ${deuda.toFixed(2)} > límite ${limiteMoneda.toFixed(2)}`
           );
         }
       }
@@ -198,7 +215,7 @@ export async function POST(request: Request) {
         `INSERT INTO ventas (numero, cliente, cliente_id, tipo_pago, fecha, moneda_id, metodo_pago_id, caja_id, subtotal, descuento, impuesto, total, total_base, descuento_base, tasa, estado, observaciones) 
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17) 
          RETURNING *`,
-         [generarNumero(), clienteNombre, cliente_id || null, esCredito ? "Credito" : "Contado", fecha || new Date().toISOString().split("T")[0], moneda_id, metodo_pago_id || null, esCredito ? null : (caja_id || null), subtotalTotal, descuento, impuestoTotal, total, totalBase, descuentoBase, tasaAplicada, estadoVenta, observaciones || null]
+         [generarNumero(), clienteNombre, cliente_id || null, esCredito ? "Credito" : "Contado", fecha || new Date().toISOString().split("T")[0], moneda_id, metodo_pago_id || null, pagado > 0.009 ? (caja_id || null) : null, subtotalTotal, descuento, impuestoTotal, total, totalBase, descuentoBase, tasaAplicada, estadoVenta, observaciones || null]
       );
 
       const venta = ventaRes.rows[0];
@@ -235,22 +252,37 @@ export async function POST(request: Request) {
       }
 
       if (esCredito) {
-        // El crédito queda en la moneda de la venta (USD, VES o COP)
-        await client.query(
+        // El crédito queda en la moneda de la venta (USD, VES o COP):
+        // monto_total = total de la venta, saldo = lo que falta por pagar.
+        // 'Parcial' cuando ya se recibió un pago inicial, 'Pendiente' si no.
+        const creditoRes = await client.query(
           `INSERT INTO creditos (numero, cliente_id, venta_id, fecha, monto_total, saldo, estado, moneda_id, total_base, saldo_base) 
-           VALUES ($1, $2, $3, $4, $5, $5, 'Pendiente', $6, $7, $7)`,
-          [generarNumeroCredito(), cliente_id, venta.id, venta.fecha, total, moneda_id, totalBase]
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $9) 
+           RETURNING id`,
+          [generarNumeroCredito(), cliente_id, venta.id, venta.fecha, total, deuda, pagado > 0.009 ? "Parcial" : "Pendiente", moneda_id, deudaBase]
         );
-      } else if (caja_id && metodo_pago_id) {
+
+        // El pago inicial queda registrado como abono contra ese crédito
+        if (pagado > 0.009) {
+          await client.query(
+            `INSERT INTO abonos (credito_id, cliente_id, retorno_id, fecha, monto, moneda_id, monto_base, metodo_pago_id, caja_id, observaciones)
+             VALUES ($1, $2, NULL, $3, $4, $5, $6, $7, $8, $9)`,
+            [creditoRes.rows[0].id, cliente_id, venta.fecha, pagado, moneda_id, pagadoBase, metodo_pago_id || null, caja_id || null, `Pago inicial venta ${venta.numero}`]
+          );
+        }
+      }
+
+      // Dinero que entra a la caja: el total (contado) o el pago parcial
+      if (caja_id && metodo_pago_id && pagado > 0.009) {
         await client.query(
           `INSERT INTO transacciones (caja_id, fecha, tipo, monto, moneda_id, monto_base, tasa, descripcion, referencia_tipo, referencia_id) 
            VALUES ($1, NOW(), 'Entrada', $2, $3, $4, $5, $6, 'venta', $7)`,
-          [caja_id, total, moneda_id, totalBase, tasaAplicada, `Cobro venta ${venta.numero}`, venta.id]
+          [caja_id, pagado, moneda_id, pagadoBase, tasaAplicada, `Cobro venta ${venta.numero}`, venta.id]
         );
 
         await client.query(
           `UPDATE cajas SET saldo_actual = saldo_actual + $1 WHERE id = $2`,
-          [total, caja_id]
+          [pagado, caja_id]
         );
       }
 

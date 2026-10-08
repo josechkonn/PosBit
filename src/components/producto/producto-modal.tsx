@@ -2,8 +2,11 @@
 
 import { useState, useEffect, useMemo } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { Check, ChevronLeft, ChevronRight, Loader2 } from "lucide-react";
+import { Check, ChevronLeft, ChevronRight, Loader2, Plus } from "lucide-react";
 import { Modal } from "@/components/ui/modal";
+import { CategoriaModal } from "@/components/categoria/categoria-modal";
+import { MarcaModal } from "@/components/marca/marca-modal";
+import { ProveedorModal } from "@/components/proveedor/proveedor-modal";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -95,6 +98,8 @@ export function ProductoModal({ open, mode, producto, monedas: monedasProp, defa
   const [uploadingImage, setUploadingImage] = useState(false);
   const [internalMonedas, setInternalMonedas] = useState<Moneda[]>([]);
   const [loadingMonedas, setLoadingMonedas] = useState(false);
+  // Modal anidado abierto desde el "+" (categoría, marca o proveedor)
+  const [modalAnidado, setModalAnidado] = useState<"categoria" | "marca" | "proveedor" | null>(null);
 
   // Combine prop currencies or loaded fallback currencies
   const effectiveMonedas = useMemo(() => {
@@ -216,11 +221,65 @@ export function ProductoModal({ open, mode, producto, monedas: monedasProp, defa
   };
 
   // Load categories, brands, and fallback currencies
+  const cargarCategorias = async (): Promise<Categoria[]> => {
+    try {
+      const data = await fetch("/api/categorias").then((r) => r.json());
+      const lista: Categoria[] = Array.isArray(data) ? data : [];
+      setCategorias(lista);
+      return lista;
+    } catch {
+      return [];
+    }
+  };
+
+  const cargarMarcas = async (): Promise<Marca[]> => {
+    try {
+      const data = await fetch("/api/marcas").then((r) => r.json());
+      const lista: Marca[] = Array.isArray(data) ? data : [];
+      setMarcas(lista);
+      return lista;
+    } catch {
+      return [];
+    }
+  };
+
+  const cargarProveedores = async (): Promise<Proveedor[]> => {
+    try {
+      const data = await fetch("/api/proveedores?page=1&limit=500").then((r) => r.json());
+      const lista: Proveedor[] = Array.isArray(data) ? data : data.data || [];
+      setProveedores(lista);
+      return lista;
+    } catch {
+      return [];
+    }
+  };
+
+  // Cierra el modal anidado y regresa al formulario del producto
+  const cerrarModalAnidado = () => setModalAnidado(null);
+
+  // Al crear desde el "+": recarga la lista, preselecciona lo nuevo y notifica
+  const trasCrearAnidado = async (tipo: "categoria" | "marca" | "proveedor", mensaje: string) => {
+    if (tipo === "categoria") {
+      const previas = categorias.map((c) => c.id);
+      const nueva = (await cargarCategorias()).find((c) => !previas.includes(c.id));
+      if (nueva) setCategoriaId(String(nueva.id));
+    } else if (tipo === "marca") {
+      const previas = marcas.map((m) => m.id);
+      const nueva = (await cargarMarcas()).find((m) => !previas.includes(m.id));
+      if (nueva) setMarcaId(String(nueva.id));
+    } else {
+      const previos = proveedores.map((p) => p.id);
+      const nueva = (await cargarProveedores()).find((p) => !previos.includes(p.id));
+      if (nueva && !defaultProveedorId) setProveedorId(String(nueva.id));
+    }
+    onSuccess(mensaje);
+  };
+
   useEffect(() => {
     if (open) {
-      fetch("/api/categorias").then((r) => r.json()).then(setCategorias).catch(() => {});
-      fetch("/api/marcas").then((r) => r.json()).then(setMarcas).catch(() => {});
-      fetch("/api/proveedores?page=1&limit=500").then((r) => r.json()).then((d) => setProveedores(d.data || d)).catch(() => {});
+      cargarCategorias();
+      cargarMarcas();
+      cargarProveedores();
       if (!monedasProp || monedasProp.length === 0) {
         setLoadingMonedas(true);
         fetch("/api/monedas")
@@ -242,6 +301,7 @@ export function ProductoModal({ open, mode, producto, monedas: monedasProp, defa
 
     setError("");
     setStep(1);
+    setModalAnidado(null);
 
     if (producto && (mode === "edit" || mode === "view")) {
       setCodigo(producto.codigo);
@@ -693,37 +753,75 @@ export function ProductoModal({ open, mode, producto, monedas: monedasProp, defa
             <div className="grid grid-cols-2 gap-4">
               <div>
                 <Label>Categoría</Label>
-                <Combobox
-                  options={[{ value: "", label: "Sin categoría" }, ...categorias.map((c) => ({ value: c.id.toString(), label: c.nombre }))]}
-                  value={categoriaId}
-                  onChange={setCategoriaId}
-                  placeholder="Seleccionar categoría"
-                  emptyLabel="Sin categorías"
-                />
+                <div className="flex items-center gap-1.5">
+                  <Combobox
+                    className="flex-1"
+                    options={[{ value: "", label: "Sin categoría" }, ...categorias.map((c) => ({ value: c.id.toString(), label: c.nombre }))]}
+                    value={categoriaId}
+                    onChange={setCategoriaId}
+                    placeholder="Seleccionar categoría"
+                    emptyLabel="Sin categorías"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setModalAnidado("categoria")}
+                    title="Nueva categoría"
+                    aria-label="Nueva categoría"
+                    className="flex h-10 w-10 shrink-0 items-center justify-center rounded border border-border bg-background text-muted-foreground transition-colors hover:border-primary hover:bg-primary/10 hover:text-primary"
+                  >
+                    <Plus size={16} />
+                  </button>
+                </div>
               </div>
               <div>
                 <Label>Marca</Label>
-                <Combobox
-                  options={[{ value: "", label: "Sin marca" }, ...marcas.map((m) => ({ value: m.id.toString(), label: m.nombre }))]}
-                  value={marcaId}
-                  onChange={setMarcaId}
-                  placeholder="Seleccionar marca"
-                  emptyLabel="Sin marcas"
-                />
+                <div className="flex items-center gap-1.5">
+                  <Combobox
+                    className="flex-1"
+                    options={[{ value: "", label: "Sin marca" }, ...marcas.map((m) => ({ value: m.id.toString(), label: m.nombre }))]}
+                    value={marcaId}
+                    onChange={setMarcaId}
+                    placeholder="Seleccionar marca"
+                    emptyLabel="Sin marcas"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setModalAnidado("marca")}
+                    title="Nueva marca"
+                    aria-label="Nueva marca"
+                    className="flex h-10 w-10 shrink-0 items-center justify-center rounded border border-border bg-background text-muted-foreground transition-colors hover:border-primary hover:bg-primary/10 hover:text-primary"
+                  >
+                    <Plus size={16} />
+                  </button>
+                </div>
               </div>
             </div>
             
             <div className="grid grid-cols-2 gap-4">
               <div>
                 <Label>Proveedor</Label>
-                <Combobox
-                  options={[{ value: "", label: "Sin proveedor" }, ...proveedores.map((p) => ({ value: p.id.toString(), label: p.nombre }))]}
-                  value={proveedorId}
-                  onChange={setProveedorId}
-                  placeholder="Seleccionar proveedor"
-                  emptyLabel="Sin proveedores"
-                  disabled={!!defaultProveedorId}
-                />
+                <div className="flex items-center gap-1.5">
+                  <Combobox
+                    className="flex-1"
+                    options={[{ value: "", label: "Sin proveedor" }, ...proveedores.map((p) => ({ value: p.id.toString(), label: p.nombre }))]}
+                    value={proveedorId}
+                    onChange={setProveedorId}
+                    placeholder="Seleccionar proveedor"
+                    emptyLabel="Sin proveedores"
+                    disabled={!!defaultProveedorId}
+                  />
+                  {!defaultProveedorId && (
+                    <button
+                      type="button"
+                      onClick={() => setModalAnidado("proveedor")}
+                      title="Nuevo proveedor"
+                      aria-label="Nuevo proveedor"
+                      className="flex h-10 w-10 shrink-0 items-center justify-center rounded border border-border bg-background text-muted-foreground transition-colors hover:border-primary hover:bg-primary/10 hover:text-primary"
+                    >
+                      <Plus size={16} />
+                    </button>
+                  )}
+                </div>
                 {!!defaultProveedorId && (
                   <p className="text-xs text-muted-foreground mt-1">Proveedor bloqueado porque estás creando desde una compra.</p>
                 )}
@@ -1249,6 +1347,29 @@ export function ProductoModal({ open, mode, producto, monedas: monedasProp, defa
           </motion.div>
         )}
       </AnimatePresence>
+
+      {/* Modales anidados: se abren con el "+" y al cerrarse se regresa aquí */}
+      <CategoriaModal
+        open={modalAnidado === "categoria"}
+        mode="create"
+        categoria={null}
+        onClose={cerrarModalAnidado}
+        onSuccess={(msg) => trasCrearAnidado("categoria", msg)}
+      />
+      <MarcaModal
+        open={modalAnidado === "marca"}
+        mode="create"
+        marca={null}
+        onClose={cerrarModalAnidado}
+        onSuccess={(msg) => trasCrearAnidado("marca", msg)}
+      />
+      <ProveedorModal
+        open={modalAnidado === "proveedor"}
+        mode="create"
+        proveedor={null}
+        onClose={cerrarModalAnidado}
+        onSuccess={(msg) => trasCrearAnidado("proveedor", msg)}
+      />
     </Modal>
   );
 }

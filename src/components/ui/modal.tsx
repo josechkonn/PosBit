@@ -26,10 +26,13 @@ export function Modal({
   hideCloseButton,
 }: ModalProps) {
   useEffect(() => {
-    if (open) document.body.style.overflow = "hidden";
-    else document.body.style.overflow = "unset";
+    if (!open) return;
+    // Se guarda el estado anterior para no romper el scroll cuando se
+    // cierra un modal anidado (el modal padre sigue abierto).
+    const overflowAnterior = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
     return () => {
-      document.body.style.overflow = "unset";
+      document.body.style.overflow = overflowAnterior;
     };
   }, [open]);
 
