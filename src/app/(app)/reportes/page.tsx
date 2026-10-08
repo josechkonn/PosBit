@@ -159,7 +159,7 @@ export default function ReportesPage() {
                   <KpiCard 
                     label="Impuestos" 
                     value={fmt(monedaData.resumen.impuesto || 0, moneda.codigo)} 
-                    sub="IVA 13%" 
+                    sub="IVA 16%" 
                     icon={FileText} 
                   />
                 </div>
@@ -285,9 +285,9 @@ export default function ReportesPage() {
                     icon={Package} 
                   />
                   <KpiCard 
-                    label="Valor en Existencias (Base)" 
-                    value={fmt(monedaData.valorInventario?.base || 0, "USD")} 
-                    sub="A costo base" 
+                    label={`Valor en Existencias (${moneda.codigo})`} 
+                    value={fmt(monedaData.valorInventario?.base || 0, moneda.codigo)} 
+                    sub="A costo en su moneda" 
                     icon={DollarSign} 
                   />
                   <KpiCard 

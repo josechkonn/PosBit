@@ -33,6 +33,7 @@ interface CompraDetail {
   subtotal: number | string;
   total: number | string;
   total_base: number | string;
+  tasa?: number | string | null;
   estado: string;
   observaciones: string | null;
   referencia: string | null;
@@ -109,6 +110,14 @@ export function CompraDetailModal({ open, compra, items, onClose, onDelete }: Co
             <span>Total</span>
             <span className="font-mono text-primary">{fmt(compra.total, compra.moneda_codigo)}</span>
           </div>
+          {compra.moneda_codigo !== "USD" && compra.tasa != null && (
+            <div className="flex justify-between text-xs text-muted-foreground">
+              <span>Tasa aplicada</span>
+              <span className="font-mono">
+                {parseFloat(String(compra.tasa)).toFixed(4)} {compra.moneda_codigo}
+              </span>
+            </div>
+          )}
           {compra.moneda_codigo !== "USD" && (
             <div className="flex justify-between text-xs text-muted-foreground pt-0.5">
               <span>Total base (USD)</span>

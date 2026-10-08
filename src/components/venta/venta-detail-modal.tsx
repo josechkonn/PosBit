@@ -34,6 +34,7 @@ interface VentaDetail {
   impuesto: number | string;
   total: number | string;
   total_base: number | string;
+  tasa?: number | string | null;
   estado: string;
   observaciones: string | null;
 }
@@ -120,6 +121,14 @@ export function VentaDetailModal({ open, venta, items, onClose, onDelete }: Vent
             <span>Total</span>
             <span className="font-mono text-primary">{fmt(venta.total, venta.moneda_codigo)}</span>
           </div>
+          {venta.moneda_codigo !== "USD" && venta.tasa != null && (
+            <div className="flex justify-between text-xs text-muted-foreground">
+              <span>Tasa aplicada</span>
+              <span className="font-mono">
+                {parseFloat(String(venta.tasa)).toFixed(4)} {venta.moneda_codigo}
+              </span>
+            </div>
+          )}
           {venta.moneda_codigo !== "USD" && (
             <div className="flex justify-between text-xs text-muted-foreground pt-0.5">
               <span>Total base (USD)</span>

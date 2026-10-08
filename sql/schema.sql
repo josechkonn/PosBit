@@ -68,6 +68,7 @@ CREATE TABLE IF NOT EXISTS monedas (
     codigo VARCHAR(3) NOT NULL UNIQUE,
     simbolo VARCHAR(5) NOT NULL,
     tasa DECIMAL(18, 6) NOT NULL DEFAULT 1.000000,
+    tasa_ref_moneda_id INTEGER REFERENCES monedas(id) ON DELETE SET NULL,
     decimales INT NOT NULL DEFAULT 2,
     es_base BOOLEAN NOT NULL DEFAULT false,
     activo BOOLEAN NOT NULL DEFAULT true,
@@ -77,6 +78,10 @@ CREATE TABLE IF NOT EXISTS monedas (
 
 -- Migración: agregar columna decimales si no existe (para BD existentes)
 ALTER TABLE monedas ADD COLUMN IF NOT EXISTS decimales INT NOT NULL DEFAULT 2;
+
+-- Migración: la tasa pasa a referirse a otra moneda (NULL = USD, la base).
+-- Ej.: COP tasa 3.2 referida a BS → 1 COP = 3.2/892.2342 USD (ver src/lib/money.ts)
+ALTER TABLE monedas ADD COLUMN IF NOT EXISTS tasa_ref_moneda_id INTEGER REFERENCES monedas(id) ON DELETE SET NULL;
 
 -- Garantizar que solo una moneda sea la base
 CREATE UNIQUE INDEX IF NOT EXISTS idx_monedas_es_base ON monedas (es_base) WHERE es_base = true;
@@ -244,6 +249,7 @@ CREATE TABLE IF NOT EXISTS compras (
     subtotal DECIMAL(18, 2) NOT NULL DEFAULT 0.00,
     total DECIMAL(18, 2) NOT NULL DEFAULT 0.00,
     total_base DECIMAL(18, 2) NOT NULL DEFAULT 0.00,
+    tasa DECIMAL(18, 6),
     estado VARCHAR(30) NOT NULL DEFAULT 'Pendiente',
     observaciones TEXT,
     referencia VARCHAR(100),
@@ -253,6 +259,9 @@ CREATE TABLE IF NOT EXISTS compras (
 
 -- Migración: agregar columna referencia si no existe (para BD existentes)
 ALTER TABLE compras ADD COLUMN IF NOT EXISTS referencia VARCHAR(100);
+
+-- Migración: tasa aplicada en la compra (NULL = tasa por defecto de la moneda)
+ALTER TABLE compras ADD COLUMN IF NOT EXISTS tasa DECIMAL(18, 6);
 
 -- Migración: eliminar proveedores duplicados conservando el de menor id
 -- y reasignando las compras al proveedor conservado (requiere tabla compras)
@@ -311,11 +320,15 @@ CREATE TABLE IF NOT EXISTS ventas (
     total DECIMAL(18, 2) NOT NULL DEFAULT 0.00,
     total_base DECIMAL(18, 2) NOT NULL DEFAULT 0.00,
     descuento_base DECIMAL(18, 2) NOT NULL DEFAULT 0.00,
+    tasa DECIMAL(18, 6),
     estado VARCHAR(30) NOT NULL DEFAULT 'Pendiente',
     observaciones TEXT,
     creado_en TIMESTAMP NOT NULL DEFAULT NOW(),
     actualizado_en TIMESTAMP NOT NULL DEFAULT NOW()
 );
+
+-- Migración: tasa aplicada en la venta (NULL = tasa por defecto de la moneda)
+ALTER TABLE ventas ADD COLUMN IF NOT EXISTS tasa DECIMAL(18, 6);
 
 -- Migración: integrar clientes en las ventas (BD existentes)
 ALTER TABLE ventas ADD COLUMN IF NOT EXISTS cliente_id INTEGER REFERENCES clientes(id) ON DELETE SET NULL;
@@ -433,11 +446,15 @@ CREATE TABLE IF NOT EXISTS transacciones (
     monto DECIMAL(18, 2) NOT NULL,
     moneda_id INTEGER NOT NULL REFERENCES monedas(id) ON DELETE RESTRICT,
     monto_base DECIMAL(18, 2) NOT NULL DEFAULT 0.00,
+    tasa DECIMAL(18, 6),
     descripcion TEXT,
     referencia_tipo VARCHAR(50),
     referencia_id INTEGER,
     creado_en TIMESTAMP NOT NULL DEFAULT NOW()
 );
+
+-- Migración: tasa usada para el pase a base (puede ser personalizada en la venta/compra)
+ALTER TABLE transacciones ADD COLUMN IF NOT EXISTS tasa DECIMAL(18, 6);
 
 -- ============================================================================
 -- 15. CIERRES DE CAJA
@@ -612,12 +629,25 @@ CREATE TRIGGER trg_retornos_actualizado BEFORE UPDATE ON retornos
 -- DATOS INICIALES
 -- ============================================================================
 
--- Monedas (USD como base)
+-- Monedas (USD como base).
+-- La tasa es "cuántas unidades de la moneda por 1 unidad de SU REFERENCIA"
+-- (NULL = USD). Ver src/lib/money.ts para la cadena completa.
+--   USD: 1 por USD · BS: 892.2342 por USD · COP: 3.2 por BS
 INSERT INTO monedas (nombre, codigo, simbolo, tasa, es_base, activo) VALUES
     ('Dólar Estadounidense', 'USD', '$', 1.000000, true, true),
-    ('Bolivar Soberano', 'VES', 'Bs.', 36.500000, false, true),
-    ('Peso Colombiano', 'COP', '$', 4200.000000, false, true)
+    ('Bolivar Soberano', 'VES', 'Bs.', 892.234200, false, true),
+    ('Peso Colombiano', 'COP', '$', 3.200000, false, true)
 ON CONFLICT (codigo) DO NOTHING;
+
+-- Migración de tasas legacy (36.5 BS/USD y 4200 COP/USD) al modelo encadenado.
+-- Solo toca las que siguen con los valores antiguos: no pisa tasas ya editadas.
+UPDATE monedas SET tasa = 892.234200 WHERE codigo = 'VES' AND tasa = 36.500000;
+UPDATE monedas SET tasa = 3.200000 WHERE codigo = 'COP' AND tasa = 4200.000000;
+
+-- COP pasa a referenciar a BS (NULL = USD)
+UPDATE monedas
+SET tasa_ref_moneda_id = (SELECT id FROM monedas WHERE codigo = 'VES')
+WHERE codigo = 'COP' AND tasa = 3.200000 AND tasa_ref_moneda_id IS NULL;
 
 -- Migracion unica: el limite de credito antiguo (un solo numero) pasa a ser
 -- el limite en la moneda base. No se pisa si ya se edito en la nueva tabla.

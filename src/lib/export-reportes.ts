@@ -31,7 +31,7 @@ function toSecciones(active: string, md: MonedaReporte): SeccionTabla[] {
         filas: [
           ["Total Ventas", money(r.total, codigo)],
           ["Subtotal", money(r.subtotal, codigo)],
-          ["Impuestos (IVA 13%)", money(r.impuesto || 0, codigo)],
+          ["Impuestos (IVA 16%)", money(r.impuesto || 0, codigo)],
           ["N° Transacciones", r.count],
           ["Ticket Promedio", money(r.count > 0 ? r.total / r.count : 0, codigo)],
         ],
@@ -83,15 +83,17 @@ function toSecciones(active: string, md: MonedaReporte): SeccionTabla[] {
     const productos = md.productos || [];
     secciones.push({
       titulo: "Inventario de Productos",
-      columnas: ["Código", "Producto", "Categoría", "Marca", "Existencias", "Costo Base", "Precio Base"],
+      columnas: ["Código", "Producto", "Categoría", "Marca", "Existencias", "Costo", "Precio", "Moneda"],
       filas: productos.map((p: any) => [
         p.codigo,
         p.nombre,
         p.categoria_nombre || "",
         p.marca_nombre || "",
         p.stock,
-        money(p.costo_base, "USD"),
-        money(p.precio_base, "USD"),
+        // costo_base/precio_base están en la moneda propia del producto
+        money(p.costo_base, p.moneda_codigo || codigo),
+        money(p.precio_base, p.moneda_codigo || codigo),
+        p.moneda_codigo || codigo,
       ]),
     });
     if (md.stockBajo?.length) {

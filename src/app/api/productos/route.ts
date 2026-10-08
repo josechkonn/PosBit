@@ -3,6 +3,7 @@ export const dynamic = 'force-dynamic';
 import { NextResponse } from "next/server";
 import { requireSession } from "@/lib/auth-server";
 import { query, queryOne, execute, transaction } from "@/lib/db";
+import { aBase, convertir, tasaUsd, monedaDeProducto } from "@/lib/money";
 
 export async function GET(request: Request) {
   try {
@@ -48,7 +49,7 @@ export async function GET(request: Request) {
       LIMIT $1 OFFSET $2
     `, [limit, offset]);
 
-    const monedas = await query(`SELECT id, codigo, simbolo, tasa, decimales, es_base FROM monedas WHERE activo = true ORDER BY es_base DESC, codigo ASC, id ASC`);
+    const monedas = await query(`SELECT id, codigo, simbolo, tasa, tasa_ref_moneda_id, decimales, es_base FROM monedas WHERE activo = true ORDER BY es_base DESC, codigo ASC, id ASC`);
 
     return NextResponse.json({
       productos,
@@ -82,9 +83,16 @@ export async function POST(request: Request) {
 
       const producto = res.rows[0];
 
-      const monedas = await client.query(`SELECT id, tasa, es_base FROM monedas WHERE activo = true`);
+      // `precio_base`/`costo_base` están en LA MONEDA DEL PRODUCTO; los precios
+      // por moneda se derivan de ahí con la cadena de conversiones (src/lib/money.ts)
+      // Catálogo completo (incluso monedas inactivas): los precios históricos
+      // deben poder convertirse aunque la moneda esté desactivada
+      const monedas = await client.query(`SELECT * FROM monedas`);
+      const catalogo = monedas.rows;
+      const monedaBase = catalogo.find((m: any) => m.es_base) || catalogo[0];
+      const monedaProducto = monedaDeProducto(producto, monedaBase, catalogo);
 
-      for (const moneda of monedas.rows) {
+      for (const moneda of catalogo) {
         let precio: number;
         let costo: number;
 
@@ -92,8 +100,9 @@ export async function POST(request: Request) {
           precio = body.precios[moneda.id].precio;
           costo = body.precios[moneda.id].costo;
         } else {
-          precio = moneda.es_base ? precio_base : Math.round(precio_base * moneda.tasa * 100) / 100;
-          costo = moneda.es_base ? costo_base : Math.round(costo_base * moneda.tasa * 100) / 100;
+          const decimales = Number(moneda.decimales ?? 2);
+          precio = convertir(Number(precio_base), monedaProducto, moneda, catalogo, decimales);
+          costo = convertir(Number(costo_base), monedaProducto, moneda, catalogo, decimales);
         }
 
         await client.query(
@@ -104,10 +113,12 @@ export async function POST(request: Request) {
       }
 
       if (stock > 0) {
+        // El kardex guarda el costo en la moneda del producto y su equivalente USD
+        const costoUsd = aBase(Number(costo_base), tasaUsd(monedaProducto, catalogo));
         await client.query(
           `INSERT INTO kardex (producto_id, fecha, tipo, motivo, cantidad, costo_unit, costo_unit_base, saldo_anterior, saldo_actual) 
            VALUES ($1, NOW(), 'Entrada', 'Existencias iniciales', $2, $3, $4, 0, $2)`,
-          [producto.id, stock, costo_base, costo_base]
+          [producto.id, stock, costo_base, costoUsd]
         );
       }
 
@@ -169,9 +180,16 @@ export async function PUT(request: Request) {
       const nuevoPrecio = precio_base ?? productoAnterior.precio_base;
       const nuevoCosto = costo_base ?? productoAnterior.costo_base;
 
-      const monedas = await client.query(`SELECT id, tasa, es_base FROM monedas WHERE activo = true`);
+      // Igual que en el POST: todo se deriva de `precio_base`/`costo_base`
+      // (en la moneda del producto) hacia cada moneda del catálogo
+      // Catálogo completo (incluso monedas inactivas): los precios históricos
+      // deben poder convertirse aunque la moneda esté desactivada
+      const monedas = await client.query(`SELECT * FROM monedas`);
+      const catalogo = monedas.rows;
+      const monedaBase = catalogo.find((m: any) => m.es_base) || catalogo[0];
+      const monedaProducto = monedaDeProducto(res.rows[0], monedaBase, catalogo);
 
-      for (const moneda of monedas.rows) {
+      for (const moneda of catalogo) {
         let precio: number;
         let costo: number;
 
@@ -179,8 +197,9 @@ export async function PUT(request: Request) {
           precio = body.precios[moneda.id].precio;
           costo = body.precios[moneda.id].costo;
         } else {
-          precio = moneda.es_base ? nuevoPrecio : Math.round(nuevoPrecio * moneda.tasa * 100) / 100;
-          costo = moneda.es_base ? nuevoCosto : Math.round(nuevoCosto * moneda.tasa * 100) / 100;
+          const decimales = Number(moneda.decimales ?? 2);
+          precio = convertir(Number(nuevoPrecio), monedaProducto, moneda, catalogo, decimales);
+          costo = convertir(Number(nuevoCosto), monedaProducto, moneda, catalogo, decimales);
         }
 
         await client.query(

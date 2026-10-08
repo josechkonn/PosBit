@@ -5,7 +5,8 @@
   "scripts": {
     "dev": "next dev",
     "build": "next build",
-    "start": "next start"
+    "start": "next start",
+    "test:money": "node tests/money.ts"
   },
   "dependencies": {
     "@types/bcryptjs": "^2.4.6",

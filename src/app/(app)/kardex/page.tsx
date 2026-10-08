@@ -29,6 +29,9 @@ interface KardexItem {
   saldo_actual: number;
   producto_nombre: string;
   producto_codigo: string;
+  // Moneda propia del producto: `costo_unit` se guarda en esa moneda
+  producto_moneda_codigo?: string | null;
+  producto_moneda_simbolo?: string | null;
 }
 
 export default function KardexPage() {
@@ -270,7 +273,7 @@ export default function KardexPage() {
                   {k.cantidad > 0 ? "+" : ""}{k.cantidad}
                 </span>
               </Td>
-              <Td mono>{fmt(k.costo_unit)}</Td>
+              <Td mono>{fmt(k.costo_unit, k.producto_moneda_codigo || "USD")}</Td>
               <Td mono>{k.saldo_anterior}</Td>
               <Td>
                 <span className="font-mono font-bold text-foreground">{k.saldo_actual}</span>

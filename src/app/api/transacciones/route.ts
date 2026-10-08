@@ -3,6 +3,7 @@ export const dynamic = 'force-dynamic';
 import { NextResponse } from "next/server";
 import { requireSession } from "@/lib/auth-server";
 import { query, queryOne, execute, transaction } from "@/lib/db";
+import { aBase, tasaUsdDocumento } from "@/lib/money";
 
 export async function GET() {
   try {
@@ -28,7 +29,7 @@ export async function POST(request: Request) {
   try {
     await requireSession();
     const body = await request.json();
-    const { caja_id, tipo, monto, descripcion, referencia_tipo, referencia_id } = body;
+    const { caja_id, tipo, monto, descripcion, referencia_tipo, referencia_id, tasa: tasaCustom } = body;
 
     if (!caja_id || !tipo || !monto) {
       return NextResponse.json({ error: "Campos requeridos: caja_id, tipo, monto" }, { status: 400 });
@@ -42,15 +43,21 @@ export async function POST(request: Request) {
 
       const monedaId = caja.rows[0].moneda_id;
       const moneda = await client.query(`SELECT * FROM monedas WHERE id = $1`, [monedaId]);
-      const tasa = moneda.rows[0].tasa;
-      const esBase = moneda.rows[0].es_base;
-      const montoBase = esBase ? monto : Math.round((monto / tasa) * 100) / 100;
+      // Catálogo completo (incluso monedas inactivas) para resolver la cadena
+      const monedasCatalogo = (await client.query(`SELECT * FROM monedas`)).rows;
+      // Tasa efectiva: la personalizada si vino, si no la de la moneda de la caja
+      const tasaAplicada =
+        tasaCustom !== null && tasaCustom !== undefined && Number(tasaCustom) > 0
+          ? Number(tasaCustom)
+          : Number(moneda.rows[0].tasa);
+      const tasaUsdTransaccion = tasaUsdDocumento(moneda.rows[0], tasaCustom, monedasCatalogo);
+      const montoBase = aBase(Number(monto), tasaUsdTransaccion);
 
       const res = await client.query(
-        `INSERT INTO transacciones (caja_id, fecha, tipo, monto, moneda_id, monto_base, descripcion, referencia_tipo, referencia_id) 
-         VALUES ($1, NOW(), $2, $3, $4, $5, $6, $7, $8) 
+        `INSERT INTO transacciones (caja_id, fecha, tipo, monto, moneda_id, monto_base, tasa, descripcion, referencia_tipo, referencia_id) 
+         VALUES ($1, NOW(), $2, $3, $4, $5, $6, $7, $8, $9) 
          RETURNING *`,
-        [caja_id, tipo, monto, monedaId, montoBase, descripcion || null, referencia_tipo || null, referencia_id || null]
+        [caja_id, tipo, monto, monedaId, montoBase, tasaAplicada, descripcion || null, referencia_tipo || null, referencia_id || null]
       );
 
       const transaccion = res.rows[0];

@@ -3,6 +3,7 @@ export const dynamic = 'force-dynamic';
 import { NextResponse } from "next/server";
 import { requireSession } from "@/lib/auth-server";
 import { query, queryOne, execute, transaction } from "@/lib/db";
+import { aBase, convertir, tasaUsd, tasaUsdDocumento, monedaDeProducto } from "@/lib/money";
 
 function generarNumero() {
   const year = new Date().getFullYear();
@@ -59,7 +60,7 @@ export async function POST(request: Request) {
   try {
     await requireSession();
     const body = await request.json();
-    const { cliente, cliente_id, tipo_pago, fecha, moneda_id, metodo_pago_id, caja_id, items, observaciones, descuento = 0 } = body;
+    const { cliente, cliente_id, tipo_pago, fecha, moneda_id, metodo_pago_id, caja_id, items, observaciones, descuento = 0, tasa: tasaCustom } = body;
 
     if (!moneda_id || !items || items.length === 0) {
       return NextResponse.json({ error: "Campos requeridos: moneda_id, items" }, { status: 400 });
@@ -72,8 +73,17 @@ export async function POST(request: Request) {
       if (moneda.rows.length === 0) {
         throw new Error("Moneda no encontrada");
       }
-      const tasa = moneda.rows[0].tasa;
-      const esBase = moneda.rows[0].es_base;
+      // Catálogo completo (incluso monedas inactivas): la cadena de conversiones
+      // debe resolverse aunque una moneda del histórico esté desactivada
+      const monedasCatalogo = (await client.query(`SELECT * FROM monedas`)).rows;
+      const monedaVenta = moneda.rows[0];
+      // Tasa efectiva para el pase a base (USD): la personalizada si vino, si no la de la moneda
+      const tasaUsdVenta = tasaUsdDocumento(monedaVenta, tasaCustom, monedasCatalogo);
+      // Tasa "de cara al usuario" (unidades de la moneda por su referencia): la que se guarda
+      const tasaAplicada =
+        tasaCustom !== null && tasaCustom !== undefined && Number(tasaCustom) > 0
+          ? Number(tasaCustom)
+          : Number(monedaVenta.tasa);
 
       let clienteNombre = cliente || null;
       let clienteRow = null;
@@ -133,7 +143,18 @@ export async function POST(request: Request) {
         if (producto.rows[0].stock < item.cantidad) {
           throw new Error(`Existencias insuficientes para ${producto.rows[0].nombre}`);
         }
-        item.precio_unit = item.precio_unit ?? producto.rows[0].precio_base;
+        // Sin precio enviado, se toma el precio_base del producto (en SU moneda)
+        // y se convierte a la moneda de la venta
+        if (item.precio_unit === null || item.precio_unit === undefined) {
+          const monedaProducto = monedaDeProducto(producto.rows[0], monedaVenta, monedasCatalogo);
+          item.precio_unit = convertir(
+            Number(producto.rows[0].precio_base),
+            monedaProducto,
+            monedaVenta,
+            monedasCatalogo,
+            Number(monedaVenta.decimales ?? 2)
+          );
+        }
         const lineTotal = item.cantidad * item.precio_unit;
         subtotalTotal += lineTotal;
         if (!producto.rows[0].iva_incluido) {
@@ -142,8 +163,9 @@ export async function POST(request: Request) {
       }
 
       const total = Math.max(0, subtotalTotal - descuento + impuestoTotal);
-      const totalBase = esBase ? total : Math.round((total / tasa) * 100) / 100;
-      const descuentoBase = esBase ? descuento : Math.round((descuento / tasa) * 100) / 100;
+      // `*_base` siempre en USD, usando la tasa efectiva del documento
+      const totalBase = aBase(total, tasaUsdVenta);
+      const descuentoBase = aBase(descuento, tasaUsdVenta);
 
       if (esCredito) {
         // Límite de crédito por moneda: 0 = sin crédito en esa moneda
@@ -173,19 +195,20 @@ export async function POST(request: Request) {
       const estadoVenta = esCredito ? "Credito" : "Pagada";
 
       const ventaRes = await client.query(
-        `INSERT INTO ventas (numero, cliente, cliente_id, tipo_pago, fecha, moneda_id, metodo_pago_id, caja_id, subtotal, descuento, impuesto, total, total_base, descuento_base, estado, observaciones) 
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16) 
+        `INSERT INTO ventas (numero, cliente, cliente_id, tipo_pago, fecha, moneda_id, metodo_pago_id, caja_id, subtotal, descuento, impuesto, total, total_base, descuento_base, tasa, estado, observaciones) 
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17) 
          RETURNING *`,
-         [generarNumero(), clienteNombre, cliente_id || null, esCredito ? "Credito" : "Contado", fecha || new Date().toISOString().split("T")[0], moneda_id, metodo_pago_id || null, esCredito ? null : (caja_id || null), subtotalTotal, descuento, impuestoTotal, total, totalBase, descuentoBase, estadoVenta, observaciones || null]
+         [generarNumero(), clienteNombre, cliente_id || null, esCredito ? "Credito" : "Contado", fecha || new Date().toISOString().split("T")[0], moneda_id, metodo_pago_id || null, esCredito ? null : (caja_id || null), subtotalTotal, descuento, impuestoTotal, total, totalBase, descuentoBase, tasaAplicada, estadoVenta, observaciones || null]
       );
 
       const venta = ventaRes.rows[0];
 
       for (const item of items) {
         const producto = await client.query(`SELECT * FROM productos WHERE id = $1`, [item.producto_id]);
-        const precioUnitBase = esBase ? item.precio_unit : Math.round((item.precio_unit / tasa) * 100) / 100;
+        const monedaProducto = monedaDeProducto(producto.rows[0], monedaVenta, monedasCatalogo);
+        const precioUnitBase = aBase(item.precio_unit, tasaUsdVenta);
         const subtotalItem = item.cantidad * item.precio_unit;
-        const subtotalBase = esBase ? subtotalItem : Math.round((subtotalItem / tasa) * 100) / 100;
+        const subtotalBase = aBase(subtotalItem, tasaUsdVenta);
 
         await client.query(
           `INSERT INTO venta_items (venta_id, producto_id, cantidad, precio_unit, precio_unit_base, subtotal, subtotal_base) 
@@ -201,10 +224,13 @@ export async function POST(request: Request) {
           [nuevoStock, item.producto_id]
         );
 
+        // El kardex guarda el costo en la moneda del producto y su equivalente USD
+        const costoProducto = Number(producto.rows[0].costo_base) || 0;
+        const costoUsd = aBase(costoProducto, tasaUsd(monedaProducto, monedasCatalogo));
         await client.query(
           `INSERT INTO kardex (producto_id, fecha, tipo, motivo, referencia_tipo, referencia_id, cantidad, costo_unit, costo_unit_base, saldo_anterior, saldo_actual) 
            VALUES ($1, NOW(), 'Salida', $2, 'venta', $3, $4, $5, $6, $7, $8)`,
-          [item.producto_id, `Venta ${venta.numero}`, venta.id, item.cantidad, producto.rows[0].costo_base, producto.rows[0].costo_base, stockAnterior, nuevoStock]
+          [item.producto_id, `Venta ${venta.numero}`, venta.id, item.cantidad, costoProducto, costoUsd, stockAnterior, nuevoStock]
         );
       }
 
@@ -217,9 +243,9 @@ export async function POST(request: Request) {
         );
       } else if (caja_id && metodo_pago_id) {
         await client.query(
-          `INSERT INTO transacciones (caja_id, fecha, tipo, monto, moneda_id, monto_base, descripcion, referencia_tipo, referencia_id) 
-           VALUES ($1, NOW(), 'Entrada', $2, $3, $4, $5, 'venta', $6)`,
-          [caja_id, total, moneda_id, totalBase, `Cobro venta ${venta.numero}`, venta.id]
+          `INSERT INTO transacciones (caja_id, fecha, tipo, monto, moneda_id, monto_base, tasa, descripcion, referencia_tipo, referencia_id) 
+           VALUES ($1, NOW(), 'Entrada', $2, $3, $4, $5, $6, 'venta', $7)`,
+          [caja_id, total, moneda_id, totalBase, tasaAplicada, `Cobro venta ${venta.numero}`, venta.id]
         );
 
         await client.query(
@@ -293,18 +319,27 @@ export async function DELETE(request: Request) {
       }
 
       const items = await client.query(`SELECT * FROM venta_items WHERE venta_id = $1`, [id]);
+      // Catálogo completo (incluso monedas inactivas): la cadena de conversiones
+      // debe resolverse aunque una moneda del histórico esté desactivada
+      const monedasCatalogo = (await client.query(`SELECT * FROM monedas`)).rows;
+      const monedaVenta =
+        monedasCatalogo.find((m: any) => Number(m.id) === Number(venta.rows[0].moneda_id)) || monedasCatalogo[0];
 
       for (const item of items.rows) {
-        const productoActual = await client.query(`SELECT stock FROM productos WHERE id = $1`, [item.producto_id]);
+        const productoActual = await client.query(`SELECT * FROM productos WHERE id = $1`, [item.producto_id]);
         const stockAnterior = productoActual.rows[0]?.stock || 0;
         const nuevoStock = stockAnterior + item.cantidad;
 
         await client.query(`UPDATE productos SET stock = $1 WHERE id = $2`, [nuevoStock, item.producto_id]);
 
+        // La devolución vuelve al costo del producto (en SU moneda) y su equivalente USD
+        const monedaProducto = monedaDeProducto(productoActual.rows[0], monedaVenta, monedasCatalogo);
+        const costoProducto = Number(productoActual.rows[0]?.costo_base) || 0;
+        const costoUsd = aBase(costoProducto, tasaUsd(monedaProducto, monedasCatalogo));
         await client.query(
           `INSERT INTO kardex (producto_id, fecha, tipo, motivo, referencia_tipo, referencia_id, cantidad, costo_unit, costo_unit_base, saldo_anterior, saldo_actual) 
            VALUES ($1, NOW(), 'Entrada', $2, 'venta_anulada', $3, $4, $5, $6, $7, $8)`,
-          [item.producto_id, `Anulación venta`, id, item.cantidad, item.precio_unit_base, item.precio_unit_base, stockAnterior, nuevoStock]
+          [item.producto_id, `Anulación venta`, id, item.cantidad, costoProducto, costoUsd, stockAnterior, nuevoStock]
         );
       }
 

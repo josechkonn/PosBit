@@ -3,6 +3,7 @@ export const dynamic = 'force-dynamic';
 import { NextResponse } from "next/server";
 import { requireSession } from "@/lib/auth-server";
 import { query, queryOne, transaction } from "@/lib/db";
+import { aBase, convertir, redondear, tasaUsd } from "@/lib/money";
 
 function generarNumero() {
   const year = new Date().getFullYear();
@@ -115,34 +116,28 @@ export async function POST(request: Request) {
         throw new Error("Moneda no encontrada");
       }
       const monedaAbono = monedaAbonoRes.rows[0];
-      const tasaAbono = parseFloat(monedaAbono.tasa);
-      const esBaseAbono = monedaAbono.es_base;
 
       // Moneda del crédito (puede ser diferente a la del abono)
       const monedaCreditoRes = await client.query(`SELECT * FROM monedas WHERE id = $1`, [credito.moneda_id]);
       const monedaCredito = monedaCreditoRes.rows[0];
-      const tasaCredito = parseFloat(monedaCredito.tasa);
-      const esBaseCredito = monedaCredito.es_base;
 
-      const montoAbono = Math.round(parseFloat(monto) * 100) / 100;
+      const monedasCatalogo = (await client.query(`SELECT * FROM monedas`)).rows;
 
-      // Convertir el monto del abono a la moneda del crédito para comparar con el saldo
-      let montoEnMonedaCredito: number;
-      if (monedaAbono.id === monedaCredito.id) {
-        // Misma moneda, sin conversión
-        montoEnMonedaCredito = montoAbono;
-      } else {
-        // Convertir: abono → USD → moneda del crédito
-        const montoUsd = esBaseAbono ? montoAbono : montoAbono / tasaAbono;
-        montoEnMonedaCredito = esBaseCredito ? montoUsd : Math.round(montoUsd * tasaCredito * 100) / 100;
-      }
+      const montoAbono = redondear(parseFloat(monto));
+
+      // Convertir el monto del abono a la moneda del crédito para comparar
+      // con el saldo (misma cadena de conversiones que en todo el sistema)
+      const montoEnMonedaCredito =
+        Number(monedaAbono.id) === Number(monedaCredito.id)
+          ? montoAbono
+          : convertir(montoAbono, monedaAbono, monedaCredito, monedasCatalogo, Number(monedaCredito.decimales ?? 2));
 
       if (montoEnMonedaCredito > parseFloat(credito.saldo) + 0.01) {
         throw new Error(`El monto equivalente (${montoEnMonedaCredito.toFixed(2)} ${monedaCredito.codigo}) excede el saldo pendiente (${credito.saldo} ${monedaCredito.codigo})`);
       }
 
-      // Calcular el monto en moneda base (USD) para saldo_base
-      const montoBase = esBaseAbono ? montoAbono : Math.round((montoAbono / tasaAbono) * 100) / 100;
+      // Monto en moneda base (USD) para saldo_base
+      const montoBase = aBase(montoAbono, tasaUsd(monedaAbono, monedasCatalogo));
 
       const nuevoSaldo = Math.max(0, parseFloat(credito.saldo) - montoEnMonedaCredito);
       const nuevoSaldoBase = Math.max(0, parseFloat(credito.saldo_base) - montoBase);

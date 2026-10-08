@@ -14,6 +14,7 @@ import { Select } from "@/components/ui/select";
 import { Combobox } from "@/components/ui/combobox";
 import { useToast } from "@/components/ui/toast";
 import { fmt, fmtDateTime } from "@/lib/format";
+import { redondear, tasaUsd, tasaUsdDocumento } from "@/lib/money";
 import { ReceiptPrinter } from "@/components/pos/receipt-printer";
 import { ClienteModal } from "@/components/cliente/cliente-modal";
 
@@ -43,7 +44,8 @@ interface Moneda {
   id: number;
   codigo: string;
   simbolo: string;
-  tasa: number;
+  tasa: number | string;
+  tasa_ref_moneda_id?: number | null;
   decimales: number;
   es_base: boolean;
 }
@@ -129,6 +131,9 @@ export default function PuntoDeVentaPage() {
   // Descuentos
   const [descuento, setDescuento] = useState<number>(0);
   const [descuentoStr, setDescuentoStr] = useState<string>("");
+
+  // Tasa personalizada de la venta (opcional; vacío = tasa por defecto de la moneda)
+  const [tasaCustomStr, setTasaCustomStr] = useState<string>("");
 
   // Cliente creation
   const [showClienteModal, setShowClienteModal] = useState(false);
@@ -259,6 +264,8 @@ export default function PuntoDeVentaPage() {
       if (metodo.moneda_codigo) {
         setMonedaSeleccionada(metodo.moneda_codigo);
       }
+      // Al cambiar de moneda vuelve la tasa por defecto
+      setTasaCustomStr("");
     } else {
       setMetodoPagoSeleccionado(null);
       setCajaSeleccionada(null);
@@ -276,22 +283,44 @@ export default function PuntoDeVentaPage() {
 
   const getPrecio = (producto: Producto): number => {
     if (!monedaSeleccionada) return parseFloat(String(producto.precio_base)) || 0;
-    if (producto.precios && producto.precios.length > 0) {
+
+    const tasaCustomNum = parseFloat(tasaCustomStr);
+    const conTasaCustom = Number.isFinite(tasaCustomNum) && tasaCustomNum > 0;
+
+    // Con tasa personalizada SIEMPRE se recalcula desde el precio base del
+    // producto (los precios guardados usan la tasa por defecto de la moneda)
+    if (!conTasaCustom && producto.precios && producto.precios.length > 0) {
       const exact = producto.precios.find((p) => p.moneda_codigo === monedaSeleccionada);
       if (exact && parseFloat(String(exact.precio)) > 0) return parseFloat(String(exact.precio));
     }
+
     const targetMoneda = monedas.find((m) => m.codigo === monedaSeleccionada);
     if (!targetMoneda) return parseFloat(String(producto.precio_base)) || 0;
-    const prodBaseMoneda = monedas.find((m) => m.id === producto.moneda_base_id) || monedas.find((m) => m.es_base);
-    const prodBaseRate = prodBaseMoneda ? parseFloat(String(prodBaseMoneda.tasa)) : 1;
-    const targetRate = parseFloat(String(targetMoneda.tasa));
+    // Moneda propia del producto (sin moneda propia = moneda base del sistema)
+    const prodMoneda =
+      monedas.find((m) => m.id === producto.moneda_base_id) || monedas.find((m) => m.es_base) || targetMoneda;
+
     const precioBaseNum = parseFloat(String(producto.precio_base)) || 0;
-    const priceInUsd = prodBaseRate > 0 ? precioBaseNum / prodBaseRate : precioBaseNum;
-    const finalPrice = priceInUsd * targetRate;
-    const dec = targetMoneda.decimales ?? 2;
-    const factor = Math.pow(10, dec);
-    return Math.round(finalPrice * factor) / factor;
+    const tasaProdUsd = tasaUsd(prodMoneda, monedas);
+    const tasaDocUsd = tasaUsdDocumento(targetMoneda, conTasaCustom ? tasaCustomNum : null, monedas);
+    const dec = Number(targetMoneda.decimales ?? 2);
+    if (tasaProdUsd <= 0) return precioBaseNum;
+    return redondear((precioBaseNum / tasaProdUsd) * tasaDocUsd, dec);
   };
+
+  // Tasa efectiva de la venta en "unidades de la moneda por su referencia"
+  const tasaEfectiva = useMemo(() => {
+    const targetMoneda = monedas.find((m) => m.codigo === monedaSeleccionada);
+    if (!targetMoneda) return 0;
+    const tasaCustomNum = parseFloat(tasaCustomStr);
+    return Number.isFinite(tasaCustomNum) && tasaCustomNum > 0 ? tasaCustomNum : Number(targetMoneda.tasa);
+  }, [monedas, monedaSeleccionada, tasaCustomStr]);
+
+  // Tasa por defecto de la moneda seleccionada (placeholder del campo)
+  const tasaPorDefecto = useMemo(() => {
+    const targetMoneda = monedas.find((m) => m.codigo === monedaSeleccionada);
+    return targetMoneda ? String(targetMoneda.tasa) : "";
+  }, [monedas, monedaSeleccionada]);
 
   const addToCart = (p: Producto) => {
     const item = cart.find((c) => c.product.id === p.id);
@@ -345,13 +374,13 @@ export default function PuntoDeVentaPage() {
     );
   };
 
-  const subtotal = useMemo(() => cart.reduce((s, c) => s + getPrecio(c.product) * c.qty, 0), [cart, monedaSeleccionada, monedas]);
+  const subtotal = useMemo(() => cart.reduce((s, c) => s + getPrecio(c.product) * c.qty, 0), [cart, monedaSeleccionada, monedas, tasaCustomStr]);
   const tax = useMemo(() => {
     return cart.reduce((s, c) => {
       if (c.product.iva_incluido) return s;
       return s + Math.round(getPrecio(c.product) * 0.16 * c.qty * 100) / 100;
     }, 0);
-  }, [cart, monedaSeleccionada, monedas]);
+  }, [cart, monedaSeleccionada, monedas, tasaCustomStr]);
   
   const total = Math.max(0, subtotal - descuento + tax);
 
@@ -401,6 +430,7 @@ export default function PuntoDeVentaPage() {
     setSubmitting(true);
     try {
       const moneda = monedas.find((m) => m.codigo === monedaSeleccionada);
+      const tasaCustomNum = parseFloat(tasaCustomStr);
       const items = cart.map((c) => ({
         producto_id: c.product.id,
         producto_nombre: c.product.nombre,
@@ -419,6 +449,8 @@ export default function PuntoDeVentaPage() {
           metodo_pago_id: metodoPagoSeleccionado,
           caja_id: esCredito ? null : cajaSeleccionada,
           descuento,
+          // Tasa personalizada (opcional); vacío = tasa por defecto de la moneda
+          tasa: Number.isFinite(tasaCustomNum) && tasaCustomNum > 0 ? tasaCustomNum : null,
           items,
         }),
       });
@@ -434,6 +466,7 @@ export default function PuntoDeVentaPage() {
           tipoPago: esCredito ? "Crédito" : "Contado",
           monedaCodigo: monedaSeleccionada,
           monedaSimbolo: moneda?.simbolo || "$",
+          tasaAplicada: tasaEfectiva,
           items: items,
           subtotal,
           impuesto: tax,
@@ -446,6 +479,7 @@ export default function PuntoDeVentaPage() {
         setTipoPago("Contado");
         setDescuento(0);
         setDescuentoStr("");
+        setTasaCustomStr("");
         setShowCheckout(false);
         setShowReceiptModal(true); // Open the receipt modal instead of just toast
         
@@ -938,6 +972,26 @@ export default function PuntoDeVentaPage() {
                   </p>
                 )}
 
+                {monedaSeleccionada && (
+                  <div>
+                    <div className="flex items-center justify-between text-sm text-muted-foreground">
+                      <span>Tasa {monedaSeleccionada} (opcional)</span>
+                      <Input
+                        className="w-28 h-7 text-right font-mono"
+                        type="number"
+                        step="any"
+                        min="0"
+                        value={tasaCustomStr}
+                        placeholder={tasaPorDefecto}
+                        onChange={(e) => setTasaCustomStr(e.target.value)}
+                      />
+                    </div>
+                    <p className="mt-1 text-[11px] leading-tight text-muted-foreground">
+                      Vacío = tasa por defecto ({tasaPorDefecto}). Al cambiarla se recalculan los precios en pantalla.
+                    </p>
+                  </div>
+                )}
+
                 <Button
                   className="w-full py-3 font-semibold text-sm"
                   disabled={cart.length === 0 || !metodoPagoSeleccionado || !metodoMonedaOK || (esCredito && !clienteObj)}
@@ -972,6 +1026,7 @@ export default function PuntoDeVentaPage() {
               <p><strong>Cliente:</strong> {clienteObj?.nombre || "Consumidor Final"}</p>
               <p><strong>Forma de pago:</strong> {esCredito ? `Crédito (deuda del cliente en ${monedaSeleccionada})` : "Contado"}</p>
               <p><strong>Método de pago:</strong> {selectedMetodoObj ? `${selectedMetodoObj.nombre} (${selectedMetodoObj.moneda_codigo})` : "N/A"}</p>
+              <p><strong>Tasa aplicada:</strong> <span className="font-mono">{tasaEfectiva > 0 ? tasaEfectiva : "N/A"} {monedaSeleccionada}</span></p>
               <p><strong>Descuento:</strong> {descuento > 0 ? fmt(descuento, monedaSeleccionada) : "N/A"}</p>
               <p><strong>Productos:</strong> {cart.length}</p>
             </div>

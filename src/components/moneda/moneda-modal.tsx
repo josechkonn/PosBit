@@ -17,6 +17,7 @@ interface Moneda {
   codigo: string;
   simbolo: string;
   tasa: number | string;
+  tasa_ref_moneda_id?: number | null;
   decimales: number;
   es_base: boolean;
   activo: boolean;
@@ -38,11 +39,22 @@ export function MonedaModal({ open, mode, moneda, onClose, onSuccess }: MonedaMo
   const [codigo, setCodigo] = useState("");
   const [simbolo, setSimbolo] = useState("");
   const [tasa, setTasa] = useState("1.000000");
+  const [tasaRefId, setTasaRefId] = useState<string>("");
+  const [monedasCatalogo, setMonedasCatalogo] = useState<Moneda[]>([]);
   const [decimales, setDecimales] = useState("2");
   const [esBase, setEsBase] = useState(false);
   const [activo, setActivo] = useState(true);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+
+  // Catálogo para elegir la moneda de referencia de la tasa
+  useEffect(() => {
+    if (!open) return;
+    fetch("/api/monedas")
+      .then((r) => r.json())
+      .then((data) => setMonedasCatalogo(Array.isArray(data) ? data : []))
+      .catch(() => {});
+  }, [open]);
 
   useEffect(() => {
     if (moneda && (mode === "edit" || mode === "view")) {
@@ -50,6 +62,7 @@ export function MonedaModal({ open, mode, moneda, onClose, onSuccess }: MonedaMo
       setCodigo(moneda.codigo);
       setSimbolo(moneda.simbolo);
       setTasa(String(parseFloat(String(moneda.tasa)).toFixed(6)));
+      setTasaRefId(moneda.tasa_ref_moneda_id ? String(moneda.tasa_ref_moneda_id) : "");
       setDecimales(String(moneda.decimales ?? 2));
       setEsBase(moneda.es_base);
       setActivo(moneda.activo);
@@ -58,6 +71,7 @@ export function MonedaModal({ open, mode, moneda, onClose, onSuccess }: MonedaMo
       setCodigo("");
       setSimbolo("");
       setTasa("1.000000");
+      setTasaRefId("");
       setDecimales("2");
       setEsBase(false);
       setActivo(true);
@@ -78,7 +92,9 @@ export function MonedaModal({ open, mode, moneda, onClose, onSuccess }: MonedaMo
             nombre,
             codigo,
             simbolo,
-            tasa: parseFloat(tasa),
+            tasa: esBase ? 1 : parseFloat(tasa),
+            // NULL = la tasa es contra la moneda base (USD)
+            tasa_ref_moneda_id: esBase ? null : tasaRefId ? parseInt(tasaRefId) : null,
             decimales: parseInt(decimales) || 2,
             es_base: esBase,
             activo,
@@ -95,7 +111,10 @@ export function MonedaModal({ open, mode, moneda, onClose, onSuccess }: MonedaMo
             nombre,
             codigo,
             simbolo,
-            tasa: parseFloat(tasa),
+            tasa: esBase ? 1 : parseFloat(tasa),
+            // NULL = la tasa es contra la moneda base (USD); el PUT distingue
+            // "no vino" de "vino null", así que siempre se envía
+            tasa_ref_moneda_id: esBase ? null : tasaRefId ? parseInt(tasaRefId) : null,
             decimales: parseInt(decimales) || 2,
             es_base: esBase,
             activo,
@@ -189,6 +208,13 @@ export function MonedaModal({ open, mode, moneda, onClose, onSuccess }: MonedaMo
           <div>
             <Label>Tasa de Cambio</Label>
             <p className="text-sm font-mono">{parseFloat(String(moneda.tasa)).toFixed(6)}</p>
+            <p className="text-xs text-muted-foreground">
+              Referencia:{" "}
+              {moneda.tasa_ref_moneda_id
+                ? monedasCatalogo.find((m) => m.id === moneda.tasa_ref_moneda_id)?.codigo ||
+                  `moneda #${moneda.tasa_ref_moneda_id}`
+                : "moneda base (USD)"}
+            </p>
           </div>
           <div className="grid grid-cols-3 gap-4">
             <div>
@@ -242,7 +268,7 @@ export function MonedaModal({ open, mode, moneda, onClose, onSuccess }: MonedaMo
               maxLength={100}
             />
           </Field>
-          <div className="grid grid-cols-4 gap-3">
+          <div className="grid grid-cols-3 gap-3">
             <Field label="Código">
               <Input
                 value={codigo}
@@ -259,15 +285,6 @@ export function MonedaModal({ open, mode, moneda, onClose, onSuccess }: MonedaMo
                 maxLength={5}
               />
             </Field>
-            <Field label="Tasa">
-              <Input
-                value={tasa}
-                onChange={(e) => setTasa(e.target.value)}
-                placeholder="1.000000"
-                type="number"
-                step="0.000001"
-              />
-            </Field>
             <Field label="Decimales">
               <Input
                 value={decimales}
@@ -279,6 +296,45 @@ export function MonedaModal({ open, mode, moneda, onClose, onSuccess }: MonedaMo
               />
             </Field>
           </div>
+          {esBase ? (
+            <Field label="Tasa">
+              <Input value="1" disabled />
+              <p className="mt-1 text-[11px] leading-tight text-muted-foreground">
+                La moneda base siempre tiene tasa 1; las demás se miden contra ella.
+              </p>
+            </Field>
+          ) : (
+            <Field label="La tasa equivale a (referencia)">
+              <div className="flex items-center gap-2">
+                <Input
+                  value={tasa}
+                  onChange={(e) => setTasa(e.target.value)}
+                  placeholder="1.000000"
+                  type="number"
+                  step="0.000001"
+                  className="flex-1"
+                />
+                <select
+                  value={tasaRefId}
+                  onChange={(e) => setTasaRefId(e.target.value)}
+                  className="h-10 rounded border border-border bg-background px-2 text-sm focus:border-primary focus:outline-none focus:ring-1 focus:ring-ring"
+                >
+                  <option value="">USD (base)</option>
+                  {monedasCatalogo
+                    .filter((m) => m.id !== moneda?.id && m.activo !== false && !m.es_base)
+                    .map((m) => (
+                      <option key={m.id} value={m.id}>
+                        {m.codigo}
+                      </option>
+                    ))}
+                </select>
+              </div>
+              <p className="mt-1 text-[11px] leading-tight text-muted-foreground">
+                Ej.: 3.2 con referencia BS significa 3.2 COP por 1 BS; la conversión a USD se
+                resuelve con toda la cadena (BS → USD).
+              </p>
+            </Field>
+          )}
           <div className="flex items-center justify-between">
             <Label>Moneda Principal</Label>
             <Switch defaultChecked={esBase} onCheckedChange={setEsBase} />

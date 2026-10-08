@@ -16,6 +16,7 @@ interface Moneda {
   codigo: string;
   simbolo: string;
   tasa: number | string;
+  tasa_ref_moneda_id?: number | null;
   decimales: number;
   es_base: boolean;
   activo: boolean;
@@ -168,7 +169,14 @@ export default function MonedasPage() {
                 <span className="font-mono font-bold text-primary">{c.simbolo}</span>
               </Td>
               <Td>
-                <span className="font-mono">{parseFloat(String(c.tasa)).toFixed(4)}</span>
+                <span className="font-mono">
+                  {parseFloat(String(c.tasa)).toFixed(4)}
+                </span>
+                {!c.es_base && (
+                  <span className="ml-1 text-[11px] text-muted-foreground">
+                    = {monedas.find((m) => m.id === c.tasa_ref_moneda_id)?.codigo || "USD"}
+                  </span>
+                )}
               </Td>
               <Td>
                 {c.es_base ? (

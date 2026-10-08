@@ -3,6 +3,7 @@ export const dynamic = 'force-dynamic';
 import { NextResponse } from "next/server";
 import { requireSession } from "@/lib/auth-server";
 import { query, queryOne, execute, transaction } from "@/lib/db";
+import { aBase, convertir, tasaUsd, tasaUsdDocumento, monedaDeProducto } from "@/lib/money";
 
 function generarNumero() {
   const year = new Date().getFullYear();
@@ -47,7 +48,7 @@ export async function POST(request: Request) {
   try {
     await requireSession();
     const body = await request.json();
-    const { proveedor_id, fecha, moneda_id, metodo_pago_id, caja_id, items, observaciones, referencia } = body;
+    const { proveedor_id, fecha, moneda_id, metodo_pago_id, caja_id, items, observaciones, referencia, tasa: tasaCustom } = body;
 
     if (!proveedor_id || !moneda_id || !items || items.length === 0) {
       return NextResponse.json({ error: "Campos requeridos: proveedor_id, moneda_id, items" }, { status: 400 });
@@ -58,8 +59,17 @@ export async function POST(request: Request) {
       if (moneda.rows.length === 0) {
         throw new Error("Moneda no encontrada");
       }
-      const tasa = moneda.rows[0].tasa;
-      const esBase = moneda.rows[0].es_base;
+      // Catálogo completo (incluso monedas inactivas): la cadena de conversiones
+      // debe resolverse aunque una moneda del histórico esté desactivada
+      const monedasCatalogo = (await client.query(`SELECT * FROM monedas`)).rows;
+      const monedaCompra = moneda.rows[0];
+      // Tasa efectiva de la compra: la personalizada si vino, si no la de la moneda
+      const tasaUsdCompra = tasaUsdDocumento(monedaCompra, tasaCustom, monedasCatalogo);
+      // Tasa "de cara al usuario" (unidades de la moneda por su referencia): la que se guarda
+      const tasaAplicada =
+        tasaCustom !== null && tasaCustom !== undefined && Number(tasaCustom) > 0
+          ? Number(tasaCustom)
+          : Number(monedaCompra.tasa);
 
       let subtotalTotal = 0;
 
@@ -67,21 +77,22 @@ export async function POST(request: Request) {
         subtotalTotal += item.cantidad * item.costo_unit;
       }
 
-      const totalBase = esBase ? subtotalTotal : Math.round((subtotalTotal / tasa) * 100) / 100;
+      // `total_base` siempre en USD, usando la tasa efectiva del documento
+      const totalBase = aBase(subtotalTotal, tasaUsdCompra);
 
       const compraRes = await client.query(
-        `INSERT INTO compras (numero, proveedor_id, fecha, moneda_id, metodo_pago_id, caja_id, subtotal, total, total_base, estado, observaciones, referencia) 
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) 
+        `INSERT INTO compras (numero, proveedor_id, fecha, moneda_id, metodo_pago_id, caja_id, subtotal, total, total_base, tasa, estado, observaciones, referencia) 
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13) 
          RETURNING *`,
-        [generarNumero(), proveedor_id, fecha || new Date().toISOString().split("T")[0], moneda_id, metodo_pago_id || null, caja_id || null, subtotalTotal, subtotalTotal, totalBase, "Recibida", observaciones || null, referencia || null]
+        [generarNumero(), proveedor_id, fecha || new Date().toISOString().split("T")[0], moneda_id, metodo_pago_id || null, caja_id || null, subtotalTotal, subtotalTotal, totalBase, tasaAplicada, "Recibida", observaciones || null, referencia || null]
       );
 
       const compra = compraRes.rows[0];
 
       for (const item of items) {
-        const costoUnitBase = esBase ? item.costo_unit : Math.round((item.costo_unit / tasa) * 100) / 100;
+        const costoUnitBase = aBase(item.costo_unit, tasaUsdCompra);
         const subtotalItem = item.cantidad * item.costo_unit;
-        const subtotalBase = esBase ? subtotalItem : Math.round((subtotalItem / tasa) * 100) / 100;
+        const subtotalBase = aBase(subtotalItem, tasaUsdCompra);
 
         await client.query(
           `INSERT INTO compra_items (compra_id, producto_id, cantidad, costo_unit, costo_unit_base, subtotal, subtotal_base) 
@@ -89,7 +100,7 @@ export async function POST(request: Request) {
           [compra.id, item.producto_id, item.cantidad, item.costo_unit, costoUnitBase, subtotalItem, subtotalBase]
         );
 
-        const productoActual = await client.query(`SELECT stock FROM productos WHERE id = $1`, [item.producto_id]);
+        const productoActual = await client.query(`SELECT * FROM productos WHERE id = $1`, [item.producto_id]);
         const stockAnterior = productoActual.rows[0]?.stock || 0;
         const nuevoStock = stockAnterior + item.cantidad;
 
@@ -98,18 +109,28 @@ export async function POST(request: Request) {
           [nuevoStock, item.producto_id]
         );
 
+        // El kardex guarda el costo en la moneda del producto (y su equivalente USD)
+        const monedaProducto = monedaDeProducto(productoActual.rows[0], monedaCompra, monedasCatalogo);
+        const costoUnitProducto = convertir(
+          item.costo_unit,
+          monedaCompra,
+          monedaProducto,
+          monedasCatalogo,
+          Number(monedaProducto.decimales ?? 2)
+        );
+        const costoUnitUsd = aBase(costoUnitProducto, tasaUsd(monedaProducto, monedasCatalogo));
         await client.query(
           `INSERT INTO kardex (producto_id, fecha, tipo, motivo, referencia_tipo, referencia_id, cantidad, costo_unit, costo_unit_base, saldo_anterior, saldo_actual) 
            VALUES ($1, NOW(), 'Entrada', $2, 'compra', $3, $4, $5, $6, $7, $8)`,
-          [item.producto_id, `Compra ${compra.numero}`, compra.id, item.cantidad, item.costo_unit, costoUnitBase, stockAnterior, nuevoStock]
+          [item.producto_id, `Compra ${compra.numero}`, compra.id, item.cantidad, costoUnitProducto, costoUnitUsd, stockAnterior, nuevoStock]
         );
       }
 
       if (caja_id && metodo_pago_id) {
         await client.query(
-          `INSERT INTO transacciones (caja_id, fecha, tipo, monto, moneda_id, monto_base, descripcion, referencia_tipo, referencia_id) 
-           VALUES ($1, NOW(), 'Salida', $2, $3, $4, $5, 'compra', $6)`,
-          [caja_id, subtotalTotal, moneda_id, totalBase, `Pago compra ${compra.numero}`, compra.id]
+          `INSERT INTO transacciones (caja_id, fecha, tipo, monto, moneda_id, monto_base, tasa, descripcion, referencia_tipo, referencia_id) 
+           VALUES ($1, NOW(), 'Salida', $2, $3, $4, $5, $6, 'compra', $7)`,
+          [caja_id, subtotalTotal, moneda_id, totalBase, tasaAplicada, `Pago compra ${compra.numero}`, compra.id]
         );
 
         await client.query(
@@ -174,18 +195,33 @@ export async function DELETE(request: Request) {
       }
 
       const items = await client.query(`SELECT * FROM compra_items WHERE compra_id = $1`, [id]);
+      // Catálogo completo (incluso monedas inactivas): la cadena de conversiones
+      // debe resolverse aunque una moneda del histórico esté desactivada
+      const monedasCatalogo = (await client.query(`SELECT * FROM monedas`)).rows;
+      const monedaCompra =
+        monedasCatalogo.find((m: any) => Number(m.id) === Number(compra.rows[0].moneda_id)) || monedasCatalogo[0];
 
       for (const item of items.rows) {
-        const productoActual = await client.query(`SELECT stock FROM productos WHERE id = $1`, [item.producto_id]);
+        const productoActual = await client.query(`SELECT * FROM productos WHERE id = $1`, [item.producto_id]);
         const stockAnterior = productoActual.rows[0]?.stock || 0;
         const nuevoStock = Math.max(0, stockAnterior - item.cantidad);
 
         await client.query(`UPDATE productos SET stock = $1 WHERE id = $2`, [nuevoStock, item.producto_id]);
 
+        // El costo vuelve a la moneda del producto (y su equivalente USD)
+        const monedaProducto = monedaDeProducto(productoActual.rows[0], monedaCompra, monedasCatalogo);
+        const costoUnitProducto = convertir(
+          Number(item.costo_unit),
+          monedaCompra,
+          monedaProducto,
+          monedasCatalogo,
+          Number(monedaProducto.decimales ?? 2)
+        );
+        const costoUnitUsd = aBase(costoUnitProducto, tasaUsd(monedaProducto, monedasCatalogo));
         await client.query(
           `INSERT INTO kardex (producto_id, fecha, tipo, motivo, referencia_tipo, referencia_id, cantidad, costo_unit, costo_unit_base, saldo_anterior, saldo_actual) 
            VALUES ($1, NOW(), 'Salida', $2, 'compra_anulada', $3, $4, $5, $6, $7, $8)`,
-          [item.producto_id, `Anulación compra`, id, item.cantidad, item.costo_unit, item.costo_unit_base, stockAnterior, nuevoStock]
+          [item.producto_id, `Anulación compra`, id, item.cantidad, costoUnitProducto, costoUnitUsd, stockAnterior, nuevoStock]
         );
       }
 

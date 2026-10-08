@@ -4,6 +4,16 @@ import { NextResponse } from "next/server";
 import { requireSession } from "@/lib/auth-server";
 import { query, queryOne } from "@/lib/db";
 
+// Expresión SQL: unidades de la moneda del producto (alias `p`) por 1 USD.
+// `costo_base`/`precio_base` están en la moneda del producto (moneda_base_id),
+// así que para convertirlos a otra moneda se divide por esto y se multiplica
+// por la tasa USD de la moneda destino. Sin moneda propia = USD (tasa 1).
+const TASA_USD_PROD = `
+  COALESCE((SELECT m1.tasa FROM monedas m1 WHERE m1.id = p.moneda_base_id), 1)
+  * COALESCE((SELECT m2.tasa FROM monedas m2 WHERE m2.id =
+      (SELECT m3.tasa_ref_moneda_id FROM monedas m3 WHERE m3.id = p.moneda_base_id)), 1)
+`;
+
 export async function GET(request: Request) {
   try {
     await requireSession();
@@ -110,11 +120,14 @@ export async function GET(request: Request) {
           comprasMensuales,
         };
       } else if (tipo === "inventario") {
+        // Productos de ESTA moneda (cada producto cuenta en su propia moneda)
         const productos = await query(`
           SELECT 
             p.*,
             c.nombre as categoria_nombre,
             m.nombre as marca_nombre,
+            pm.codigo as moneda_codigo,
+            pm.simbolo as moneda_simbolo,
             json_agg(
               json_build_object(
                 'moneda_codigo', mo.codigo,
@@ -128,15 +141,20 @@ export async function GET(request: Request) {
           LEFT JOIN marcas m ON p.marca_id = m.id
           LEFT JOIN producto_precios pp ON p.id = pp.producto_id
           LEFT JOIN monedas mo ON pp.moneda_id = mo.id
+          LEFT JOIN monedas pm ON p.moneda_base_id = pm.id
           WHERE p.activo = true
-          GROUP BY p.id, c.nombre, m.nombre
+            AND COALESCE(p.moneda_base_id, (SELECT id FROM monedas WHERE es_base = true LIMIT 1)) = ${moneda.id}
+          GROUP BY p.id, c.nombre, m.nombre, pm.codigo, pm.simbolo
           ORDER BY p.nombre, p.id ASC
         `);
 
+        // El valor del inventario se totaliza POR MONEDA: cada producto cuenta
+        // en su propia moneda (costo_base está en moneda_base_id), sin convertir
         const valorInventario = await queryOne(`
-          SELECT SUM(stock * costo_base) as valor_base
-          FROM productos
-          WHERE activo = true
+          SELECT COALESCE(SUM(p.stock * p.costo_base), 0) as valor_base
+          FROM productos p
+          WHERE p.activo = true
+            AND COALESCE(p.moneda_base_id, (SELECT id FROM monedas WHERE es_base = true LIMIT 1)) = ${moneda.id}
         `);
 
         const stockBajo = await query(`
@@ -176,10 +194,13 @@ export async function GET(request: Request) {
           movimientosKardex,
         };
       } else if (tipo === "finanzas") {
+        // Costo de lo vendido: `p.costo_base` está en la moneda del producto, así
+        // que se convierte a la moneda de la venta ÷ tasaUsd(prod) × tasaUsd(venta).
+        // (v.total/v.total_base) es la tasa efectiva USD de la venta (respeta tasa custom)
         const ganancia = await queryOne(`
           SELECT 
             COALESCE(SUM(v.subtotal), 0) as total_ingresos,
-            COALESCE(SUM(vi.cantidad * p.costo_base * (v.total / NULLIF(v.total_base, 0))), SUM(v.subtotal) * 0.7) as total_costos
+            COALESCE(SUM(vi.cantidad * p.costo_base / NULLIF(${TASA_USD_PROD}, 0) * (v.total / NULLIF(v.total_base, 0))), SUM(v.subtotal) * 0.7) as total_costos
           FROM ventas v
           JOIN venta_items vi ON v.id = vi.venta_id
           JOIN productos p ON vi.producto_id = p.id
@@ -221,7 +242,7 @@ export async function GET(request: Request) {
 
         const topProductosRentables = await query(`
           SELECT p.nombre, 
-                 SUM(vi.subtotal) - SUM(vi.cantidad * p.costo_base * (v.total / NULLIF(v.total_base, 0))) as ganancia
+                 SUM(vi.subtotal) - SUM(vi.cantidad * p.costo_base / NULLIF(${TASA_USD_PROD}, 0) * (v.total / NULLIF(v.total_base, 0))) as ganancia
           FROM venta_items vi
           JOIN ventas v ON vi.venta_id = v.id
           JOIN productos p ON vi.producto_id = p.id

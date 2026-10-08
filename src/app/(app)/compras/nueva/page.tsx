@@ -24,6 +24,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { useToast } from "@/components/ui/toast";
 import { cn } from "@/lib/utils";
+import { aBase, convertir, redondear, tasaUsd, tasaUsdDocumento } from "@/lib/money";
 import { ProductoModal } from "@/components/producto/producto-modal";
 
 /* ───── Types ───── */
@@ -40,7 +41,9 @@ interface MonedaInfo {
   id: number;
   codigo: string;
   simbolo: string;
-  tasa: number;
+  tasa: number | string;
+  tasa_ref_moneda_id?: number | null;
+  decimales?: number;
   es_base: boolean;
   activo?: boolean;
 }
@@ -85,6 +88,11 @@ interface LineItem {
   cantidad: number;
   costo_unit: number;
   subtotal: number;
+  // Base para recalcular al cambiar la tasa: `costo_base` está en la moneda
+  // del producto; `costoManual` solo se llena si el usuario lo edita a mano
+  costo_base: number;
+  moneda_base_id: number | null;
+  costoManual: number | null;
 }
 
 /* ───── Helpers ───── */
@@ -105,30 +113,29 @@ function fmtMoney(n: number, simbolo: string, codigo: string): string {
 function getCostoInMoneda(
   producto: ProductoSearch,
   moneda: MonedaInfo | null,
-  monedas: MonedaInfo[]
+  monedas: MonedaInfo[],
+  tasaCustom: number | null = null
 ): number {
-  if (!moneda) {
-    // Fallback to costo_base
-    return parseFloat(String(producto.costo_base)) || 0;
-  }
+  const costoBase = parseFloat(String(producto.costo_base)) || 0;
 
-  // Look for exact price in producto_precios
-  if (producto.precios && producto.precios.length > 0) {
-    const match = producto.precios.find((p) => p.moneda_codigo === moneda.codigo);
+  // Con tasa personalizada siempre se recalcula desde la base del producto
+  // (los precios guardados usan la tasa por defecto de la moneda)
+  if (!tasaCustom && producto.precios && producto.precios.length > 0) {
+    const match = producto.precios.find((p) => p.moneda_codigo === moneda?.codigo);
     if (match) return parseFloat(String(match.costo)) || 0;
   }
 
-  // Calculate from base price using exchange rates
-  const costoBase = parseFloat(String(producto.costo_base)) || 0;
+  if (!moneda) return costoBase;
 
-  // Find the product's base currency rate
-  const prodBaseCurrency = monedas.find((m) => m.id === producto.moneda_base_id) || monedas.find((m) => m.es_base);
-  const prodBaseRate = prodBaseCurrency ? parseFloat(String(prodBaseCurrency.tasa)) : 1;
+  // Moneda propia del producto (sin moneda propia = moneda base del sistema)
+  const prodMoneda =
+    monedas.find((m) => m.id === producto.moneda_base_id) || monedas.find((m) => m.es_base) || moneda;
 
-  // Convert: costo_base → USD → target currency
-  const costoUsd = prodBaseRate > 0 ? costoBase / prodBaseRate : costoBase;
-  const targetRate = parseFloat(String(moneda.tasa));
-  return Math.round(costoUsd * targetRate * 100) / 100;
+  const tasaProdUsd = tasaUsd(prodMoneda, monedas);
+  const tasaDocUsd = tasaUsdDocumento(moneda, tasaCustom, monedas);
+  const dec = Number(moneda.decimales ?? 2);
+  if (tasaProdUsd <= 0) return costoBase;
+  return redondear((costoBase / tasaProdUsd) * tasaDocUsd, dec);
 }
 
 /* ───── Component ───── */
@@ -151,6 +158,9 @@ export default function NuevaCompraPage() {
   const [observaciones, setObservaciones] = useState("");
   const [items, setItems] = useState<LineItem[]>([]);
   const [submitting, setSubmitting] = useState(false);
+
+  // Tasa personalizada de la compra (opcional; vacío = tasa por defecto de la moneda)
+  const [tasaCustomStr, setTasaCustomStr] = useState("");
 
   // ── Product search ──
   const [searchQuery, setSearchQuery] = useState("");
@@ -177,13 +187,39 @@ export default function NuevaCompraPage() {
 
   const selectedProveedor = proveedores.find((p) => p.id === proveedorId);
 
-  const subtotal = useMemo(() => items.reduce((sum, item) => sum + item.subtotal, 0), [items]);
+  // Tasa personalizada (si es válida) y tasa efectiva de la compra
+  const tasaCustomNum = useMemo(() => {
+    const n = parseFloat(tasaCustomStr);
+    return Number.isFinite(n) && n > 0 ? n : null;
+  }, [tasaCustomStr]);
+
+  const tasaEfectiva = useMemo(() => {
+    if (!selectedMoneda) return 0;
+    return tasaCustomNum ?? Number(selectedMoneda.tasa);
+  }, [selectedMoneda, tasaCustomNum]);
+
+  // Costo unitario de un ítem en la moneda de la compra; si el usuario lo
+  // editó a mano se respeta, si no se deriva de la tasa efectiva
+  const costoDeItem = (item: LineItem): number => {
+    if (item.costoManual !== null) return item.costoManual;
+    if (!selectedMoneda) return item.costo_base;
+    const prodMoneda =
+      monedas.find((m) => m.id === item.moneda_base_id) || monedas.find((m) => m.es_base) || selectedMoneda;
+    const tasaProdUsd = tasaUsd(prodMoneda, monedas);
+    const tasaDocUsd = tasaUsdDocumento(selectedMoneda, tasaCustomNum, monedas);
+    if (tasaProdUsd <= 0) return item.costo_base;
+    return redondear((item.costo_base / tasaProdUsd) * tasaDocUsd, Number(selectedMoneda.decimales ?? 2));
+  };
+
+  const subtotal = useMemo(
+    () => items.reduce((sum, item) => sum + costoDeItem(item) * item.cantidad, 0),
+    [items, selectedMoneda, monedas, tasaCustomNum]
+  );
 
   const totalBase = useMemo(() => {
-    if (!selectedMoneda || selectedMoneda.es_base) return subtotal;
-    const tasa = parseFloat(String(selectedMoneda.tasa));
-    return tasa > 0 ? Math.round((subtotal / tasa) * 100) / 100 : subtotal;
-  }, [subtotal, selectedMoneda]);
+    if (!selectedMoneda) return subtotal;
+    return aBase(subtotal, tasaUsdDocumento(selectedMoneda, tasaCustomNum, monedas));
+  }, [subtotal, selectedMoneda, monedas, tasaCustomNum]);
 
   // ── Load initial data ──
   useEffect(() => {
@@ -262,11 +298,10 @@ export default function NuevaCompraPage() {
 
   // ── When moneda changes, recalculate item costs ──
   useEffect(() => {
-    if (!selectedMoneda || items.length === 0) return;
-    // We need the original product data to recalculate — but we only store
-    // cost at add-time. This is okay because user manually adjusts cost.
-    // We don't auto-recalculate existing items.
-  }, [selectedMoneda]); // eslint-disable-line react-hooks/exhaustive-deps
+    // Los costos se recalculan en pantalla con `costoDeItem`; al cambiar de
+    // moneda vuelve la tasa por defecto
+    setTasaCustomStr("");
+  }, [selectedMoneda?.id]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Add product to items ──
   const addProduct = (producto: ProductoSearch) => {
@@ -275,13 +310,11 @@ export default function NuevaCompraPage() {
     if (existing) {
       setItems((prev) =>
         prev.map((i) =>
-          i.producto_id === producto.id
-            ? { ...i, cantidad: i.cantidad + 1, subtotal: (i.cantidad + 1) * i.costo_unit }
-            : i
+          i.producto_id === producto.id ? { ...i, cantidad: i.cantidad + 1 } : i
         )
       );
     } else {
-      const costo = getCostoInMoneda(producto, selectedMoneda, monedas);
+      const costo = getCostoInMoneda(producto, selectedMoneda, monedas, tasaCustomNum);
       const newItem: LineItem = {
         id: `item-${Date.now()}-${Math.random()}`,
         producto_id: producto.id,
@@ -290,6 +323,9 @@ export default function NuevaCompraPage() {
         cantidad: 1,
         costo_unit: costo,
         subtotal: costo,
+        costo_base: parseFloat(String(producto.costo_base)) || 0,
+        moneda_base_id: producto.moneda_base_id ?? null,
+        costoManual: null,
       };
       setItems((prev) => [...prev, newItem]);
     }
@@ -302,13 +338,18 @@ export default function NuevaCompraPage() {
   const updateItemQuantity = (id: string, qty: number) => {
     if (qty < 1) return;
     setItems((prev) =>
-      prev.map((i) => (i.id === id ? { ...i, cantidad: qty, subtotal: qty * i.costo_unit } : i))
+      prev.map((i) => (i.id === id ? { ...i, cantidad: qty } : i))
     );
   };
 
   const updateItemCost = (id: string, cost: number) => {
     setItems((prev) =>
-      prev.map((i) => (i.id === id ? { ...i, costo_unit: cost, subtotal: i.cantidad * cost } : i))
+      prev.map((i) =>
+        i.id === id
+          ? // El costo editado a mano queda fijo (no se recalcula con la tasa)
+            { ...i, costoManual: cost, costo_unit: cost, subtotal: i.cantidad * cost }
+          : i
+      )
     );
   };
 
@@ -344,8 +385,10 @@ export default function NuevaCompraPage() {
         items: items.map((i) => ({
           producto_id: i.producto_id,
           cantidad: i.cantidad,
-          costo_unit: i.costo_unit,
+          costo_unit: costoDeItem(i),
         })),
+        // Tasa personalizada (opcional); vacío = tasa por defecto de la moneda
+        tasa: tasaCustomNum,
       };
 
       const res = await fetch("/api/compras", {
@@ -640,7 +683,10 @@ export default function NuevaCompraPage() {
                     </tr>
                   </thead>
                   <tbody>
-                    {items.map((item) => (
+                    {items.map((item) => {
+                      const costoUnit = costoDeItem(item);
+                      const subtotalItem = costoUnit * item.cantidad;
+                      return (
                       <tr key={item.id} className="border-b border-border/30 last:border-0">
                         <td className="py-2.5 pr-3 font-mono text-xs text-muted-foreground">
                           {item.codigo}
@@ -676,15 +722,29 @@ export default function NuevaCompraPage() {
                           <input
                             type="number"
                             step="0.01"
-                            value={item.costo_unit}
+                            value={costoUnit}
                             onChange={(e) => updateItemCost(item.id, parseFloat(e.target.value) || 0)}
                             className="h-7 w-28 rounded border border-border bg-background text-right font-mono text-sm focus:border-primary focus:outline-none focus:ring-1 focus:ring-ring ml-auto block"
                           />
+                          {item.costoManual !== null && (
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setItems((prev) =>
+                                  prev.map((i) => (i.id === item.id ? { ...i, costoManual: null } : i))
+                                )
+                              }
+                              className="mt-1 text-[10px] text-muted-foreground underline hover:text-foreground"
+                              title="Volver a la tasa automática"
+                            >
+                              Usar tasa
+                            </button>
+                          )}
                         </td>
                         <td className="py-2.5 pr-3 text-right font-mono font-semibold">
                           {selectedMoneda
-                            ? fmtMoney(item.subtotal, selectedMoneda.simbolo, selectedMoneda.codigo)
-                            : `$${item.subtotal.toFixed(2)}`}
+                            ? fmtMoney(subtotalItem, selectedMoneda.simbolo, selectedMoneda.codigo)
+                            : `$${subtotalItem.toFixed(2)}`}
                         </td>
                         <td className="py-2.5 text-center">
                           <button
@@ -696,7 +756,8 @@ export default function NuevaCompraPage() {
                           </button>
                         </td>
                       </tr>
-                    ))}
+                      );
+                    })}
                   </tbody>
                 </table>
               </div>
@@ -729,15 +790,38 @@ export default function NuevaCompraPage() {
             </select>
 
             {selectedMoneda && (
-              <div className="mt-3 flex items-center gap-2 rounded-lg border border-primary/20 bg-primary/5 px-3 py-2 text-xs">
-                <span className="text-muted-foreground">Moneda:</span>
-                <span className="font-semibold text-primary">
-                  {selectedMoneda.simbolo} {selectedMoneda.codigo}
-                </span>
-                {!selectedMoneda.es_base && (
-                  <span className="text-muted-foreground ml-auto">
-                    Tasa: {parseFloat(String(selectedMoneda.tasa)).toFixed(4)}
+              <div className="mt-3 space-y-2">
+                <div className="flex items-center gap-2 rounded-lg border border-primary/20 bg-primary/5 px-3 py-2 text-xs">
+                  <span className="text-muted-foreground">Moneda:</span>
+                  <span className="font-semibold text-primary">
+                    {selectedMoneda.simbolo} {selectedMoneda.codigo}
                   </span>
+                  {!selectedMoneda.es_base && (
+                    <span className="text-muted-foreground ml-auto">
+                      Tasa: {tasaEfectiva > 0 ? tasaEfectiva.toFixed(4) : "—"}
+                    </span>
+                  )}
+                </div>
+
+                {!selectedMoneda.es_base && (
+                  <div>
+                    <label className="mb-1 block text-xs font-medium text-muted-foreground">
+                      Tasa de cambio (opcional)
+                    </label>
+                    <input
+                      type="number"
+                      step="any"
+                      min="0"
+                      value={tasaCustomStr}
+                      onChange={(e) => setTasaCustomStr(e.target.value)}
+                      placeholder={String(selectedMoneda.tasa)}
+                      className="h-10 w-full rounded border border-border bg-background px-3 font-mono text-sm focus:border-primary focus:outline-none focus:ring-1 focus:ring-ring"
+                    />
+                    <p className="mt-1 text-[11px] leading-tight text-muted-foreground">
+                      Vacío = tasa por defecto ({String(selectedMoneda.tasa)}). Al cambiarla se
+                      recalculan los costos en pantalla.
+                    </p>
+                  </div>
                 )}
               </div>
             )}
@@ -803,6 +887,12 @@ export default function NuevaCompraPage() {
                   {selectedMoneda ? fmtMoney(subtotal, selectedMoneda.simbolo, selectedMoneda.codigo) : `$${subtotal.toFixed(2)}`}
                 </span>
               </div>
+              {selectedMoneda && !selectedMoneda.es_base && (
+                <div className="flex justify-between text-xs text-muted-foreground pt-1">
+                  <span>Tasa aplicada</span>
+                  <span className="font-mono">{tasaEfectiva > 0 ? tasaEfectiva.toFixed(4) : "—"} {selectedMoneda.codigo}</span>
+                </div>
+              )}
               {selectedMoneda && !selectedMoneda.es_base && monedaBase && (
                 <div className="flex justify-between text-xs text-muted-foreground pt-1">
                   <span>Total ({monedaBase.codigo})</span>

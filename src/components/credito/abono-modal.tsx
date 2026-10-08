@@ -7,6 +7,7 @@ import { Input } from "@/components/ui/input";
 import { Field } from "@/components/ui/label";
 import { Select } from "@/components/ui/select";
 import { fmt } from "@/lib/format";
+import { convertir } from "@/lib/money";
 
 interface Credito {
   id: number;
@@ -38,7 +39,9 @@ interface Moneda {
   id: number;
   codigo: string;
   simbolo: string;
-  tasa: number;
+  tasa: number | string;
+  tasa_ref_moneda_id?: number | null;
+  decimales?: number;
   es_base: boolean;
 }
 
@@ -94,14 +97,8 @@ export function AbonoModal({ open, credito, onClose, onSuccess }: AbonoModalProp
     if (!monedaAbono || !monedaCredito || !credito) return null;
     if (monedaAbono.id === monedaCredito.id) return null;
 
-    const tasaAbono = parseFloat(String(monedaAbono.tasa));
-    const tasaCredito = parseFloat(String(monedaCredito.tasa));
-    
-    // saldo (in credit currency) -> base (USD) -> payment method currency
-    const saldoUsd = monedaCredito.es_base ? saldo : saldo / tasaCredito;
-    const saldoEnAbono = monedaAbono.es_base ? saldoUsd : saldoUsd * tasaAbono;
-
-    return Math.round(saldoEnAbono * 100) / 100;
+    // saldo (moneda del crédito) → moneda del abono, con la cadena de conversiones
+    return convertir(saldo, monedaCredito, monedaAbono, monedas, Number(monedaAbono.decimales ?? 2));
   };
 
   const handleMetodoChange = (id: string) => {
@@ -117,11 +114,10 @@ export function AbonoModal({ open, credito, onClose, onSuccess }: AbonoModalProp
         if (mAbono.id === mCredito.id) {
           setMonto(String(credito.saldo));
         } else {
-          const tasaAbono = parseFloat(String(mAbono.tasa));
-          const tasaCredito = parseFloat(String(mCredito.tasa));
-          const saldoUsd = mCredito.es_base ? saldo : saldo / tasaCredito;
-          const saldoEnAbono = mAbono.es_base ? saldoUsd : saldoUsd * tasaAbono;
-          setMonto(String(Math.round(saldoEnAbono * 100) / 100));
+          // saldo (moneda del crédito) → moneda del abono
+          setMonto(
+            String(convertir(saldo, mCredito, mAbono, monedas, Number(mAbono.decimales ?? 2)))
+          );
         }
       }
     }
@@ -140,14 +136,8 @@ export function AbonoModal({ open, credito, onClose, onSuccess }: AbonoModalProp
     
     if (monedaAbono.id === monedaCredito.id) return null; // Misma moneda
 
-    const tasaAbono = parseFloat(String(monedaAbono.tasa));
-    const tasaCredito = parseFloat(String(monedaCredito.tasa));
-    
-    // Convert to base, then to target
-    const montoUsd = monedaAbono.es_base ? val : val / tasaAbono;
-    const montoEnMonedaCredito = monedaCredito.es_base ? montoUsd : montoUsd * tasaCredito;
-    
-    return Math.round(montoEnMonedaCredito * 100) / 100;
+    // monto del abono → moneda del crédito (misma cadena que en el backend)
+    return convertir(val, monedaAbono, monedaCredito, monedas, Number(monedaCredito.decimales ?? 2));
   };
 
   const equivalente = getEquivalente();

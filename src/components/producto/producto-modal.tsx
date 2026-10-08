@@ -12,12 +12,14 @@ import { Switch } from "@/components/ui/switch";
 import { StatusBadge } from "@/components/ui/badge";
 import { Alert } from "@/components/ui/alert";
 import { fmt, fmtDateTime } from "@/lib/format";
+import { redondear, tasaUsd } from "@/lib/money";
 
 interface Moneda {
   id: number;
   codigo: string;
   simbolo: string;
   tasa: number | string;
+  tasa_ref_moneda_id?: number | null;
   decimales: number;
   es_base: boolean;
   activo?: boolean;
@@ -136,28 +138,29 @@ export function ProductoModal({ open, mode, producto, monedas: monedasProp, defa
 
     if (precioInput <= 0 && costoInput <= 0) return;
 
+    // Los precios de las demás monedas se derivan con la cadena de conversiones
     const refMoneda = effectiveMonedas.find((m) => m.id === monedaId);
-    const tasaRef = refMoneda ? (typeof refMoneda.tasa === "string" ? parseFloat(refMoneda.tasa) : Number(refMoneda.tasa)) || 1 : 1;
+    const tasaRef = tasaUsd(refMoneda, effectiveMonedas);
 
-    const precioUSD = precioInput > 0 ? precioInput / tasaRef : 0;
-    const costoUSD = costoInput > 0 ? costoInput / tasaRef : 0;
+    const precioUsd = precioInput > 0 && tasaRef > 0 ? precioInput / tasaRef : 0;
+    const costoUsd = costoInput > 0 && tasaRef > 0 ? costoInput / tasaRef : 0;
 
     setPreciosPorMoneda((prev) => {
       const next = { ...prev };
       for (const m of effectiveMonedas) {
         if (m.id === monedaId) continue;
-        const tasaTarget = typeof m.tasa === "string" ? parseFloat(m.tasa) : Number(m.tasa) || 1;
-        const d = Math.pow(10, m.decimales ?? 2);
+        const tasaTarget = tasaUsd(m, effectiveMonedas);
+        const dec = m.decimales ?? 2;
         const currentEntry = prev[m.id] || { precioVenta: "", precioCompra: "" };
 
         next[m.id] = {
           precioVenta:
             precioInput > 0
-              ? (Math.round(precioUSD * tasaTarget * d) / d).toFixed(m.decimales ?? 2)
+              ? redondear(precioUsd * tasaTarget, dec).toFixed(dec)
               : currentEntry.precioVenta,
           precioCompra:
             costoInput > 0
-              ? (Math.round(costoUSD * tasaTarget * d) / d).toFixed(m.decimales ?? 2)
+              ? redondear(costoUsd * tasaTarget, dec).toFixed(dec)
               : currentEntry.precioCompra,
         };
       }
@@ -178,30 +181,30 @@ export function ProductoModal({ open, mode, producto, monedas: monedasProp, defa
       const costoInput = parseFloat(baseEntry.precioCompra) || 0;
 
       const refMoneda = effectiveMonedas.find((m) => m.id === baseMonedaId);
-      const tasaRef = refMoneda ? (typeof refMoneda.tasa === "string" ? parseFloat(refMoneda.tasa) : Number(refMoneda.tasa)) || 1 : 1;
+      const tasaRef = tasaUsd(refMoneda, effectiveMonedas);
 
       // Convert input price to System Base Currency (USD)
-      const precioUSD = precioInput > 0 ? precioInput / tasaRef : 0;
-      const costoUSD = costoInput > 0 ? costoInput / tasaRef : 0;
+      const precioUsd = precioInput > 0 && tasaRef > 0 ? precioInput / tasaRef : 0;
+      const costoUsd = costoInput > 0 && tasaRef > 0 ? costoInput / tasaRef : 0;
 
       setPreciosPorMoneda((prev) => {
         const next = { ...prev };
         for (const m of effectiveMonedas) {
           if (m.id === baseMonedaId) continue;
-          const tasaTarget = typeof m.tasa === "string" ? parseFloat(m.tasa) : Number(m.tasa) || 1;
-          const d = Math.pow(10, m.decimales ?? 2);
+          const tasaTarget = tasaUsd(m, effectiveMonedas);
+          const dec = m.decimales ?? 2;
           const currentEntry = prev[m.id] || { precioVenta: "", precioCompra: "" };
 
           next[m.id] = {
             precioVenta:
               precioInput > 0
-                ? (Math.round(precioUSD * tasaTarget * d) / d).toFixed(m.decimales ?? 2)
+                ? redondear(precioUsd * tasaTarget, dec).toFixed(dec)
                 : field === "precioVenta"
                   ? ""
                   : currentEntry.precioVenta,
             precioCompra:
               costoInput > 0
-                ? (Math.round(costoUSD * tasaTarget * d) / d).toFixed(m.decimales ?? 2)
+                ? redondear(costoUsd * tasaTarget, dec).toFixed(dec)
                 : field === "precioCompra"
                   ? ""
                   : currentEntry.precioCompra,
@@ -452,12 +455,14 @@ export function ProductoModal({ open, mode, producto, monedas: monedasProp, defa
         throw new Error("El precio de compra no puede ser mayor al precio de venta");
       }
 
-      const tasaBase = baseMoneda ? (typeof baseMoneda.tasa === "string" ? parseFloat(baseMoneda.tasa) : Number(baseMoneda.tasa)) : 1;
+      // `precio_base`/`costo_base` se guardan EN LA MONEDA DEL PRODUCTO
+      // (moneda_base_id), tal cual como se escribieron en esa moneda
+      const decBase = Number(baseMoneda?.decimales ?? 2);
 
       if (mode === "create") {
         if (!baseMonedaId) throw new Error("Selecciona una moneda base");
-        body.precio_base = baseMoneda?.es_base ? precioVenta : (precioVenta / (tasaBase || 1));
-        body.costo_base = baseMoneda?.es_base ? precioCompra : (precioCompra / (tasaBase || 1));
+        body.precio_base = precioVenta;
+        body.costo_base = precioCompra;
 
         const res = await fetch("/api/productos", {
           method: "POST",
@@ -476,10 +481,10 @@ export function ProductoModal({ open, mode, producto, monedas: monedasProp, defa
       } else if (mode === "edit" && producto) {
         body.id = producto.id;
         if (baseMonedaId && baseEntry?.precioVenta) {
-          body.precio_base = baseMoneda?.es_base ? precioVenta : Math.round((precioVenta / (tasaBase || 1)) * 100) / 100;
+          body.precio_base = redondear(precioVenta, decBase);
         }
         if (baseMonedaId && baseEntry?.precioCompra) {
-          body.costo_base = baseMoneda?.es_base ? precioCompra : Math.round((precioCompra / (tasaBase || 1)) * 100) / 100;
+          body.costo_base = redondear(precioCompra, decBase);
         }
 
         const res = await fetch("/api/productos", {
