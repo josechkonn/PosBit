@@ -7,7 +7,7 @@ import { Input } from "@/components/ui/input";
 import { Label, Field } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { Badge, StatusBadge } from "@/components/ui/badge";
-import { fmtDateTime } from "@/lib/format";
+import { fmtDateTime, fmtTasa } from "@/lib/format";
 
 type MonedaModalMode = "create" | "edit" | "view" | "delete";
 
@@ -236,7 +236,7 @@ export function MonedaModal({ open, mode, moneda, onClose, onSuccess }: MonedaMo
             <div className="rounded-lg border border-primary/20 bg-primary-soft/40 px-3 py-2">
               <Label>Conversión directa a USD</Label>
               <p className="text-sm font-mono">
-                {parseFloat(String(moneda.tasa_usd_directa)).toFixed(6)}
+                1 USD = {fmtTasa(moneda.tasa_usd_directa)} {moneda.codigo}
               </p>
               <p className="text-xs text-muted-foreground">
                 El par con USD usa esta tasa; el par con su referencia usa la tasa de arriba.
@@ -373,7 +373,7 @@ export function MonedaModal({ open, mode, moneda, onClose, onSuccess }: MonedaMo
                   <Switch checked={usaDirecta} onCheckedChange={setUsaDirecta} />
                 </div>
                 {usaDirecta && (
-                  <Field label="Tasa directa a USD (unidades por 1 USD)">
+                  <Field label={`Tasa directa a USD (${codigo} por 1 USD)`}>
                     <Input
                       value={tasaUsdDirecta}
                       onChange={(e) => setTasaUsdDirecta(e.target.value)}

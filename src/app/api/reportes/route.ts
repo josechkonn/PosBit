@@ -3,6 +3,7 @@ export const dynamic = 'force-dynamic';
 import { NextResponse } from "next/server";
 import { requireSession } from "@/lib/auth-server";
 import { query, queryOne } from "@/lib/db";
+import { preciosDeProducto } from "@/lib/money";
 
 // Expresión SQL: unidades de la moneda del producto (alias `p`) por 1 USD.
 // `costo_base`/`precio_base` están en la moneda del producto (moneda_base_id),
@@ -133,26 +134,26 @@ export async function GET(request: Request) {
             c.nombre as categoria_nombre,
             m.nombre as marca_nombre,
             pm.codigo as moneda_codigo,
-            pm.simbolo as moneda_simbolo,
-            json_agg(
-              json_build_object(
-                'moneda_codigo', mo.codigo,
-                'moneda_simbolo', mo.simbolo,
-                'precio', pp.precio,
-                'costo', pp.costo
-              )
-            ) as precios
+            pm.simbolo as moneda_simbolo
           FROM productos p
           LEFT JOIN categorias c ON p.categoria_id = c.id
           LEFT JOIN marcas m ON p.marca_id = m.id
-          LEFT JOIN producto_precios pp ON p.id = pp.producto_id
-          LEFT JOIN monedas mo ON pp.moneda_id = mo.id
           LEFT JOIN monedas pm ON p.moneda_base_id = pm.id
           WHERE p.activo = true
             AND COALESCE(p.moneda_base_id, (SELECT id FROM monedas WHERE es_base = true LIMIT 1)) = ${moneda.id}
-          GROUP BY p.id, c.nombre, m.nombre, pm.codigo, pm.simbolo
           ORDER BY p.nombre, p.id ASC
         `);
+
+        // Los precios por moneda se derivan de `precio_base`/`costo_base`
+        // (moneda base del producto) con las tasas actuales; nunca se reescriben.
+        const catalogoReporte = await query(
+          `SELECT id, codigo, simbolo, tasa, tasa_ref_moneda_id, decimales, es_base, activo, usa_tasa_usd_directa, tasa_usd_directa FROM monedas ORDER BY es_base DESC, codigo ASC, id ASC`
+        );
+        const baseSistemaReporte = catalogoReporte.find((m: any) => m.es_base) || catalogoReporte[0];
+        const productosConPrecios = (productos as any[]).map((p) => ({
+          ...p,
+          precios: preciosDeProducto(p, catalogoReporte, baseSistemaReporte),
+        }));
 
         // El valor del inventario se totaliza POR MONEDA: cada producto cuenta
         // en su propia moneda (costo_base está en moneda_base_id), sin convertir
@@ -192,7 +193,7 @@ export async function GET(request: Request) {
 
         reportesData[moneda.codigo] = {
           moneda,
-          productos,
+          productos: productosConPrecios,
           valorInventario: {
             base: parseFloat(valorInventario?.valor_base || "0"),
           },

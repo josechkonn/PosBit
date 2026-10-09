@@ -1,6 +1,6 @@
 // Pruebas numéricas de src/lib/money.ts (la fuente de verdad de las fórmulas).
 // Correr con: npm run test:money   (Node ≥ 22.6 con strip-types, o ≥ 23)
-import { tasaUsd, convertir, tasaUsdDocumento, aBase, desdeBase, redondear, tasaPar } from "../src/lib/money.ts";
+import { tasaUsd, convertir, tasaUsdDocumento, aBase, desdeBase, redondear, tasaPar, preciosDeProducto } from "../src/lib/money.ts";
 
 const catalogo: any[] = [
   { id: 1, codigo: "USD", simbolo: "$", tasa: 1, decimales: 2, es_base: true, tasa_ref_moneda_id: null },
@@ -76,6 +76,25 @@ check("BS → COP cadena custom 3.1 = 3.1", tasaPar(VES, COP, catalogo, { [Strin
 console.log("\n── redondear ──");
 check("redondear 35.0244", redondear(35.0244), 35.02, 1e-9);
 check("redondear 1.005 (sin error flotante)", redondear(1.005), 1.01, 1e-9);
+
+console.log("\n── preciosDeProducto (derivación dinámica en lectura) ──");
+const productoCOP = { precio_base: 100000, costo_base: 80000, moneda_base_id: "3" }; // COP
+const preciosCOP = preciosDeProducto(productoCOP, catalogo, USD);
+const pUSD = preciosCOP.find((p) => p.moneda_codigo === "USD");
+const pCOP = preciosCOP.find((p) => p.moneda_codigo === "COP");
+const pVES = preciosCOP.find((p) => p.moneda_codigo === "VES");
+check("precios: fila base COP mantiene valor", pCOP?.precio ?? 0, 100000, 1e-9);
+check("precios: USD derivado desde COP", pUSD?.precio ?? 0, 35.02, 0.01);
+check("precios: VES derivado desde COP (3.2)", pVES?.precio ?? 0, 31250, 0.1);
+const precioBSProducto = preciosCOP.find((p) => p.moneda_codigo === "VES");
+check("precios: costo VES deriva", precioBSProducto?.costo ?? 0, convertir(80000, COP, VES, catalogo), 1);
+
+const productoUSD = { precio_base: 10, costo_base: 8, moneda_base_id: null }; // sin base → default USD
+const preciosUSD = preciosDeProducto(productoUSD, catalogo, USD);
+const pUSDb = preciosUSD.find((p) => p.moneda_codigo === "USD");
+check("precios: sin base → USD fijo", pUSDb?.precio ?? 0, 10, 1e-9);
+const pCOPb = preciosUSD.find((p) => p.moneda_codigo === "COP");
+check("precios: COP deriva desde USD", pCOPb?.precio ?? 0, 28551.49, 0.2);
 
 console.log(fallos === 0 ? "\n✅ TODAS LAS PRUEBAS PASARON" : `\n❌ ${fallos} FALLAS`);
 process.exit(fallos === 0 ? 0 : 1);

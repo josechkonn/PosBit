@@ -107,6 +107,9 @@ export async function PUT(request: Request) {
     const directaActiva = es_base === true ? false : usa_tasa_usd_directa;
 
     const result = await transaction(async (client) => {
+      const antesRes = await client.query(`SELECT * FROM monedas WHERE id = $1`, [id]);
+      if (antesRes.rows.length === 0) throw new Error("Moneda no encontrada");
+
       if (es_base) {
         await client.query("UPDATE monedas SET es_base = false WHERE es_base = true AND id != $1", [id]);
       }
@@ -133,6 +136,10 @@ export async function PUT(request: Request) {
           vieneDirecta && Number.isFinite(directaValor) && directaValor > 0 ? directaValor : null,
         ]
       );
+
+      // Los precios por moneda de los productos se derivan en LECTURA (GET
+      // /api/productos y /api/productos/search) con las tasas actuales, así que
+      // un cambio de conversión no requiere reescribir `producto_precios`.
 
       return res.rows[0];
     });

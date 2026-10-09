@@ -3,7 +3,7 @@ export const dynamic = 'force-dynamic';
 import { NextResponse } from "next/server";
 import { requireSession } from "@/lib/auth-server";
 import { query, queryOne, execute, transaction } from "@/lib/db";
-import { aBase, convertir, tasaUsd, monedaDeProducto } from "@/lib/money";
+import { aBase, convertir, tasaUsd, monedaDeProducto, preciosDeProducto } from "@/lib/money";
 
 export async function GET(request: Request) {
   try {
@@ -41,34 +41,33 @@ export async function GET(request: Request) {
         p.categoria_id, p.marca_id, p.proveedor_id,
         c.nombre as categoria_nombre,
         m.nombre as marca_nombre,
-        pr.nombre as proveedor_nombre,
-        json_agg(
-          json_build_object(
-            'moneda_id', pp.moneda_id,
-            'moneda_codigo', mo.codigo,
-            'moneda_simbolo', mo.simbolo,
-            'precio', pp.precio,
-            'costo', pp.costo,
-            'es_base', CASE WHEN p.moneda_base_id IS NOT NULL THEN (pp.moneda_id = p.moneda_base_id) ELSE mo.es_base END
-          ) ORDER BY mo.es_base DESC, mo.codigo ASC, mo.id ASC
-        ) as precios
+        pr.nombre as proveedor_nombre
       FROM productos p
       LEFT JOIN categorias c ON p.categoria_id = c.id
       LEFT JOIN marcas m ON p.marca_id = m.id
       LEFT JOIN proveedores pr ON p.proveedor_id = pr.id
-      LEFT JOIN producto_precios pp ON p.id = pp.producto_id
-      LEFT JOIN monedas mo ON pp.moneda_id = mo.id
       ${whereClause}
-      GROUP BY p.id, c.nombre, m.nombre, pr.nombre
       ORDER BY p.codigo ASC, p.id ASC
       LIMIT $1 OFFSET $2
     `, params);
 
-    const monedas = await query(`SELECT id, codigo, simbolo, tasa, tasa_ref_moneda_id, decimales, es_base, usa_tasa_usd_directa, tasa_usd_directa FROM monedas WHERE activo = true ORDER BY es_base DESC, codigo ASC, id ASC`);
+    // Catálogo completo (incluso monedas inactivas) para derivar los precios.
+    // Es el mismo criterio que usan POST/PUT y el resto del sistema.
+    const catalogo = await query(`SELECT id, codigo, simbolo, tasa, tasa_ref_moneda_id, decimales, es_base, activo, usa_tasa_usd_directa, tasa_usd_directa FROM monedas ORDER BY es_base DESC, codigo ASC, id ASC`);
+
+    // Solo el precio en la moneda base del producto está guardado
+    // (`precio_base`/`costo_base`). Las monedas restantes se DERIVAN en
+    // lectura con las tasas actuales, así un cambio de conversión se refleja
+    // en todos los productos sin reescribir `producto_precios`.
+    const baseSistema = catalogo.find((m: any) => m.es_base) || catalogo[0];
+    const productosConPrecios = (productos as any[]).map((p) => ({
+      ...p,
+      precios: preciosDeProducto(p, catalogo, baseSistema),
+    }));
 
     return NextResponse.json({
-      productos,
-      monedas,
+      productos: productosConPrecios,
+      monedas: (catalogo as any[]).filter((m) => m.activo),
       pagination: { page, limit, total, totalPages: Math.ceil(total / limit) },
     });
   } catch (error: unknown) {

@@ -37,3 +37,10 @@ export const fmtNumber = (n: number | string) => {
   if (isNaN(num)) return "0";
   return new Intl.NumberFormat("es-BO").format(num);
 };
+
+/** Formatea una tasa sin ceros sobrantes: 3200.0000 → "3200", 3.500000 → "3.5". */
+export const fmtTasa = (n: number | string) => {
+  const num = typeof n === "string" ? parseFloat(n) : n;
+  if (isNaN(num)) return "0";
+  return String(parseFloat(num.toFixed(6)));
+};

@@ -9,6 +9,7 @@ import { PageHeader } from "@/components/ui/page-header";
 import { Table, Td, Tr, HeaderConfig } from "@/components/ui/table";
 import { MonedaModal } from "@/components/moneda/moneda-modal";
 import { useToast } from "@/components/ui/toast";
+import { fmtTasa } from "@/lib/format";
 
 interface Moneda {
   id: string;
@@ -172,16 +173,16 @@ export default function MonedasPage() {
               </Td>
               <Td>
                 <span className="font-mono">
-                  {parseFloat(String(c.tasa)).toFixed(4)}
+                  {fmtTasa(c.tasa)}
                 </span>
                 {!c.es_base && (
                   <span className="ml-1 text-[11px] text-muted-foreground">
-                    = {monedas.find((m) => m.id === c.tasa_ref_moneda_id)?.codigo || "USD"}
+                    1 {monedas.find((m) => m.id === c.tasa_ref_moneda_id)?.codigo || "USD"} = {fmtTasa(c.tasa)} {c.codigo}
                   </span>
                 )}
                 {c.usa_tasa_usd_directa && c.tasa_usd_directa != null && (
                   <div className="text-[11px] text-primary">
-                    USD: {parseFloat(String(c.tasa_usd_directa)).toFixed(4)}
+                    1 USD = {fmtTasa(c.tasa_usd_directa)} {c.codigo}
                   </div>
                 )}
               </Td>

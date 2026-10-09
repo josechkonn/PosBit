@@ -231,3 +231,64 @@ export function monedaDeProducto<T extends MonedaConversion>(
   const encontrada = catalogo.find((m) => String(m.id) === String(id));
   return (encontrada as T) || porDefecto;
 }
+
+/** Fila de precio calculado por moneda (lo que devuelven las APIs de productos). */
+export interface PrecioPorMonedaCalculado {
+  moneda_id: string;
+  moneda_codigo: string | null;
+  moneda_simbolo: string | null;
+  tasa: number | string;
+  usa_tasa_usd_directa?: boolean | null;
+  tasa_usd_directa?: number | string | null;
+  precio: number;
+  costo: number;
+  es_base: boolean;
+}
+
+/**
+ * Precios por moneda de un producto, derivados SIEMPRE del precio base
+ * (`precio_base`/`costo_base` están en la moneda del producto). Solo la fila de
+ * la moneda base es fija; las demás se calculan con las tasas ACTUALES
+ * (dinámicas). Así un cambio de conversión (p. ej. activar COP↔USD directa) se
+ * refleja en todos los precios sin tener que reescribir la base de datos.
+ */
+export function preciosDeProducto<T extends MonedaConversion>(
+  producto: {
+    precio_base?: number | string | null;
+    costo_base?: number | string | null;
+    moneda_base_id?: string | null;
+  } | null | undefined,
+  catalogo: T[],
+  baseSistema?: T | null
+): PrecioPorMonedaCalculado[] {
+  const baseSistemaEf = baseSistema ?? catalogo.find((m) => m.es_base) ?? catalogo[0];
+  if (!baseSistemaEf) return [];
+  const base = monedaDeProducto(producto, baseSistemaEf, catalogo);
+  const precioBaseN = Number(producto?.precio_base);
+  const costoBaseN = Number(producto?.costo_base);
+  const precioBase = Number.isFinite(precioBaseN) ? precioBaseN : 0;
+  const costoBase = Number.isFinite(costoBaseN) ? costoBaseN : 0;
+
+  return catalogo
+    .map((mo) => {
+      const esBase = String(mo.id) === String(base.id);
+      const dec = Number(mo.decimales ?? 2);
+      return {
+        moneda_id: String(mo.id),
+        moneda_codigo: mo.codigo ?? null,
+        moneda_simbolo: mo.simbolo ?? null,
+        tasa: mo.tasa,
+        usa_tasa_usd_directa: mo.usa_tasa_usd_directa ?? false,
+        tasa_usd_directa: mo.tasa_usd_directa ?? null,
+        es_base: esBase,
+        precio: esBase ? precioBase : convertir(precioBase, base, mo, catalogo, dec),
+        costo: esBase ? costoBase : convertir(costoBase, base, mo, catalogo, dec),
+      };
+    })
+    .sort(
+      (a, b) =>
+        Number(b.es_base) - Number(a.es_base) ||
+        String(a.moneda_codigo ?? "").localeCompare(String(b.moneda_codigo ?? "")) ||
+        String(a.moneda_id).localeCompare(String(b.moneda_id))
+    );
+}
