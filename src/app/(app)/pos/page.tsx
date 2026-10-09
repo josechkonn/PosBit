@@ -982,6 +982,10 @@ export default function PuntoDeVentaPage() {
 
   const clienteObj = clientes.find((c) => c.id === clienteId);
 
+  // Deuda total del cliente en cada moneda
+  const clienteTieneDeuda = !!clienteObj && Array.isArray(clienteObj.deuda_total) && clienteObj.deuda_total.some((d) => Number(d.monto) > 0);
+  const deudasPendientes = clienteObj?.deuda_total?.filter((d) => Number(d.monto) > 0) || [];
+
   // Límite de crédito y deuda del cliente en la moneda de esta venta
   const deudaMoneda =
     parseFloat(String(clienteObj?.deuda_total?.find((d) => d.codigo === monedaSeleccionada)?.monto ?? 0)) || 0;
@@ -1210,10 +1214,13 @@ export default function PuntoDeVentaPage() {
                     placeholder="Consumidor Final"
                     options={[
                       { value: "", label: "Consumidor Final" },
-                      ...clientes.map((c) => ({
-                        value: String(c.id),
-                        label: `${c.nombre} ${c.documento ? `— ${c.documento}` : ""}`,
-                      })),
+                      ...clientes.map((c) => {
+                        const tieneD = Array.isArray(c.deuda_total) && c.deuda_total.some((d) => Number(d.monto) > 0);
+                        return {
+                          value: String(c.id),
+                          label: `${c.nombre} ${c.documento ? `— ${c.documento}` : ""}${tieneD ? " ⚠️ (Tiene deuda)" : ""}`,
+                        };
+                      }),
                     ]}
                     className="w-full"
                   />
@@ -1228,6 +1235,28 @@ export default function PuntoDeVentaPage() {
                   <UserPlus size={16} className="text-primary" />
                 </Button>
               </div>
+
+              {/* Alerta de Deuda Pendiente del Cliente (Por Fuera - Destacado y Legible) */}
+              {clienteObj && clienteTieneDeuda && (
+                <div className="mt-2.5 flex flex-col gap-2 rounded-xl border-2 border-amber-500/40 bg-amber-500/10 dark:bg-amber-950/40 p-3 text-xs text-amber-900 dark:text-amber-100 shadow-xs">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-1.5 font-black text-xs text-amber-800 dark:text-amber-200 uppercase tracking-wide">
+                      <AlertTriangle size={16} className="shrink-0 text-amber-500 animate-pulse" />
+                      <span>Deuda Registrada</span>
+                    </div>
+                    <span className="text-[10px] font-black uppercase tracking-wider bg-amber-500/20 text-amber-800 dark:text-amber-200 px-2 py-0.5 rounded-md border border-amber-500/30">
+                      En Cobro
+                    </span>
+                  </div>
+                  <div className="flex flex-wrap items-center gap-2 pt-0.5">
+                    {deudasPendientes.map((d) => (
+                      <div key={`deuda-cart-${d.codigo}`} className="bg-card/90 dark:bg-muted/90 border border-amber-500/40 px-3 py-1.5 rounded-lg text-sm font-mono font-black shadow-2xs text-rose-600 dark:text-rose-400">
+                        {fmt(d.monto, d.codigo)}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
             </div>
 
             <div className="flex-1 min-h-0 divide-y divide-border overflow-y-auto">
@@ -1584,10 +1613,13 @@ export default function PuntoDeVentaPage() {
                         placeholder="Consumidor Final"
                         options={[
                           { value: "", label: "Consumidor Final" },
-                          ...clientes.map((c) => ({
-                            value: String(c.id),
-                            label: `${c.nombre} ${c.documento ? `— ${c.documento}` : ""}`,
-                          })),
+                          ...clientes.map((c) => {
+                            const tieneD = Array.isArray(c.deuda_total) && c.deuda_total.some((d) => Number(d.monto) > 0);
+                            return {
+                              value: String(c.id),
+                              label: `${c.nombre} ${c.documento ? `— ${c.documento}` : ""}${tieneD ? " ⚠️ (Tiene deuda)" : ""}`,
+                            };
+                          }),
                         ]}
                       />
                     </div>
@@ -1595,6 +1627,35 @@ export default function PuntoDeVentaPage() {
                       <UserPlus size={18} className="text-primary" />
                     </Button>
                   </div>
+
+                  {/* Alerta de Deuda Pendiente del Cliente (Por Dentro del Modal) */}
+                  {clienteObj && clienteTieneDeuda && (
+                    <div className="mt-3 flex flex-col gap-2.5 rounded-2xl border-2 border-amber-500/40 bg-gradient-to-r from-amber-500/15 via-amber-500/10 to-transparent p-3.5 text-amber-900 dark:text-amber-100 shadow-sm">
+                      <div className="flex items-center justify-between border-b border-amber-500/20 pb-2">
+                        <div className="flex items-center gap-2">
+                          <div className="w-7 h-7 rounded-lg bg-amber-500/20 flex items-center justify-center text-amber-600 dark:text-amber-300">
+                            <AlertTriangle size={16} className="animate-pulse" />
+                          </div>
+                          <div>
+                            <h4 className="font-extrabold text-xs uppercase tracking-wide text-amber-900 dark:text-amber-200">
+                              Deuda Pendiente de {clienteObj.nombre}
+                            </h4>
+                          </div>
+                        </div>
+                        <span className="text-[10px] font-black uppercase tracking-wider bg-rose-500/20 text-rose-700 dark:text-rose-300 px-2.5 py-0.5 rounded-full border border-rose-500/30">
+                          Deuda Activa
+                        </span>
+                      </div>
+
+                      <div className="flex flex-wrap items-center gap-2 pt-0.5">
+                        {deudasPendientes.map((d) => (
+                          <div key={`deuda-modal-${d.codigo}`} className="bg-card border-2 border-amber-500/40 px-3.5 py-1.5 rounded-xl shadow-xs text-sm font-black font-mono text-rose-600 dark:text-rose-400">
+                            {fmt(d.monto, d.codigo)}
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
                 </Field>
 
                 {/* Informaciones de Crédito si la venta incluye Crédito / Pago Parcial.
