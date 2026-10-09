@@ -23,11 +23,17 @@ export async function POST(request: Request) {
   try {
     await requireRole(["admin"]);
     const body = await request.json();
-    const { nombre, codigo, simbolo, tasa, tasa_ref_moneda_id, decimales, es_base, activo } = body;
+    const {
+      nombre, codigo, simbolo, tasa, tasa_ref_moneda_id, decimales, es_base, activo,
+      usa_tasa_usd_directa, tasa_usd_directa,
+    } = body;
 
     if (!nombre || !codigo || !simbolo || tasa === undefined) {
       return NextResponse.json({ error: "Campos requeridos: nombre, codigo, simbolo, tasa" }, { status: 400 });
     }
+
+    const directaValor = Number(tasa_usd_directa);
+    const directaActiva = !es_base && usa_tasa_usd_directa === true;
 
     const result = await transaction(async (client) => {
       if (es_base) {
@@ -35,10 +41,13 @@ export async function POST(request: Request) {
       }
 
       const res = await client.query(
-        `INSERT INTO monedas (nombre, codigo, simbolo, tasa, tasa_ref_moneda_id, decimales, es_base, activo) 
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8) 
+        `INSERT INTO monedas (nombre, codigo, simbolo, tasa, tasa_ref_moneda_id, decimales, es_base, activo, usa_tasa_usd_directa, tasa_usd_directa) 
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) 
          RETURNING *`,
-        [nombre, codigo, simbolo, tasa, tasa_ref_moneda_id || null, decimales ?? 2, es_base || false, activo !== false]
+        [
+          nombre, codigo, simbolo, tasa, tasa_ref_moneda_id || null, decimales ?? 2, es_base || false, activo !== false,
+          directaActiva, directaActiva && Number.isFinite(directaValor) && directaValor > 0 ? directaValor : null,
+        ]
       );
 
       const moneda = res.rows[0];
@@ -80,7 +89,10 @@ export async function PUT(request: Request) {
   try {
     await requireRole(["admin"]);
     const body = await request.json();
-    const { id, nombre, codigo, simbolo, tasa, tasa_ref_moneda_id, decimales, es_base, activo } = body;
+    const {
+      id, nombre, codigo, simbolo, tasa, tasa_ref_moneda_id, decimales, es_base, activo,
+      usa_tasa_usd_directa, tasa_usd_directa,
+    } = body;
 
     if (!id) {
       return NextResponse.json({ error: "ID requerido" }, { status: 400 });
@@ -89,6 +101,10 @@ export async function PUT(request: Request) {
     // tasa_ref_moneda_id sí admite volver a NULL (referencia USD), por eso
     // se distingue "no vino en el body" de "vino null".
     const vieneRef = Object.prototype.hasOwnProperty.call(body, "tasa_ref_moneda_id");
+    // tasa_usd_directa también admite volver a NULL (desactivar el valor).
+    const vieneDirecta = Object.prototype.hasOwnProperty.call(body, "tasa_usd_directa");
+    const directaValor = Number(tasa_usd_directa);
+    const directaActiva = es_base === true ? false : usa_tasa_usd_directa;
 
     const result = await transaction(async (client) => {
       if (es_base) {
@@ -104,10 +120,18 @@ export async function PUT(request: Request) {
              decimales = COALESCE($6, decimales),
              es_base = COALESCE($7, es_base),
              activo = COALESCE($8, activo),
-             tasa_ref_moneda_id = CASE WHEN $9 THEN tasa_ref_moneda_id ELSE $10::integer END
+             tasa_ref_moneda_id = CASE WHEN $9 THEN $10::uuid ELSE tasa_ref_moneda_id END,
+             usa_tasa_usd_directa = COALESCE($11, usa_tasa_usd_directa),
+             tasa_usd_directa = CASE WHEN $12 THEN $13::numeric ELSE tasa_usd_directa END
          WHERE id = $1 
          RETURNING *`,
-        [id, nombre, codigo, simbolo, tasa, decimales, es_base, activo, vieneRef, vieneRef ? tasa_ref_moneda_id || null : null]
+        [
+          id, nombre, codigo, simbolo, tasa, decimales, es_base, activo,
+          vieneRef, vieneRef ? tasa_ref_moneda_id || null : null,
+          directaActiva,
+          vieneDirecta,
+          vieneDirecta && Number.isFinite(directaValor) && directaValor > 0 ? directaValor : null,
+        ]
       );
 
       return res.rows[0];

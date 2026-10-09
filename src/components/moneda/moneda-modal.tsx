@@ -21,6 +21,8 @@ interface Moneda {
   decimales: number;
   es_base: boolean;
   activo: boolean;
+  usa_tasa_usd_directa?: boolean;
+  tasa_usd_directa?: number | string | null;
   creado_en: string;
   actualizado_en: string;
   cajas_count?: number;
@@ -40,6 +42,8 @@ export function MonedaModal({ open, mode, moneda, onClose, onSuccess }: MonedaMo
   const [simbolo, setSimbolo] = useState("");
   const [tasa, setTasa] = useState("1.000000");
   const [tasaRefId, setTasaRefId] = useState<string>("");
+  const [usaDirecta, setUsaDirecta] = useState(false);
+  const [tasaUsdDirecta, setTasaUsdDirecta] = useState("");
   const [monedasCatalogo, setMonedasCatalogo] = useState<Moneda[]>([]);
   const [decimales, setDecimales] = useState("2");
   const [esBase, setEsBase] = useState(false);
@@ -63,6 +67,12 @@ export function MonedaModal({ open, mode, moneda, onClose, onSuccess }: MonedaMo
       setSimbolo(moneda.simbolo);
       setTasa(String(parseFloat(String(moneda.tasa)).toFixed(6)));
       setTasaRefId(moneda.tasa_ref_moneda_id ? String(moneda.tasa_ref_moneda_id) : "");
+      setUsaDirecta(moneda.usa_tasa_usd_directa === true);
+      setTasaUsdDirecta(
+        moneda.tasa_usd_directa !== null && moneda.tasa_usd_directa !== undefined
+          ? String(parseFloat(String(moneda.tasa_usd_directa)))
+          : ""
+      );
       setDecimales(String(moneda.decimales ?? 2));
       setEsBase(moneda.es_base);
       setActivo(moneda.activo);
@@ -72,6 +82,8 @@ export function MonedaModal({ open, mode, moneda, onClose, onSuccess }: MonedaMo
       setSimbolo("");
       setTasa("1.000000");
       setTasaRefId("");
+      setUsaDirecta(false);
+      setTasaUsdDirecta("");
       setDecimales("2");
       setEsBase(false);
       setActivo(true);
@@ -98,6 +110,8 @@ export function MonedaModal({ open, mode, moneda, onClose, onSuccess }: MonedaMo
             decimales: parseInt(decimales) || 2,
             es_base: esBase,
             activo,
+            usa_tasa_usd_directa: !esBase && usaDirecta,
+            tasa_usd_directa: !esBase && usaDirecta ? parseFloat(tasaUsdDirecta) || null : null,
           }),
         });
         const data = await res.json();
@@ -118,6 +132,8 @@ export function MonedaModal({ open, mode, moneda, onClose, onSuccess }: MonedaMo
             decimales: parseInt(decimales) || 2,
             es_base: esBase,
             activo,
+            usa_tasa_usd_directa: !esBase && usaDirecta,
+            tasa_usd_directa: !esBase && usaDirecta ? parseFloat(tasaUsdDirecta) || null : null,
           }),
         });
         const data = await res.json();
@@ -216,6 +232,17 @@ export function MonedaModal({ open, mode, moneda, onClose, onSuccess }: MonedaMo
                 : "moneda base (USD)"}
             </p>
           </div>
+          {moneda.usa_tasa_usd_directa && moneda.tasa_usd_directa != null && (
+            <div className="rounded-lg border border-primary/20 bg-primary-soft/40 px-3 py-2">
+              <Label>Conversión directa a USD</Label>
+              <p className="text-sm font-mono">
+                {parseFloat(String(moneda.tasa_usd_directa)).toFixed(6)}
+              </p>
+              <p className="text-xs text-muted-foreground">
+                El par con USD usa esta tasa; el par con su referencia usa la tasa de arriba.
+              </p>
+            </div>
+          )}
           <div className="grid grid-cols-3 gap-4">
             <div>
               <Label>Decimales</Label>
@@ -304,36 +331,66 @@ export function MonedaModal({ open, mode, moneda, onClose, onSuccess }: MonedaMo
               </p>
             </Field>
           ) : (
-            <Field label="La tasa equivale a (referencia)">
-              <div className="flex items-center gap-2">
-                <Input
-                  value={tasa}
-                  onChange={(e) => setTasa(e.target.value)}
-                  placeholder="1.000000"
-                  type="number"
-                  step="0.000001"
-                  className="flex-1"
-                />
-                <select
-                  value={tasaRefId}
-                  onChange={(e) => setTasaRefId(e.target.value)}
-                  className="h-10 rounded border border-border bg-background px-2 text-sm focus:border-primary focus:outline-none focus:ring-1 focus:ring-ring"
-                >
-                  <option value="">USD (base)</option>
-                  {monedasCatalogo
-                    .filter((m) => m.id !== moneda?.id && m.activo !== false && !m.es_base)
-                    .map((m) => (
-                      <option key={m.id} value={m.id}>
-                        {m.codigo}
-                      </option>
-                    ))}
-                </select>
+            <>
+              <Field label="La tasa equivale a (referencia)">
+                <div className="flex items-center gap-2">
+                  <Input
+                    value={tasa}
+                    onChange={(e) => setTasa(e.target.value)}
+                    placeholder="1.000000"
+                    type="number"
+                    step="0.000001"
+                    className="flex-1"
+                  />
+                  <select
+                    value={tasaRefId}
+                    onChange={(e) => setTasaRefId(e.target.value)}
+                    className="h-10 rounded border border-border bg-background px-2 text-sm focus:border-primary focus:outline-none focus:ring-1 focus:ring-ring"
+                  >
+                    <option value="">USD (base)</option>
+                    {monedasCatalogo
+                      .filter((m) => m.id !== moneda?.id && m.activo !== false && !m.es_base)
+                      .map((m) => (
+                        <option key={m.id} value={m.id}>
+                          {m.codigo}
+                        </option>
+                      ))}
+                  </select>
+                </div>
+                <p className="mt-1 text-[11px] leading-tight text-muted-foreground">
+                  Ej.: 3.2 con referencia BS significa 3.2 COP por 1 BS.
+                </p>
+              </Field>
+
+              <div className="rounded-lg border border-border bg-muted/30 p-3 space-y-3">
+                <div className="flex items-center justify-between gap-3">
+                  <div>
+                    <Label>Conversión directa a USD</Label>
+                    <p className="text-[11px] leading-tight text-muted-foreground">
+                      Usa una tasa propia para USD en vez de derivarla de la referencia.
+                    </p>
+                  </div>
+                  <Switch checked={usaDirecta} onCheckedChange={setUsaDirecta} />
+                </div>
+                {usaDirecta && (
+                  <Field label="Tasa directa a USD (unidades por 1 USD)">
+                    <Input
+                      value={tasaUsdDirecta}
+                      onChange={(e) => setTasaUsdDirecta(e.target.value)}
+                      placeholder="Ej: 3200"
+                      type="number"
+                      step="0.000001"
+                      min="0"
+                    />
+                    <p className="mt-1 text-[11px] leading-tight text-muted-foreground">
+                      Se usa para el par con USD. El par con la referencia ({tasaRefId
+                        ? monedasCatalogo.find((m) => m.id === tasaRefId)?.codigo || "referencia"
+                        : "USD"}) sigue usando la tasa de arriba.
+                    </p>
+                  </Field>
+                )}
               </div>
-              <p className="mt-1 text-[11px] leading-tight text-muted-foreground">
-                Ej.: 3.2 con referencia BS significa 3.2 COP por 1 BS; la conversión a USD se
-                resuelve con toda la cadena (BS → USD).
-              </p>
-            </Field>
+            </>
           )}
           <div className="flex items-center justify-between">
             <Label>Moneda Principal</Label>

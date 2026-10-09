@@ -3,7 +3,7 @@ export const dynamic = 'force-dynamic';
 import { NextResponse } from "next/server";
 import { requireSession } from "@/lib/auth-server";
 import { query, queryOne, execute, transaction } from "@/lib/db";
-import { aBase, tasaUsdDocumento } from "@/lib/money";
+import { aBase, tasaUsdDocumento, tasaMostrada } from "@/lib/money";
 
 export async function GET() {
   try {
@@ -49,7 +49,7 @@ export async function POST(request: Request) {
       const tasaAplicada =
         tasaCustom !== null && tasaCustom !== undefined && Number(tasaCustom) > 0
           ? Number(tasaCustom)
-          : Number(moneda.rows[0].tasa);
+          : tasaMostrada(moneda.rows[0]);
       const tasaUsdTransaccion = tasaUsdDocumento(moneda.rows[0], tasaCustom, monedasCatalogo);
       const montoBase = aBase(Number(monto), tasaUsdTransaccion);
 

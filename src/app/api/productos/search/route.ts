@@ -30,6 +30,8 @@ export async function GET(request: Request) {
             'moneda_codigo', mo.codigo,
             'moneda_simbolo', mo.simbolo,
             'tasa', mo.tasa,
+            'usa_tasa_usd_directa', mo.usa_tasa_usd_directa,
+            'tasa_usd_directa', mo.tasa_usd_directa,
             'costo', pp.costo,
             'precio', pp.precio,
             'es_base', mo.es_base

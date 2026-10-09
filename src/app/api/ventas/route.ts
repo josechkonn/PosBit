@@ -3,7 +3,7 @@ export const dynamic = 'force-dynamic';
 import { NextResponse } from "next/server";
 import { requireSession } from "@/lib/auth-server";
 import { query, queryOne, execute, transaction } from "@/lib/db";
-import { aBase, convertir, redondear, tasaUsd, tasaUsdDocumento, monedaDeProducto } from "@/lib/money";
+import { aBase, convertir, redondear, tasaUsd, tasaUsdDocumento, monedaDeProducto, tasaMostrada, tasaPar } from "@/lib/money";
 
 function generarNumero() {
   const year = new Date().getFullYear();
@@ -99,11 +99,13 @@ export async function POST(request: Request) {
       const monedaVenta = moneda.rows[0];
       // Tasa efectiva para el pase a base (USD): la personalizada si vino, si no la de la moneda
       const tasaUsdVenta = tasaUsdDocumento(monedaVenta, tasaCustom, monedasCatalogo);
-      // Tasa "de cara al usuario" (unidades de la moneda por su referencia): la que se guarda
+      // Tasa "de cara al usuario": la personalizada si vino; si no, la directa a
+      // USD cuando el modo directo está activo (misma unidad que la personalizada),
+      // o la de referencia (p. ej. COP↔BS) en modo cadena.
       const tasaAplicada =
         tasaCustom !== null && tasaCustom !== undefined && Number(tasaCustom) > 0
           ? Number(tasaCustom)
-          : Number(monedaVenta.tasa);
+          : tasaMostrada(monedaVenta);
 
       let clienteNombre = cliente || null;
       let clienteRow = null;
@@ -213,15 +215,22 @@ export async function POST(request: Request) {
           const tasaUsdLinea = tasaUsd(monedaLinea, monedasCatalogo);
           const esMonedaVenta = String(met.moneda_id) === String(moneda_id);
 
-          // Entregado → moneda de la venta (vía USD con la tasa del documento)
+          // La tasa efectiva del documento (tasa personalizada si vino) solo
+          // sobreescribe a la moneda de la venta; los pares con su referencia
+          // (COP ↔ BS) siguen usando la tasa directa de la moneda.
+          const factorPago = tasaPar(monedaLinea, monedaVenta, monedasCatalogo, {
+            [String(monedaVenta.id)]: tasaUsdVenta,
+          });
+
+          // Entregado → moneda de la venta.
           const montoVenta = esMonedaVenta
             ? montoLinea
-            : redondear((montoLinea / tasaUsdLinea) * tasaUsdVenta);
+            : redondear(montoLinea * factorPago, Number(monedaVenta.decimales ?? 2));
           const aplicado = Math.min(montoVenta, restante);
           // Lo aplicado → moneda del método, para saber el vuelto y lo que entra a la caja
           const aplicadoLinea = esMonedaVenta
             ? aplicado
-            : redondear((aplicado / tasaUsdVenta) * tasaUsdLinea);
+            : redondear(aplicado / (factorPago || 1), Number(monedaLinea.decimales ?? 2));
           const vuelto = redondear(Math.max(0, montoLinea - aplicadoLinea));
 
           restante = redondear(restante - aplicado);
@@ -415,7 +424,7 @@ export async function POST(request: Request) {
             monto: efectivo,
             monedaId: l.monedaId,
             montoBase: aBase(efectivo, l.tasaUsdLinea),
-            tasa: Number(monedasCatalogo.find((m: any) => String(m.id) === String(l.monedaId))?.tasa) || 1,
+            tasa: tasaMostrada(monedasCatalogo.find((m: any) => String(m.id) === String(l.monedaId))),
           });
         }
       } else if (caja_id && metodo_pago_id && pagado > 0.009) {

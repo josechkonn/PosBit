@@ -24,7 +24,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { useToast } from "@/components/ui/toast";
 import { cn } from "@/lib/utils";
-import { aBase, convertir, redondear, tasaUsd, tasaUsdDocumento } from "@/lib/money";
+import { aBase, redondear, tasaUsd, tasaUsdDocumento, tasaMostrada, esConversionDirectaUsd, tasaPar } from "@/lib/money";
 import { ProductoModal } from "@/components/producto/producto-modal";
 import { MetodoPagoSelect } from "@/components/ui/metodo-pago-select";
 
@@ -47,6 +47,8 @@ interface MonedaInfo {
   decimales?: number;
   es_base: boolean;
   activo?: boolean;
+  usa_tasa_usd_directa?: boolean;
+  tasa_usd_directa?: number | string | null;
 }
 
 interface MetodoPago {
@@ -136,7 +138,10 @@ function getCostoInMoneda(
   const tasaDocUsd = tasaUsdDocumento(moneda, tasaCustom, monedas);
   const dec = Number(moneda.decimales ?? 2);
   if (tasaProdUsd <= 0) return costoBase;
-  return redondear((costoBase / tasaProdUsd) * tasaDocUsd, dec);
+  // Factor par a par: respeta la tasa personalizada para USD pero mantiene el
+  // par con la referencia (COP ↔ BS = 3.2) aunque COP use tasa directa a USD.
+  const factor = tasaPar(prodMoneda, moneda, monedas, { [String(moneda.id)]: tasaDocUsd });
+  return redondear(costoBase * factor, dec);
 }
 
 /* ───── Component ───── */
@@ -196,8 +201,11 @@ export default function NuevaCompraPage() {
 
   const tasaEfectiva = useMemo(() => {
     if (!selectedMoneda) return 0;
-    return tasaCustomNum ?? Number(selectedMoneda.tasa);
+    return tasaCustomNum ?? tasaMostrada(selectedMoneda);
   }, [selectedMoneda, tasaCustomNum]);
+
+  // ¿La moneda de la compra usa conversión directa a USD? Cambia la etiqueta.
+  const compraDirecta = esConversionDirectaUsd(selectedMoneda);
 
   // Costo unitario de un ítem en la moneda de la compra; si el usuario lo
   // editó a mano se respeta, si no se deriva de la tasa efectiva
@@ -209,7 +217,8 @@ export default function NuevaCompraPage() {
     const tasaProdUsd = tasaUsd(prodMoneda, monedas);
     const tasaDocUsd = tasaUsdDocumento(selectedMoneda, tasaCustomNum, monedas);
     if (tasaProdUsd <= 0) return item.costo_base;
-    return redondear((item.costo_base / tasaProdUsd) * tasaDocUsd, Number(selectedMoneda.decimales ?? 2));
+    const factor = tasaPar(prodMoneda, selectedMoneda, monedas, { [String(selectedMoneda.id)]: tasaDocUsd });
+    return redondear(item.costo_base * factor, Number(selectedMoneda.decimales ?? 2));
   };
 
   const subtotal = useMemo(
@@ -804,7 +813,7 @@ export default function NuevaCompraPage() {
                 {!selectedMoneda.es_base && (
                   <div>
                     <label className="mb-1 block text-xs font-medium text-muted-foreground">
-                      Tasa de cambio (opcional)
+                      Tasa de cambio{compraDirecta ? " (unidades por 1 USD)" : ""} (opcional)
                     </label>
                     <input
                       type="number"
@@ -812,11 +821,11 @@ export default function NuevaCompraPage() {
                       min="0"
                       value={tasaCustomStr}
                       onChange={(e) => setTasaCustomStr(e.target.value)}
-                      placeholder={String(selectedMoneda.tasa)}
+                      placeholder={String(tasaMostrada(selectedMoneda))}
                       className="h-10 w-full rounded border border-border bg-background px-3 font-mono text-sm focus:border-primary focus:outline-none focus:ring-1 focus:ring-ring"
                     />
                     <p className="mt-1 text-[11px] leading-tight text-muted-foreground">
-                      Vacío = tasa por defecto ({String(selectedMoneda.tasa)}). Al cambiarla se
+                      Vacío = tasa por defecto ({String(tasaMostrada(selectedMoneda))}). Al cambiarla se
                       recalculan los costos en pantalla.
                     </p>
                   </div>

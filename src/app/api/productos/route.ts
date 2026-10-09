@@ -64,7 +64,7 @@ export async function GET(request: Request) {
       LIMIT $1 OFFSET $2
     `, params);
 
-    const monedas = await query(`SELECT id, codigo, simbolo, tasa, tasa_ref_moneda_id, decimales, es_base FROM monedas WHERE activo = true ORDER BY es_base DESC, codigo ASC, id ASC`);
+    const monedas = await query(`SELECT id, codigo, simbolo, tasa, tasa_ref_moneda_id, decimales, es_base, usa_tasa_usd_directa, tasa_usd_directa FROM monedas WHERE activo = true ORDER BY es_base DESC, codigo ASC, id ASC`);
 
     return NextResponse.json({
       productos,

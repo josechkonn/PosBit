@@ -9,9 +9,15 @@ import { query, queryOne } from "@/lib/db";
 // así que para convertirlos a otra moneda se divide por esto y se multiplica
 // por la tasa USD de la moneda destino. Sin moneda propia = USD (tasa 1).
 const TASA_USD_PROD = `
-  COALESCE((SELECT m1.tasa FROM monedas m1 WHERE m1.id = p.moneda_base_id), 1)
-  * COALESCE((SELECT m2.tasa FROM monedas m2 WHERE m2.id =
-      (SELECT m3.tasa_ref_moneda_id FROM monedas m3 WHERE m3.id = p.moneda_base_id)), 1)
+  COALESCE((
+    SELECT CASE
+      WHEN m1.usa_tasa_usd_directa AND m1.tasa_usd_directa > 0 THEN m1.tasa_usd_directa
+      ELSE m1.tasa * COALESCE((
+        SELECT m2.tasa FROM monedas m2 WHERE m2.id = m1.tasa_ref_moneda_id
+      ), 1)
+    END
+    FROM monedas m1 WHERE m1.id = p.moneda_base_id
+  ), 1)
 `;
 
 export async function GET(request: Request) {

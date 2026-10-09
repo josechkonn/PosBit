@@ -3,7 +3,7 @@ export const dynamic = 'force-dynamic';
 import { NextResponse } from "next/server";
 import { requireSession } from "@/lib/auth-server";
 import { query, queryOne, execute, transaction } from "@/lib/db";
-import { aBase, convertir, tasaUsd, tasaUsdDocumento, monedaDeProducto } from "@/lib/money";
+import { aBase, convertir, tasaUsd, tasaUsdDocumento, monedaDeProducto, tasaMostrada } from "@/lib/money";
 
 function generarNumero() {
   const year = new Date().getFullYear();
@@ -65,11 +65,12 @@ export async function POST(request: Request) {
       const monedaCompra = moneda.rows[0];
       // Tasa efectiva de la compra: la personalizada si vino, si no la de la moneda
       const tasaUsdCompra = tasaUsdDocumento(monedaCompra, tasaCustom, monedasCatalogo);
-      // Tasa "de cara al usuario" (unidades de la moneda por su referencia): la que se guarda
+      // Tasa "de cara al usuario": la personalizada si vino; si no, la directa a
+      // USD cuando el modo directo está activo, o la de referencia en modo cadena.
       const tasaAplicada =
         tasaCustom !== null && tasaCustom !== undefined && Number(tasaCustom) > 0
           ? Number(tasaCustom)
-          : Number(monedaCompra.tasa);
+          : tasaMostrada(monedaCompra);
 
       let subtotalTotal = 0;
 

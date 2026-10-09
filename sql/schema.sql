@@ -70,6 +70,8 @@ CREATE TABLE IF NOT EXISTS monedas (
     tasa DECIMAL(18, 6) NOT NULL DEFAULT 1.000000,
     tasa_ref_moneda_id INTEGER REFERENCES monedas(id) ON DELETE SET NULL,
     decimales INT NOT NULL DEFAULT 2,
+    usa_tasa_usd_directa BOOLEAN NOT NULL DEFAULT false,
+    tasa_usd_directa DECIMAL(18, 6),
     es_base BOOLEAN NOT NULL DEFAULT false,
     activo BOOLEAN NOT NULL DEFAULT true,
     creado_en TIMESTAMP NOT NULL DEFAULT NOW(),
@@ -82,6 +84,13 @@ ALTER TABLE monedas ADD COLUMN IF NOT EXISTS decimales INT NOT NULL DEFAULT 2;
 -- Migración: la tasa pasa a referirse a otra moneda (NULL = USD, la base).
 -- Ej.: COP tasa 3.2 referida a BS → 1 COP = 3.2/892.2342 USD (ver src/lib/money.ts)
 ALTER TABLE monedas ADD COLUMN IF NOT EXISTS tasa_ref_moneda_id INTEGER REFERENCES monedas(id) ON DELETE SET NULL;
+
+-- Migración: conversión directa a USD independiente de la referencia.
+-- Con `usa_tasa_usd_directa = true`, `tasa_usd_directa` son las unidades de la
+-- moneda por 1 USD (p. ej. COP ≈ 3200) y se usa para el par moneda ↔ USD; el
+-- par con su referencia sigue usando `tasa` (p. ej. COP ↔ BS = 3.2).
+ALTER TABLE monedas ADD COLUMN IF NOT EXISTS usa_tasa_usd_directa BOOLEAN NOT NULL DEFAULT false;
+ALTER TABLE monedas ADD COLUMN IF NOT EXISTS tasa_usd_directa DECIMAL(18, 6);
 
 -- Garantizar que solo una moneda sea la base
 CREATE UNIQUE INDEX IF NOT EXISTS idx_monedas_es_base ON monedas (es_base) WHERE es_base = true;
@@ -264,28 +273,46 @@ ALTER TABLE compras ADD COLUMN IF NOT EXISTS referencia VARCHAR(100);
 ALTER TABLE compras ADD COLUMN IF NOT EXISTS tasa DECIMAL(18, 6);
 
 -- Migración: eliminar proveedores duplicados conservando el de menor id
--- y reasignando las compras al proveedor conservado (requiere tabla compras)
-WITH duplicados AS (
-    SELECT LOWER(TRIM(nombre)) AS nombre_key, MIN(id) AS keep_id
-    FROM proveedores
-    GROUP BY LOWER(TRIM(nombre))
-    HAVING COUNT(*) > 1
-),
-a_eliminar AS (
-    SELECT p.id AS del_id, d.keep_id
-    FROM proveedores p
-    JOIN duplicados d ON LOWER(TRIM(p.nombre)) = d.nombre_key
-    WHERE p.id <> d.keep_id
-),
-reasignar AS (
-    UPDATE compras c
-    SET proveedor_id = ae.keep_id
-    FROM a_eliminar ae
-    WHERE c.proveedor_id = ae.del_id
-)
-DELETE FROM proveedores p
-USING a_eliminar ae
-WHERE p.id = ae.del_id;
+-- y reasignando las compras al proveedor conservado (requiere tabla compras).
+-- Solo aplica si `proveedores.id` es numérico: tras la migración a UUID,
+-- MIN(id) no existe (min(uuid)) y el "menor id" ya no tiene sentido.
+DO $$
+BEGIN
+  IF EXISTS (
+    SELECT 1
+    FROM pg_attribute a
+    JOIN pg_class c ON c.oid = a.attrelid
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+    WHERE n.nspname = 'public'
+      AND c.relname = 'proveedores'
+      AND a.attname = 'id'
+      AND a.atttypid IN ('int4'::regtype, 'int8'::regtype)
+  ) THEN
+    EXECUTE $dedup$
+      WITH duplicados AS (
+        SELECT LOWER(TRIM(nombre)) AS nombre_key, MIN(id) AS keep_id
+        FROM proveedores
+        GROUP BY LOWER(TRIM(nombre))
+        HAVING COUNT(*) > 1
+      ),
+      a_eliminar AS (
+        SELECT p.id AS del_id, d.keep_id
+        FROM proveedores p
+        JOIN duplicados d ON LOWER(TRIM(p.nombre)) = d.nombre_key
+        WHERE p.id <> d.keep_id
+      ),
+      reasignar AS (
+        UPDATE compras c
+        SET proveedor_id = ae.keep_id
+        FROM a_eliminar ae
+        WHERE c.proveedor_id = ae.del_id
+      )
+      DELETE FROM proveedores p
+      USING a_eliminar ae
+      WHERE p.id = ae.del_id;
+    $dedup$;
+  END IF;
+END $$;
 
 -- ============================================================================
 -- 10. COMPRA ITEMS
@@ -671,6 +698,10 @@ UPDATE monedas SET tasa = 3.200000 WHERE codigo = 'COP' AND tasa = 4200.000000;
 UPDATE monedas
 SET tasa_ref_moneda_id = (SELECT id FROM monedas WHERE codigo = 'VES')
 WHERE codigo = 'COP' AND tasa = 3.200000 AND tasa_ref_moneda_id IS NULL;
+
+-- Valor sugerido para la conversión directa COP ↔ USD (queda desactivada por
+-- defecto: `usa_tasa_usd_directa` sigue en false hasta que el usuario la active).
+UPDATE monedas SET tasa_usd_directa = 3200.000000 WHERE codigo = 'COP' AND tasa_usd_directa IS NULL;
 
 -- Migracion unica: el limite de credito antiguo (un solo numero) pasa a ser
 -- el limite en la moneda base. No se pisa si ya se edito en la nueva tabla.

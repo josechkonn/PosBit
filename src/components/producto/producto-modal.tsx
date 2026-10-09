@@ -15,7 +15,7 @@ import { Switch } from "@/components/ui/switch";
 import { StatusBadge } from "@/components/ui/badge";
 import { Alert } from "@/components/ui/alert";
 import { fmt, fmtDateTime } from "@/lib/format";
-import { redondear, tasaUsd } from "@/lib/money";
+import { convertir, redondear } from "@/lib/money";
 
 interface Moneda {
   id: string;
@@ -143,29 +143,25 @@ export function ProductoModal({ open, mode, producto, monedas: monedasProp, defa
 
     if (precioInput <= 0 && costoInput <= 0) return;
 
-    // Los precios de las demás monedas se derivan con la cadena de conversiones
+    // Los precios de las demás monedas se derivan con `convertir` (respeta la
+    // arista directa de referencia, p. ej. COP ↔ BS = 3.2, en modo directo).
     const refMoneda = effectiveMonedas.find((m) => m.id === monedaId);
-    const tasaRef = tasaUsd(refMoneda, effectiveMonedas);
-
-    const precioUsd = precioInput > 0 && tasaRef > 0 ? precioInput / tasaRef : 0;
-    const costoUsd = costoInput > 0 && tasaRef > 0 ? costoInput / tasaRef : 0;
 
     setPreciosPorMoneda((prev) => {
       const next = { ...prev };
       for (const m of effectiveMonedas) {
         if (m.id === monedaId) continue;
-        const tasaTarget = tasaUsd(m, effectiveMonedas);
         const dec = m.decimales ?? 2;
         const currentEntry = (prev as Record<string, PrecioEntry>)[m.id] || { precioVenta: "", precioCompra: "" };
 
         next[m.id] = {
           precioVenta:
             precioInput > 0
-              ? redondear(precioUsd * tasaTarget, dec).toFixed(dec)
+              ? convertir(precioInput, refMoneda, m, effectiveMonedas, dec).toFixed(dec)
               : currentEntry.precioVenta,
           precioCompra:
             costoInput > 0
-              ? redondear(costoUsd * tasaTarget, dec).toFixed(dec)
+              ? convertir(costoInput, refMoneda, m, effectiveMonedas, dec).toFixed(dec)
               : currentEntry.precioCompra,
         };
       }
@@ -186,30 +182,26 @@ export function ProductoModal({ open, mode, producto, monedas: monedasProp, defa
       const costoInput = parseFloat(baseEntry.precioCompra) || 0;
 
       const refMoneda = effectiveMonedas.find((m) => m.id === baseMonedaId);
-      const tasaRef = tasaUsd(refMoneda, effectiveMonedas);
 
-      // Convert input price to System Base Currency (USD)
-      const precioUsd = precioInput > 0 && tasaRef > 0 ? precioInput / tasaRef : 0;
-      const costoUsd = costoInput > 0 && tasaRef > 0 ? costoInput / tasaRef : 0;
-
+      // Derivar los precios de las demás monedas con `convertir` (respeta la
+      // arista directa de referencia en modo directo).
       setPreciosPorMoneda((prev) => {
         const next = { ...prev };
         for (const m of effectiveMonedas) {
           if (m.id === baseMonedaId) continue;
-          const tasaTarget = tasaUsd(m, effectiveMonedas);
           const dec = m.decimales ?? 2;
           const currentEntry = (prev as Record<string, PrecioEntry>)[m.id] || { precioVenta: "", precioCompra: "" };
 
           next[m.id] = {
             precioVenta:
               precioInput > 0
-                ? redondear(precioUsd * tasaTarget, dec).toFixed(dec)
+                ? convertir(precioInput, refMoneda, m, effectiveMonedas, dec).toFixed(dec)
                 : field === "precioVenta"
                   ? ""
                   : currentEntry.precioVenta,
             precioCompra:
               costoInput > 0
-                ? redondear(costoUsd * tasaTarget, dec).toFixed(dec)
+                ? convertir(costoInput, refMoneda, m, effectiveMonedas, dec).toFixed(dec)
                 : field === "precioCompra"
                   ? ""
                   : currentEntry.precioCompra,

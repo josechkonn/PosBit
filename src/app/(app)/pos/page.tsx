@@ -13,7 +13,7 @@ import { MetodoPagoSelect, ordenarMetodosPorMoneda } from "@/components/ui/metod
 import { Combobox } from "@/components/ui/combobox";
 import { useToast } from "@/components/ui/toast";
 import { fmt, fmtDateTime, fmtNumber } from "@/lib/format";
-import { redondear, tasaUsd, tasaUsdDocumento } from "@/lib/money";
+import { redondear, tasaUsd, tasaUsdDocumento, tasaMostrada, esConversionDirectaUsd, tasaPar } from "@/lib/money";
 import { ReceiptPrinter } from "@/components/pos/receipt-printer";
 import { ClienteModal } from "@/components/cliente/cliente-modal";
 
@@ -47,6 +47,8 @@ interface Moneda {
   tasa_ref_moneda_id?: string | null;
   decimales: number;
   es_base: boolean;
+  usa_tasa_usd_directa?: boolean;
+  tasa_usd_directa?: number | string | null;
 }
 
 interface MetodoPago {
@@ -473,7 +475,12 @@ export default function PuntoDeVentaPage() {
     const tasaDocUsd = tasaUsdDocumento(targetMoneda, conTasaCustom ? tasaCustomNum : null, monedas);
     const dec = Number(targetMoneda.decimales ?? 2);
     if (tasaProdUsd <= 0) return precioBaseNum;
-    return redondear((precioBaseNum / tasaProdUsd) * tasaDocUsd, dec);
+    // Factor par a par: respeta la tasa personalizada para USD pero mantiene el
+    // par con la referencia (COP ↔ BS = 3.2) aunque COP use tasa directa a USD.
+    const factor = tasaPar(prodMoneda, targetMoneda, monedas, {
+      [String(targetMoneda.id)]: tasaDocUsd,
+    });
+    return redondear(precioBaseNum * factor, dec);
   };
 
   const getPrecio = (producto: Producto): number => getPrecioEnMoneda(producto, monedaSeleccionada);
@@ -483,13 +490,19 @@ export default function PuntoDeVentaPage() {
     const targetMoneda = monedas.find((m) => m.codigo === monedaSeleccionada);
     if (!targetMoneda) return 0;
     const tasaCustomNum = parseFloat(tasaCustomStr);
-    return Number.isFinite(tasaCustomNum) && tasaCustomNum > 0 ? tasaCustomNum : Number(targetMoneda.tasa);
+    return Number.isFinite(tasaCustomNum) && tasaCustomNum > 0 ? tasaCustomNum : tasaMostrada(targetMoneda);
   }, [monedas, monedaSeleccionada, tasaCustomStr]);
 
   // Tasa por defecto de la moneda seleccionada (placeholder del campo)
   const tasaPorDefecto = useMemo(() => {
     const targetMoneda = monedas.find((m) => m.codigo === monedaSeleccionada);
-    return targetMoneda ? String(targetMoneda.tasa) : "";
+    return targetMoneda ? String(tasaMostrada(targetMoneda)) : "";
+  }, [monedas, monedaSeleccionada]);
+
+  // ¿La moneda de la venta usa conversión directa a USD? Cambia la etiqueta del campo.
+  const monedaVentaDirecta = useMemo(() => {
+    const targetMoneda = monedas.find((m) => m.codigo === monedaSeleccionada);
+    return esConversionDirectaUsd(targetMoneda);
   }, [monedas, monedaSeleccionada]);
 
   const addToCart = (p: Producto) => {
@@ -608,7 +621,6 @@ export default function PuntoDeVentaPage() {
     return lineasPago.map((l) => {
       const metodo = metodosPago.find((m) => m.id === (l.metodoId ?? metodoPagoSeleccionado)) || null;
       const monedaLinea = monedas.find((m) => m.codigo === metodo?.moneda_codigo) || null;
-      const tasaLinea = monedaLinea ? tasaUsd(monedaLinea, monedas) : 1;
       const esMonedaVenta = !!monedaLinea && !!monedaVenta && monedaLinea.id === monedaVenta.id;
       const decLinea = Number(monedaLinea?.decimales ?? 2);
       const restanteAntes = restante;
@@ -636,10 +648,16 @@ export default function PuntoDeVentaPage() {
         monto = redondear(n, decLinea);
       }
 
-      // Entregado → moneda de la venta; lo aplicado se devuelve a la línea
-      const montoVenta = esMonedaVenta ? monto : redondear((monto / tasaLinea) * tasaDoc);
+      // Entregado → moneda de la venta; lo aplicado se devuelve a la línea.
+      // Se usa la arista directa si existe (COP ↔ BS = 3.2 aunque COP use tasa
+      // directa a USD); la tasa personalizada solo sobreescribe la de la venta.
+      const monedaVentaObj = monedaVenta;
+      const factor = monedaLinea && monedaVentaObj
+        ? tasaPar(monedaLinea, monedaVentaObj, monedas, { [String(monedaVentaObj.id)]: tasaDoc })
+        : 1;
+      const montoVenta = esMonedaVenta ? monto : redondear(monto * factor, Number(monedaVentaObj?.decimales ?? 2));
       const aplicado = Math.min(montoVenta, restante);
-      const aplicadoLinea = esMonedaVenta ? aplicado : redondear((aplicado / tasaDoc) * tasaLinea);
+      const aplicadoLinea = esMonedaVenta ? aplicado : redondear(aplicado / (factor || 1), decLinea);
       const vuelto = redondear(Math.max(0, monto - aplicadoLinea));
       restante = redondear(restante - aplicado);
 
@@ -681,8 +699,9 @@ export default function PuntoDeVentaPage() {
       : 1;
     let suma = 0;
     for (const l of conVuelto) {
-      const t = l.monedaLinea ? tasaUsd(l.monedaLinea, monedas) : 1;
-      if (t > 0) suma += (l.vuelto / t) * tasaVenta;
+      if (l.monedaLinea && monedaVenta) {
+        suma += l.vuelto * tasaPar(l.monedaLinea, monedaVenta, monedas, { [String(monedaVenta.id)]: tasaVenta });
+      }
     }
     return { monto: redondear(suma), codigo: monedaSeleccionada };
   }, [pagosResueltos, pagadoTotal, total, monedas, monedaSeleccionada, tasaCustomStr]);
@@ -1537,7 +1556,10 @@ export default function PuntoDeVentaPage() {
                 {/* Tasa de Cambio Personalizada */}
                 {monedaSeleccionada && (
                   <div>
-                    <Label className="text-xs font-bold text-foreground">Tasa {monedaSeleccionada} (opcional)</Label>
+                    <Label className="text-xs font-bold text-foreground">
+                      Tasa {monedaSeleccionada}
+                      {monedaVentaDirecta ? " por 1 USD" : ""} (opcional)
+                    </Label>
                     <Input
                       className="mt-1 h-10 text-right font-mono text-sm font-semibold"
                       type="number"

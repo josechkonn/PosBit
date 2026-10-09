@@ -47,16 +47,22 @@ export async function GET(request: Request) {
                  WHERE vi.venta_id = rt.venta_id AND vi.producto_id = ri.producto_id
                  ORDER BY vi.id LIMIT 1),
                 -- Fallback: precio_unit_base está en USD → moneda del documento
-                -- (tasa de la moneda × tasa de su referencia; ver src/lib/money.ts)
-                ri.precio_unit_base * COALESCE(mv.tasa, 1)
-                  * COALESCE((SELECT mr.tasa FROM monedas mr WHERE mr.id = mv.tasa_ref_moneda_id), 1)
+                -- (tasa directa a USD si está activa; si no, tasa × su referencia)
+                ri.precio_unit_base * CASE
+                  WHEN mv.usa_tasa_usd_directa AND mv.tasa_usd_directa > 0 THEN mv.tasa_usd_directa
+                  ELSE COALESCE(mv.tasa, 1)
+                    * COALESCE((SELECT mr.tasa FROM monedas mr WHERE mr.id = mv.tasa_ref_moneda_id), 1)
+                END
               )
               WHEN rt.compra_id IS NOT NULL THEN COALESCE(
                 (SELECT ci.costo_unit FROM compra_items ci
                  WHERE ci.compra_id = rt.compra_id AND ci.producto_id = ri.producto_id
                  ORDER BY ci.id LIMIT 1),
-                ri.precio_unit_base * COALESCE(mc.tasa, 1)
-                  * COALESCE((SELECT mr.tasa FROM monedas mr WHERE mr.id = mc.tasa_ref_moneda_id), 1)
+                ri.precio_unit_base * CASE
+                  WHEN mc.usa_tasa_usd_directa AND mc.tasa_usd_directa > 0 THEN mc.tasa_usd_directa
+                  ELSE COALESCE(mc.tasa, 1)
+                    * COALESCE((SELECT mr.tasa FROM monedas mr WHERE mr.id = mc.tasa_ref_moneda_id), 1)
+                END
               )
               ELSE ri.precio_unit_base
             END
@@ -84,15 +90,21 @@ export async function GET(request: Request) {
              WHERE vi.venta_id = rt.venta_id AND vi.producto_id = ri.producto_id
              ORDER BY vi.id LIMIT 1),
             -- Fallback: precio_unit_base en USD → moneda del documento (cadena de tasas)
-            ri.precio_unit_base * COALESCE(mv.tasa, 1)
-              * COALESCE((SELECT mr.tasa FROM monedas mr WHERE mr.id = mv.tasa_ref_moneda_id), 1)
+            ri.precio_unit_base * CASE
+              WHEN mv.usa_tasa_usd_directa AND mv.tasa_usd_directa > 0 THEN mv.tasa_usd_directa
+              ELSE COALESCE(mv.tasa, 1)
+                * COALESCE((SELECT mr.tasa FROM monedas mr WHERE mr.id = mv.tasa_ref_moneda_id), 1)
+            END
           )
           WHEN rt.compra_id IS NOT NULL THEN COALESCE(
             (SELECT ci.costo_unit FROM compra_items ci
              WHERE ci.compra_id = rt.compra_id AND ci.producto_id = ri.producto_id
              ORDER BY ci.id LIMIT 1),
-            ri.precio_unit_base * COALESCE(mc.tasa, 1)
-              * COALESCE((SELECT mr.tasa FROM monedas mr WHERE mr.id = mc.tasa_ref_moneda_id), 1)
+            ri.precio_unit_base * CASE
+              WHEN mc.usa_tasa_usd_directa AND mc.tasa_usd_directa > 0 THEN mc.tasa_usd_directa
+              ELSE COALESCE(mc.tasa, 1)
+                * COALESCE((SELECT mr.tasa FROM monedas mr WHERE mr.id = mc.tasa_ref_moneda_id), 1)
+            END
           )
           ELSE ri.precio_unit_base
         END as subtotal_moneda

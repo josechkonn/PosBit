@@ -20,6 +20,8 @@ interface Moneda {
   decimales: number;
   es_base: boolean;
   activo: boolean;
+  usa_tasa_usd_directa?: boolean;
+  tasa_usd_directa?: number | string | null;
   creado_en: string;
   actualizado_en: string;
   cajas_count?: number;
@@ -176,6 +178,11 @@ export default function MonedasPage() {
                   <span className="ml-1 text-[11px] text-muted-foreground">
                     = {monedas.find((m) => m.id === c.tasa_ref_moneda_id)?.codigo || "USD"}
                   </span>
+                )}
+                {c.usa_tasa_usd_directa && c.tasa_usd_directa != null && (
+                  <div className="text-[11px] text-primary">
+                    USD: {parseFloat(String(c.tasa_usd_directa)).toFixed(4)}
+                  </div>
                 )}
               </Td>
               <Td>
