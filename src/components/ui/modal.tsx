@@ -14,6 +14,15 @@ interface ModalProps {
   footer?: React.ReactNode;
   className?: string;
   hideCloseButton?: boolean;
+  /**
+   * z-index base del modal (overlay = base, contenido = base + 1). Súbelo en los
+   * modales ANIDADOS: con el valor por defecto (100) el contenido del modal
+   * padre queda por encima del overlay del hijo, así que el fondo no se
+   * atenúa ni se desenfoca.
+   */
+  zIndex?: number;
+  /** Clases extra del overlay (fondo, desenfoque). */
+  overlayClassName?: string;
 }
 
 export function Modal({
@@ -24,6 +33,8 @@ export function Modal({
   footer,
   className,
   hideCloseButton,
+  zIndex = 100,
+  overlayClassName,
 }: ModalProps) {
   useEffect(() => {
     if (!open) return;
@@ -45,9 +56,13 @@ export function Modal({
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
             onClick={onClose}
-            className="fixed inset-0 z-[100] bg-background/80 backdrop-blur-sm"
+            style={{ zIndex: zIndex }}
+            className={cn("fixed inset-0 bg-background/80 backdrop-blur-sm", overlayClassName)}
           />
-          <div className="fixed inset-0 z-[101] flex items-center justify-center p-4 sm:p-6 pointer-events-none">
+          <div
+            style={{ zIndex: zIndex + 1 }}
+            className="fixed inset-0 flex items-center justify-center p-4 sm:p-6 pointer-events-none"
+          >
             <motion.div
               initial={{ opacity: 0, scale: 0.95, y: 20 }}
               animate={{ opacity: 1, scale: 1, y: 0 }}

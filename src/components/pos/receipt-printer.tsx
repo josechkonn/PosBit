@@ -56,6 +56,7 @@ export const ReceiptPrinter = forwardRef<HTMLDivElement, ReceiptProps>(
     return (
       <div
         ref={ref}
+        data-print-receipt
         className="hidden print:block text-black bg-white"
         style={{
           width: "80mm", // Standard thermal printer width

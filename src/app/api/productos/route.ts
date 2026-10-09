@@ -93,7 +93,7 @@ export async function POST(request: Request) {
         `INSERT INTO productos (codigo, nombre, descripcion, categoria_id, marca_id, proveedor_id, stock, stock_minimo, precio_base, costo_base, activo, iva_incluido, moneda_base_id) 
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13) 
          RETURNING *`,
-        [codigo, nombre, descripcion || null, categoria_id || null, marca_id || null, proveedor_id || null, stock || 0, stock_minimo || 5, precio_base, costo_base, activo !== false, iva_incluido !== false, moneda_base_id || null]
+        [codigo, nombre, descripcion || null, categoria_id || null, marca_id || null, proveedor_id || null, stock || 0, stock_minimo ?? 5, precio_base, costo_base, activo !== false, iva_incluido !== false, moneda_base_id || null]
       );
 
       const producto = res.rows[0];

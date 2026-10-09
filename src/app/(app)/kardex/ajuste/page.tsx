@@ -82,28 +82,126 @@ export default function AjusteKardexPage() {
     return () => document.removeEventListener("mousedown", handleClick);
   }, []);
 
-  const handleSelectProduct = (p: ProductoSearch) => {
-    const exists = items.find((i) => i.producto_id === p.id);
-    if (exists) {
-      toast("El producto ya está en la lista de ajustes", "warning");
-      setSearchQuery("");
-      setSearchOpen(false);
-      return;
-    }
+  // ── Global Barcode Scanner & Search Logic ──
+  const agregarOIncrementarProducto = (p: ProductoSearch) => {
+    setItems((prev) => {
+      const index = prev.findIndex((i) => i.producto_id === p.id);
+      if (index >= 0) {
+        const copy = [...prev];
+        copy[index] = {
+          ...copy[index],
+          cantidad: copy[index].cantidad + 1,
+        };
+        return copy;
+      }
+      return [
+        ...prev,
+        {
+          id: crypto.randomUUID(),
+          producto_id: p.id,
+          codigo: p.codigo,
+          nombre: p.nombre,
+          tipo: "Entrada",
+          cantidad: 1,
+          motivo: "Ajuste manual",
+          stock_actual: p.stock,
+        },
+      ];
+    });
+  };
 
-    setItems((prev) => [
-      ...prev,
-      {
-        id: crypto.randomUUID(),
-        producto_id: p.id,
-        codigo: p.codigo,
-        nombre: p.nombre,
-        tipo: "Entrada",
-        cantidad: 1,
-        motivo: "Ajuste manual",
-        stock_actual: p.stock,
-      },
-    ]);
+  const agregarPorTexto = async (queryStr: string, limpiar: boolean = true) => {
+    const q = queryStr.trim();
+    if (!q) return;
+
+    try {
+      setSearchLoading(true);
+      const res = await fetch(`/api/productos/search?q=${encodeURIComponent(q)}`);
+      if (res.ok) {
+        const data = await res.json();
+        const lista: ProductoSearch[] = Array.isArray(data) ? data : [];
+        const lowerQ = q.toLowerCase();
+
+        // Coincidencia exacta por código de barras o único resultado
+        const match =
+          lista.find((p) => p.codigo.trim().toLowerCase() === lowerQ) ||
+          (lista.length === 1 ? lista[0] : null);
+
+        if (match) {
+          agregarOIncrementarProducto(match);
+          if (limpiar) {
+            setSearchQuery("");
+            setSearchOpen(false);
+          }
+          toast(`Producto agregado: ${match.nombre}`, "success");
+        } else if (lista.length > 0) {
+          setSearchResults(lista);
+          setSearchOpen(true);
+        } else {
+          toast("No se encontró ningún producto con ese código", "error");
+        }
+      } else {
+        toast("Error al buscar producto", "error");
+      }
+    } catch {
+      toast("Error al buscar producto", "error");
+    } finally {
+      setSearchLoading(false);
+    }
+  };
+
+  // Ref con la versión más reciente para el listener global del lector de barras
+  const agregarPorTextoRef = useRef(agregarPorTexto);
+  useEffect(() => {
+    agregarPorTextoRef.current = agregarPorTexto;
+  });
+
+  const barcodeBuffer = useRef("");
+  const lastKeyTime = useRef<number>(0);
+
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (
+        e.target instanceof HTMLInputElement ||
+        e.target instanceof HTMLTextAreaElement ||
+        e.target instanceof HTMLSelectElement
+      ) {
+        return; // Ignorar si el usuario está escribiendo en un input
+      }
+
+      const now = Date.now();
+      if (now - lastKeyTime.current > 50) {
+        barcodeBuffer.current = ""; // Resetear si es tipeo humano lento
+      }
+      lastKeyTime.current = now;
+
+      if (e.key === "Enter") {
+        const code = barcodeBuffer.current.trim();
+        if (code) {
+          void agregarPorTextoRef.current(code, true);
+        }
+        barcodeBuffer.current = "";
+      } else if (e.key.length === 1) {
+        barcodeBuffer.current += e.key;
+      }
+    };
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, []);
+
+  const handleSearchKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      const code = searchQuery.trim();
+      if (code) {
+        void agregarPorTexto(code, true);
+      }
+    }
+  };
+
+  const handleSelectProduct = (p: ProductoSearch) => {
+    agregarOIncrementarProducto(p);
     setSearchQuery("");
     setSearchOpen(false);
   };
@@ -206,9 +304,10 @@ export default function AjusteKardexPage() {
                 <div className="relative group">
                   <Search className="absolute left-3.5 top-1/2 -translate-y-1/2 text-muted-foreground/50 transition-colors group-focus-within:text-primary" size={18} />
                   <Input
-                    placeholder="Buscar producto por código o nombre..."
+                    placeholder="Escanear código de barras o buscar producto..."
                     value={searchQuery}
                     onChange={(e) => setSearchQuery(e.target.value)}
+                    onKeyDown={handleSearchKeyDown}
                     className="pl-10 h-12 bg-background/50 border-border/60 hover:bg-background focus:bg-background transition-colors text-base rounded-xl"
                   />
                   {searchLoading && (

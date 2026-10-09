@@ -255,3 +255,30 @@
     transition-duration: 0.01ms !important;
   }
 }
+
+/* ── Impresión: solo el ticket ────────────────────────────────────
+   Sin esto, window.print() imprimía toda la pantalla (incluido el modal
+   "Venta Exitosa") en lugar del ticket. Se oculta todo con visibility y
+   solo se muestra lo marcado con data-print-receipt. */
+@media print {
+  body * {
+    visibility: hidden !important;
+  }
+
+  [data-print-receipt],
+  [data-print-receipt] * {
+    visibility: visible !important;
+  }
+
+  [data-print-receipt] {
+    position: absolute !important;
+    top: 0 !important;
+    left: 0 !important;
+    width: 100% !important;
+    margin: 0 !important;
+  }
+
+  body {
+    background: #fff !important;
+  }
+}

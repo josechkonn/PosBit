@@ -76,11 +76,10 @@ export function AppShell({ children, user }: { children: React.ReactNode; user: 
           )}
           <main
             className={cn(
-              "flex-1 overflow-y-auto p-5",
-              // POS: el viewport manda (100vh). Sin scroll de página; el scroll
-              // solo existe dentro del catálogo y del carrito (flex + min-h-0,
-              // sin cálculos con vh que se desfazan por redondeo/zoom)
-              esPOS && "lg:flex lg:flex-col lg:overflow-hidden"
+              "flex-1 min-h-0 min-w-0",
+              esPOS
+                ? "flex flex-col overflow-hidden p-3 sm:p-4"
+                : "p-5 overflow-y-auto"
             )}
           >
             {children}

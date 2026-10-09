@@ -72,6 +72,28 @@ function claseMoneda(codigo?: string | null) {
   return (cod && MONEDAS[cod]) || MONEDA_POR_DEFECTO;
 }
 
+/** Orden de monedas en los selectores: COP, luego VES, luego USD. */
+const ORDEN_MONEDAS = ["COP", "VES", "USD"];
+
+/**
+ * Ordena una lista de métodos de pago agrupando por moneda en el orden
+ * COP → VES → USD (cualquier otra moneda al final, por nombre). Dentro de
+ * cada grupo se conserva el orden original de los métodos.
+ */
+export function ordenarMetodosPorMoneda<T extends { moneda_codigo?: string | null }>(
+  metodos: T[]
+): T[] {
+  const rango = (cod: string | null | undefined) => {
+    const i = ORDEN_MONEDAS.indexOf((cod || "").trim().toUpperCase());
+    return i === -1 ? ORDEN_MONEDAS.length : i;
+  };
+  const codigoDe = (m: T) => m?.moneda_codigo || "";
+  return [...metodos].sort((a, b) => {
+    const d = rango(codigoDe(a)) - rango(codigoDe(b));
+    return d !== 0 ? d : codigoDe(a).localeCompare(codigoDe(b));
+  });
+}
+
 /** "Efectivo USD" → "Efectivo" cuando el nombre ya lleva la moneda al final. */
 function etiquetaDe(m: MetodoPagoOption) {
   const cod = (m.moneda_codigo || "").trim();
@@ -102,9 +124,9 @@ export function MetodoPagoSelect({
   const seleccionado = metodos.find((m) => String(m.id) === valorStr);
   const InfoSel = infoTipo(seleccionado?.tipo);
 
-  // Agrupa los métodos por moneda (USD, VES, COP…), respetando su orden
+  // Agrupa los métodos por moneda (COP, VES, USD…), en ese orden
   const grupos: { codigo: string; items: MetodoPagoOption[] }[] = [];
-  for (const m of metodos) {
+  for (const m of ordenarMetodosPorMoneda(metodos)) {
     const codigo = (m.moneda_codigo || "").trim().toUpperCase();
     const g = grupos.find((x) => x.codigo === codigo);
     if (g) g.items.push(m);

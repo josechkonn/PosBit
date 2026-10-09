@@ -52,9 +52,11 @@ interface ClienteModalProps {
   cliente: Cliente | null;
   onClose: () => void;
   onSuccess: (message: string, data?: any) => void;
+  /** Súbelo cuando el modal se abre ANIDADO (p. ej. desde el checkout del POS). */
+  zIndex?: number;
 }
 
-export function ClienteModal({ open, mode, cliente, onClose, onSuccess }: ClienteModalProps) {
+export function ClienteModal({ open, mode, cliente, onClose, onSuccess, zIndex }: ClienteModalProps) {
   const [nombre, setNombre] = useState("");
   const [tipo, setTipo] = useState("Persona Natural");
   const [documento, setDocumento] = useState("");
@@ -197,6 +199,7 @@ export function ClienteModal({ open, mode, cliente, onClose, onSuccess }: Client
       onClose={onClose}
       title={titles[mode]}
       className="max-w-xl w-[90vw]"
+      zIndex={zIndex}
       footer={
         <>
           <Button variant="outline" onClick={onClose} disabled={loading} className="flex-1">

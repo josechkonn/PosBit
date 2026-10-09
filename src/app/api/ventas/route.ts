@@ -479,14 +479,16 @@ export async function DELETE(request: Request) {
         throw new Error("Venta no encontrada");
       }
 
-      if (venta.rows[0].estado === "Credito") {
-        const abonosRes = await client.query(
-          `SELECT COUNT(*) as count FROM abonos WHERE credito_id IN (SELECT id FROM creditos WHERE venta_id = $1)`,
-          [id]
-        );
-        if (parseInt(abonosRes.rows[0]?.count || "0", 10) > 0) {
-          throw new Error("No se puede eliminar: la venta a crédito tiene abonos registrados");
-        }
+      // Si tiene abonos registrados no se puede anular. Se comprueba siempre que
+      // exista crédito de la venta (cualquier estado de la venta), no solo
+      // cuando la venta está en estado "Credito": una venta pagada puede
+      // haber quedado con un crédito abierto.
+      const abonosRes = await client.query(
+        `SELECT COUNT(*) as count FROM abonos WHERE credito_id IN (SELECT id FROM creditos WHERE venta_id = $1)`,
+        [id]
+      );
+      if (parseInt(abonosRes.rows[0]?.count || "0", 10) > 0) {
+        throw new Error("No se puede eliminar: la venta tiene abonos registrados");
       }
 
       const items = await client.query(`SELECT * FROM venta_items WHERE venta_id = $1`, [id]);
@@ -514,12 +516,23 @@ export async function DELETE(request: Request) {
         );
       }
 
+      // Crédito y pagos de la venta: se borran explícitamente (aunque la FK ya
+      // cascadea) para que anular una venta a crédito no deje al cliente
+      // debiendo una deuda de una venta que ya no existe. Los abonos se
+      // comprobaron antes que no existan.
+      await client.query(`DELETE FROM abonos WHERE credito_id IN (SELECT id FROM creditos WHERE venta_id = $1)`, [id]);
+      await client.query(`DELETE FROM creditos WHERE venta_id = $1`, [id]);
+      await client.query(`DELETE FROM venta_pagos WHERE venta_id = $1`, [id]);
       await client.query(`DELETE FROM venta_items WHERE venta_id = $1`, [id]);
       await client.query(`DELETE FROM ventas WHERE id = $1`, [id]);
     });
 
     return NextResponse.json({ success: true });
   } catch (error) {
-    return NextResponse.json({ error: "Error al eliminar venta" }, { status: 500 });
+    // Se devuelve el mensaje real: antes todo terminaba en un
+    // "Error al eliminar venta" genérico que ocultaba el motivo (abonos
+    // registrados, venta inexistente, etc.).
+    const message = error instanceof Error ? error.message : "Error al eliminar venta";
+    return NextResponse.json({ error: message }, { status: 500 });
   }
 }

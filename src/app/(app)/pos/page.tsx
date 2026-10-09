@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useMemo, useRef } from "react";
+import { useState, useEffect, useMemo, useRef, useCallback } from "react";
 import { Minus, Package, Plus, ShoppingCart, X, Check, Pause, Printer, FolderOpen, UserPlus, CheckCircle2, Zap, AlertTriangle, XCircle } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
@@ -9,10 +9,10 @@ import { Field, Label } from "@/components/ui/label";
 import { Input } from "@/components/ui/input";
 import { Modal } from "@/components/ui/modal";
 import { SearchBar } from "@/components/ui/search-bar";
-import { MetodoPagoSelect } from "@/components/ui/metodo-pago-select";
+import { MetodoPagoSelect, ordenarMetodosPorMoneda } from "@/components/ui/metodo-pago-select";
 import { Combobox } from "@/components/ui/combobox";
 import { useToast } from "@/components/ui/toast";
-import { fmt, fmtDateTime } from "@/lib/format";
+import { fmt, fmtDateTime, fmtNumber } from "@/lib/format";
 import { redondear, tasaUsd, tasaUsdDocumento } from "@/lib/money";
 import { ReceiptPrinter } from "@/components/pos/receipt-printer";
 import { ClienteModal } from "@/components/cliente/cliente-modal";
@@ -115,6 +115,9 @@ interface HeldCart {
   timestamp: string;
 }
 
+// Tamaño de página del catálogo del POS (paginación por offset + scroll infinito)
+const PAGE_SIZE = 24;
+
 function deduplicateById<T extends { id: any }>(list: T[]): T[] {
   const seen = new Set<string>();
   return list.filter((item) => {
@@ -137,6 +140,17 @@ export default function PuntoDeVentaPage() {
   const [clientes, setClientes] = useState<Cliente[]>([]);
   const [failedImages, setFailedImages] = useState<Record<number, boolean>>({});
 
+  // Catálogo paginado con carga diferida (scroll infinito por offset)
+  const [searchDebounced, setSearchDebounced] = useState("");
+  const [loadingProducts, setLoadingProducts] = useState(true);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [hasMore, setHasMore] = useState(false);
+  const productPageRef = useRef(1);
+  const loadingMoreRef = useRef(false);
+  const prevSearchRef = useRef("");
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const sentinelRef = useRef<HTMLDivElement>(null);
+
   // Selection state
   const [monedaSeleccionada, setMonedaSeleccionada] = useState<string>("");
   const [metodoPagoSeleccionado, setMetodoPagoSeleccionado] = useState<number | null>(null);
@@ -154,7 +168,12 @@ export default function PuntoDeVentaPage() {
   const [clienteId, setClienteId] = useState("");
   const [ajusteLimite, setAjusteLimite] = useState("");
   const [ajustandoLimite, setAjustandoLimite] = useState(false);
+  const [showAjusteCredito, setShowAjusteCredito] = useState(false);
+  const [modoAjuste, setModoAjuste] = useState<"suma" | "fijo">("suma");
   const [showCheckout, setShowCheckout] = useState(false);
+  // El usuario pidió explícitamente registrar la venta a crédito: fuerza a
+  // mostrar el panel de crédito aunque aún no haya monto cargado (deuda 0).
+  const [creditoSolicitado, setCreditoSolicitado] = useState(false);
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
   const [grantingCredit, setGrantingCredit] = useState(false);
@@ -211,20 +230,51 @@ export default function PuntoDeVentaPage() {
     }
   };
 
+  // Carga el catálogo con paginación por offset. `append` acumula la siguiente
+  // página (scroll infinito); si no, reemplaza la lista (primera página/búsqueda).
+  const cargarProductos = useCallback(
+    async (page: number, opts: { append?: boolean; query?: string } = {}) => {
+      const append = opts.append ?? false;
+      const q = (opts.query ?? "").trim();
+      const params = new URLSearchParams({ page: String(page), limit: String(PAGE_SIZE) });
+      if (q) params.set("search", q);
+
+      try {
+        const res = await fetch(`/api/productos?${params.toString()}`);
+        if (!res.ok) return null;
+        const data = await res.json();
+        const lista: Producto[] = data.productos || [];
+        setMonedas(data.monedas || []);
+
+        const pag = data.pagination || { page, limit: PAGE_SIZE, total: lista.length, totalPages: 1 };
+        productPageRef.current = page;
+        setHasMore(page < (pag.totalPages || 1));
+        setProductos((prev) =>
+          append ? deduplicateById([...prev, ...lista]) : deduplicateById(lista)
+        );
+        return data;
+      } catch (error) {
+        console.error("Error al obtener productos:", error);
+        return null;
+      } finally {
+        setLoadingProducts(false);
+        setLoadingMore(false);
+        loadingMoreRef.current = false;
+      }
+    },
+    []
+  );
+
   useEffect(() => {
     const fetchData = async () => {
       try {
-        const [prodRes, metodosRes, cajasRes] = await Promise.all([
-          fetch("/api/productos?limit=1000"),
+        const [metodosRes, cajasRes] = await Promise.all([
           fetch("/api/metodos-pago"),
           fetch("/api/cajas"),
         ]);
-        
-        await fetchClientes();
 
-        const prodData = await prodRes.json();
-        setProductos(deduplicateById(prodData.productos || []));
-        setMonedas(prodData.monedas || []);
+        await fetchClientes();
+        const prodData = await cargarProductos(1);
 
         const metodosData = await metodosRes.json();
         const activeMetodos = (metodosData || []).filter((m: MetodoPago) => m.activo !== false && m.caja_id);
@@ -241,7 +291,7 @@ export default function PuntoDeVentaPage() {
             setMonedaSeleccionada(defaultMetodo.moneda_codigo);
           }
         } else {
-          const monedaBase = prodData.monedas?.find((m: Moneda) => m.es_base);
+          const monedaBase = prodData?.monedas?.find((m: Moneda) => m.es_base);
           if (monedaBase) setMonedaSeleccionada(monedaBase.codigo);
         }
       } catch (error) {
@@ -252,7 +302,91 @@ export default function PuntoDeVentaPage() {
     };
 
     fetchData();
-  }, []);
+  }, [cargarProductos]);
+
+  // Búsqueda del catálogo contra el servidor (con retardo) y reinicio de la paginación
+  useEffect(() => {
+    const t = setTimeout(() => setSearchDebounced(search), 300);
+    return () => clearTimeout(t);
+  }, [search]);
+
+  useEffect(() => {
+    // La primera carga la hace el efecto de montaje (página 1 sin búsqueda)
+    if (prevSearchRef.current === searchDebounced) return;
+    prevSearchRef.current = searchDebounced;
+    setLoadingProducts(true);
+    setProductos([]);
+    productPageRef.current = 1;
+    cargarProductos(1, { query: searchDebounced });
+  }, [searchDebounced, cargarProductos]);
+
+  // Scroll infinito: al acercarse al final del catálogo, carga la siguiente página
+  const cargarMas = useCallback(() => {
+    if (!hasMore || loadingMoreRef.current || loadingProducts) return;
+    loadingMoreRef.current = true;
+    setLoadingMore(true);
+    cargarProductos(productPageRef.current + 1, { append: true, query: searchDebounced });
+  }, [hasMore, loadingProducts, searchDebounced, cargarProductos]);
+
+  useEffect(() => {
+    const root = scrollRef.current;
+    const target = sentinelRef.current;
+    if (!root || !target || !hasMore) return;
+
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries[0]?.isIntersecting) cargarMas();
+      },
+      { root, rootMargin: "400px 0px", threshold: 0 }
+    );
+    observer.observe(target);
+    return () => observer.disconnect();
+  }, [cargarMas, hasMore, loading]);
+
+  // Búsqueda exacta de un producto (por código o texto) con respaldo en el
+  // servidor, para que el escáner funcione aunque el producto aún no se haya
+  // cargado con el scroll infinito.
+  const buscarProducto = async (q: string): Promise<Producto | null> => {
+    const lower = q.trim().toLowerCase();
+    if (!lower) return null;
+
+    const local = productos.find((p) => p.codigo.trim().toLowerCase() === lower);
+    if (local) return local;
+
+    try {
+      const res = await fetch(`/api/productos?page=1&limit=20&search=${encodeURIComponent(q.trim())}`);
+      if (!res.ok) return null;
+      const data = await res.json();
+      const lista: Producto[] = data.productos || [];
+      return (
+        lista.find((p) => p.codigo.trim().toLowerCase() === lower) ??
+        (lista.length === 1 ? lista[0] : null)
+      );
+    } catch {
+      return null;
+    }
+  };
+
+  const agregarPorTexto = async (q: string, limpiar = false) => {
+    const match = await buscarProducto(q);
+    if (!match) {
+      toast(`Producto no encontrado: ${q}`, "error");
+      return;
+    }
+    if (match.stock <= 0) {
+      toast(`Sin existencias: ${match.nombre}`, "warning");
+      return;
+    }
+    addToCart(match);
+    toast(`Producto agregado: ${match.nombre}`, "success");
+    if (limpiar) setSearch("");
+  };
+
+  // Ref con la versión más reciente para el listener global (sin re-suscribir en cada render)
+  const agregarPorTextoRef = useRef(agregarPorTexto);
+  useEffect(() => {
+    agregarPorTextoRef.current = agregarPorTexto;
+  });
 
   // Barcode Scanner Listener
   useEffect(() => {
@@ -267,17 +401,9 @@ export default function PuntoDeVentaPage() {
       lastKeyTime.current = now;
 
       if (e.key === "Enter") {
-        const code = barcodeBuffer.current.trim().toLowerCase();
+        const code = barcodeBuffer.current.trim();
         if (code) {
-          const product = productos.find((p) => p.codigo.trim().toLowerCase() === code);
-          if (product && product.stock > 0) {
-            addToCart(product);
-            toast(`Producto agregado: ${product.nombre}`, "success");
-          } else if (product && product.stock <= 0) {
-            toast(`Sin existencias: ${product.nombre}`, "warning");
-          } else {
-            toast(`Producto no encontrado: ${code}`, "error");
-          }
+          void agregarPorTextoRef.current(code);
         }
         barcodeBuffer.current = "";
       } else if (e.key.length === 1) {
@@ -287,33 +413,14 @@ export default function PuntoDeVentaPage() {
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [productos]);
+  }, []);
 
   const handleSearchKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
     if (e.key === "Enter") {
       e.preventDefault();
-      const queryStr = search.trim().toLowerCase();
+      const queryStr = search.trim();
       if (!queryStr) return;
-
-      let match = productos.find(
-        (p) => p.codigo.trim().toLowerCase() === queryStr
-      );
-
-      if (!match && filtered.length === 1) {
-        match = filtered[0];
-      }
-
-      if (match) {
-        if (match.stock > 0) {
-          addToCart(match);
-          toast(`Producto agregado: ${match.nombre}`, "success");
-          setSearch("");
-        } else {
-          toast(`Sin existencias: ${match.nombre}`, "warning");
-        }
-      } else {
-        toast(`Producto no encontrado: ${search}`, "error");
-      }
+      void agregarPorTexto(queryStr, true);
     }
   };
 
@@ -333,29 +440,29 @@ export default function PuntoDeVentaPage() {
     }
   };
 
-  const filtered = useMemo(() => {
-    return productos.filter(
-      (p) =>
-        (p.nombre.toLowerCase().includes(search.toLowerCase()) ||
-          p.codigo.toLowerCase().includes(search.toLowerCase())) &&
-        p.stock > 0
-    );
-  }, [productos, search]);
+  // El filtrado por texto lo hace el servidor (paginación + búsqueda); aquí
+  // solo se ocultan los productos sin existencias.
+  const filtered = useMemo(() => productos.filter((p) => p.stock > 0), [productos]);
 
-  const getPrecio = (producto: Producto): number => {
-    if (!monedaSeleccionada) return parseFloat(String(producto.precio_base)) || 0;
+  // Precio de un producto en una moneda concreta. Replica exactamente la misma
+  // regla que usa el selector de fuera: si hay un precio guardado para esa
+  // moneda se devuelve tal cual (sin conversiones ni redondeos extra), de modo
+  // que el total en el modal coincida con el que muestra el POS.
+  const getPrecioEnMoneda = (producto: Producto, codMoneda: string): number => {
+    if (!codMoneda) return parseFloat(String(producto.precio_base)) || 0;
 
+    // La tasa personalizada solo aplica a la moneda del documento; el resto de
+    // monedas usa su tasa por defecto.
     const tasaCustomNum = parseFloat(tasaCustomStr);
-    const conTasaCustom = Number.isFinite(tasaCustomNum) && tasaCustomNum > 0;
+    const esMonedaDoc = codMoneda === monedaSeleccionada;
+    const conTasaCustom = esMonedaDoc && Number.isFinite(tasaCustomNum) && tasaCustomNum > 0;
 
-    // Con tasa personalizada SIEMPRE se recalcula desde el precio base del
-    // producto (los precios guardados usan la tasa por defecto de la moneda)
     if (!conTasaCustom && producto.precios && producto.precios.length > 0) {
-      const exact = producto.precios.find((p) => p.moneda_codigo === monedaSeleccionada);
+      const exact = producto.precios.find((p) => p.moneda_codigo === codMoneda);
       if (exact && parseFloat(String(exact.precio)) > 0) return parseFloat(String(exact.precio));
     }
 
-    const targetMoneda = monedas.find((m) => m.codigo === monedaSeleccionada);
+    const targetMoneda = monedas.find((m) => m.codigo === codMoneda);
     if (!targetMoneda) return parseFloat(String(producto.precio_base)) || 0;
     // Moneda propia del producto (sin moneda propia = moneda base del sistema)
     const prodMoneda =
@@ -368,6 +475,8 @@ export default function PuntoDeVentaPage() {
     if (tasaProdUsd <= 0) return precioBaseNum;
     return redondear((precioBaseNum / tasaProdUsd) * tasaDocUsd, dec);
   };
+
+  const getPrecio = (producto: Producto): number => getPrecioEnMoneda(producto, monedaSeleccionada);
 
   // Tasa efectiva de la venta en "unidades de la moneda por su referencia"
   const tasaEfectiva = useMemo(() => {
@@ -450,6 +559,23 @@ export default function PuntoDeVentaPage() {
   
   const total = Math.max(0, subtotal - descuento + tax);
 
+  // Total del carrito expresado en una moneda cualquiera, usando la MISMA regla
+  // de precios que el POS (precio exacto guardado cuando existe). Así, el total
+  // que muestra el modal al elegir un método de pago en otra moneda coincide
+  // con el que se obtendría seleccionando esa moneda en el selector de fuera,
+  // sin las desviaciones de convertir y redondear hacia arriba.
+  const calcularTotalEnMoneda = (codMoneda: string): number => {
+    if (!codMoneda || codMoneda === monedaSeleccionada) return total;
+    let sub = 0;
+    let taxMoneda = 0;
+    for (const c of cart) {
+      const p = getPrecioEnMoneda(c.product, codMoneda);
+      sub += p * c.qty;
+      if (!c.product.iva_incluido) taxMoneda += Math.round(p * 0.16 * c.qty * 100) / 100;
+    }
+    return Math.max(0, sub - descuento + taxMoneda);
+  };
+
   const setPagarCompleto = () => {
     setLineasPago([{ key: 1, metodoId: metodoPagoSeleccionado, montoStr: String(total) }]);
   };
@@ -494,9 +620,15 @@ export default function PuntoDeVentaPage() {
       let monto = 0;
       if (vacio) {
         if (!isPagoMixto) {
-          monto = esMonedaVenta ? restante : (restante / tasaDoc) * tasaLinea;
-          if (Number.isFinite(monto)) monto = Math.ceil(monto * 100) / 100;
-          else monto = 0;
+          // Si la moneda del método es distinta a la de la venta se usa el total
+          // exacto en esa moneda (misma regla que el selector de fuera), en vez
+          // de convertir el total de la venta y redondear hacia arriba.
+          if (esMonedaVenta) {
+            monto = restante;
+          } else {
+            monto = calcularTotalEnMoneda(monedaLinea?.codigo || monedaSeleccionada);
+          }
+          monto = Number.isFinite(monto) ? redondear(monto, decLinea) : 0;
         } else {
           monto = 0;
         }
@@ -513,7 +645,7 @@ export default function PuntoDeVentaPage() {
 
       return { key: l.key, metodo, monedaLinea, vacio, monto, montoVenta, aplicado, vuelto, restanteAntes };
     });
-  }, [lineasPago, total, monedas, metodosPago, monedaSeleccionada, tasaCustomStr, metodoPagoSeleccionado, isPagoMixto]);
+  }, [lineasPago, total, cart, descuento, monedas, metodosPago, monedaSeleccionada, tasaCustomStr, metodoPagoSeleccionado, isPagoMixto]);
 
   const pagadoTotal = useMemo(
     () => redondear(pagosResueltos.reduce((s, l) => s + l.aplicado, 0)),
@@ -523,6 +655,37 @@ export default function PuntoDeVentaPage() {
   const deudaVenta = useMemo(() => Math.max(0, redondear(total - pagadoTotal)), [total, pagadoTotal]);
   const esCredito = deudaVenta > 0.009;
   const lineasPagoInvalidas = pagosResueltos.some((l) => !l.metodo);
+
+  // Vuelto a devolver. Cada línea lo produce en SU moneda, así que no se pueden
+  // sumar montos de monedas distintas como si fueran la misma: con una sola
+  // línea se muestra en la moneda de esa línea y con varias se convierte cada
+  // vuelto a la moneda de la venta para poder sumarlo.
+  const vueltoResumen = useMemo(() => {
+    const conVuelto = pagosResueltos.filter((l) => l.vuelto > 0.009);
+    if (conVuelto.length === 0) {
+      const extra = Math.max(0, redondear(pagadoTotal - total));
+      return extra > 0.009 ? { monto: extra, codigo: monedaSeleccionada } : null;
+    }
+    if (conVuelto.length === 1) {
+      const l = conVuelto[0];
+      return { monto: l.vuelto, codigo: l.monedaLinea?.codigo || monedaSeleccionada };
+    }
+    const monedaVenta = monedas.find((m) => m.codigo === monedaSeleccionada);
+    const tasaCustomNum = parseFloat(tasaCustomStr);
+    const tasaVenta = monedaVenta
+      ? tasaUsdDocumento(
+          monedaVenta,
+          Number.isFinite(tasaCustomNum) && tasaCustomNum > 0 ? tasaCustomNum : null,
+          monedas
+        )
+      : 1;
+    let suma = 0;
+    for (const l of conVuelto) {
+      const t = l.monedaLinea ? tasaUsd(l.monedaLinea, monedas) : 1;
+      if (t > 0) suma += (l.vuelto / t) * tasaVenta;
+    }
+    return { monto: redondear(suma), codigo: monedaSeleccionada };
+  }, [pagosResueltos, pagadoTotal, total, monedas, monedaSeleccionada, tasaCustomStr]);
 
   const handleHoldCart = () => {
     if (cart.length === 0) return;
@@ -554,6 +717,31 @@ export default function PuntoDeVentaPage() {
   const cerrarCheckout = () => {
     setShowCheckout(false);
     setShowClienteModal(false);
+    setCreditoSolicitado(false);
+  };
+
+  // "Pagar Completo" es venta al contado: se limpia cualquier petición de
+  // crédito previa para que no quede el aviso de "Venta a crédito" pegado.
+  const handlePagarCompleto = () => {
+    setCreditoSolicitado(false);
+    handleCheckout("completo");
+  };
+
+  // "Todo a Crédito": si el cliente todavía no puede comprar a crédito no se
+  // intenta registrar (el backend lo rechazaría): se abre el panel con la
+  // opción de otorgarle el crédito ahí mismo.
+  const handlePedirTodoACredito = () => {
+    setCreditoSolicitado(true);
+
+    if (!clienteObj) {
+      toast("Selecciona un cliente para registrar la venta a crédito", "error");
+      return;
+    }
+    if (clienteSinCreditoSuficiente) {
+      // El panel muestra el botón "Otorgar Crédito Rápido" para ampliar el límite.
+      return;
+    }
+    handleCheckout("credito");
   };
 
   const handleHabilitarCreditoRapido = async () => {
@@ -562,7 +750,13 @@ export default function PuntoDeVentaPage() {
     try {
       const monedaActual = monedas.find((m) => m.codigo === monedaSeleccionada);
       const monedaId = monedaActual?.id;
-      const nuevoLimite = Math.max(10000, Math.ceil(deudaVenta + deudaMoneda + 5000));
+      // Límite total necesario para que esta venta quepa: la deuda que YA tiene el
+      // cliente en esta moneda + lo que falta de esta venta. Se calcula así
+      // directo (y no como "límite actual + lo que falta") porque
+      // `disponibleCredito` está acotado en 0 cuando el límite es menor que la
+      // deuda: en ese caso se ignoraba la deuda y el límite nuevo quedaba
+      // corto, obligando a pulsar "Otorgar" varias veces hasta llegar.
+      const nuevoLimite = Math.max(10000, Math.ceil(deudaMoneda + montoCreditoNecesario));
 
       const limitesExistentes = clienteObj.limites_credito || [];
       const limitesActualizados = monedas.map((m) => {
@@ -597,7 +791,10 @@ export default function PuntoDeVentaPage() {
         const resClientes = await fetch("/api/clientes");
         if (resClientes.ok) {
           const dataClientes = await resClientes.json();
-          setClientes(dataClientes);
+          // La API devuelve { data: [...], pagination: {...] }; hay que guardar
+          // solo el array. Guardar el objeto entero rompía clientes.find(...)
+          // y reventaba la pantalla al otorgar el crédito.
+          setClientes(dataClientes.data || []);
         }
       } else {
         const err = await res.json().catch(() => ({}));
@@ -628,6 +825,13 @@ export default function PuntoDeVentaPage() {
       return;
     }
 
+    // Caja y moneda del método realmente elegido. El selector del modal no
+    // pasa por handleSelectMetodo, así que se resuelven aquí en vez de usar
+    // valores desactualizados de la selección de fuera.
+    const metodoFinalObj = metodosPago.find((m) => m.id === metodoIdFinal) || null;
+    const codMonedaMetodo = metodoFinalObj?.moneda_codigo || monedaSeleccionada;
+    const cajaDelMetodo = metodoFinalObj?.caja_id ?? cajaSeleccionada;
+
     setSubmitting(true);
     try {
       const moneda = monedas.find((m) => m.codigo === monedaSeleccionada);
@@ -645,7 +849,14 @@ export default function PuntoDeVentaPage() {
       let deudaFinal = deudaVenta;
 
       if (isDirectCompleto) {
-        pagosToSend = [{ metodo_pago_id: metodoIdFinal!, monto: total }];
+        // El backend interpreta pagos[].monto en la MONEDA DEL MÉTODO. Si el
+        // método está en otra moneda hay que enviar el total exacto del carrito
+        // en esa moneda (igual que muestra el modal y el selector de fuera);
+        // mandar el total de la venta sin convertir dejaba deuda y terminaba
+        // rejecting la venta como crédito.
+        pagosToSend = [
+          { metodo_pago_id: metodoIdFinal!, monto: calcularTotalEnMoneda(codMonedaMetodo) },
+        ];
         montoPagadoFinal = total;
         deudaFinal = 0;
       } else if (isDirectCredito) {
@@ -669,7 +880,7 @@ export default function PuntoDeVentaPage() {
           tipo_pago: isCreditoFinal ? "Credito" : "Contado",
           moneda_id: moneda?.id,
           metodo_pago_id: metodoIdFinal,
-          caja_id: montoPagadoFinal > 0 ? cajaSeleccionada : null,
+          caja_id: montoPagadoFinal > 0 ? cajaDelMetodo : null,
           descuento,
           pagos: pagosToSend,
           tasa: Number.isFinite(tasaCustomNum) && tasaCustomNum > 0 ? tasaCustomNum : null,
@@ -720,6 +931,7 @@ export default function PuntoDeVentaPage() {
         setObservaciones("");
         setIsPagoMixto(false);
         setTasaCustomStr("");
+        setCreditoSolicitado(false);
         setShowCheckout(false);
         setShowClienteModal(false);
         setShowReceiptModal(true);
@@ -739,7 +951,15 @@ export default function PuntoDeVentaPage() {
         }
       } else {
         const error = await res.json();
-        toast(error.error || "Error al registrar la venta", "error");
+        const msg = error.error || "Error al registrar la venta";
+        // Si el backend rechaza por crédito, se abre el panel de crédito para
+        // ampliar el límite ahí mismo, en vez de dejar solo un toast. Cubre los
+        // casos en que la validación de la pantalla quedó desactualizada
+        // (límite/deuda viejos) y el POST llegó igual a la API.
+        if (/l[ií]mite de cr[eé]dito|Supera el l[ií]mite|no tiene cr[eé]dito/i.test(msg)) {
+          setCreditoSolicitado(true);
+        }
+        toast(msg, "error");
       }
     } catch {
       toast("Error al registrar la venta", "error");
@@ -769,6 +989,15 @@ export default function PuntoDeVentaPage() {
     parseFloat(String(clienteObj?.limites_credito?.find((l) => l.codigo === monedaSeleccionada)?.limite ?? 0)) || 0;
   const disponibleCredito = Math.max(0, limiteMoneda - deudaMoneda);
 
+  // Monto que el cliente necesita tener disponible en crédito para esta venta:
+  // con pago parcial solo el saldo; si la venta va completa, el total. Lo usan
+  // TANTO el botón "Todo a Crédito" como el panel, para que no se contradigan
+  // (antes uno comparaba contra `total` y el otro contra `deudaVenta`, y el
+  // botón se quedaba sin hacer nada).
+  const montoCreditoNecesario = esCredito ? deudaVenta : total;
+  const clienteSinCreditoSuficiente =
+    !!clienteObj && (!clienteObj.recibe_credito || disponibleCredito < montoCreditoNecesario);
+
   // Deuda del cliente: una línea por cada moneda en la que debe + la moneda de esta venta
   const deudasCliente = clienteObj?.deuda_total ?? [];
   const lineasDeuda: Array<{ codigo: string; monto: number }> =
@@ -781,18 +1010,12 @@ export default function PuntoDeVentaPage() {
         ]
       : [];
 
-  const ajustarLimite = async (signo: 1 | -1) => {
+  // Guarda un valor absoluto de límite para la moneda de la venta.
+  const guardarLimite = async (nuevo: number) => {
     if (!clienteObj || !monedaSeleccionada) return;
     const moneda = monedas.find((m) => m.codigo === monedaSeleccionada);
     if (!moneda) return;
 
-    const paso = parseFloat(ajusteLimite);
-    if (isNaN(paso) || paso <= 0) {
-      toast("Indica un monto para subir o bajar el límite", "error");
-      return;
-    }
-
-    const nuevo = Math.max(0, Math.round((limiteMoneda + signo * paso) * 100) / 100);
     setAjustandoLimite(true);
     try {
       const res = await fetch("/api/clientes", {
@@ -827,15 +1050,38 @@ export default function PuntoDeVentaPage() {
     }
   };
 
+  // Suma o resta un monto al límite actual.
+  const ajustarLimite = async (signo: 1 | -1) => {
+    const paso = parseFloat(ajusteLimite);
+    if (isNaN(paso) || paso <= 0) {
+      toast("Indica un monto para subir o bajar el límite", "error");
+      return;
+    }
+    await guardarLimite(Math.max(0, Math.round((limiteMoneda + signo * paso) * 100) / 100));
+  };
+
+  // Fija el límite al valor exacto que escriba el usuario.
+  const fijarLimite = async () => {
+    const valor = parseFloat(ajusteLimite);
+    if (!Number.isFinite(valor) || valor < 0) {
+      toast("Indica un límite válido", "error");
+      return;
+    }
+    await guardarLimite(Math.round(valor * 100) / 100);
+  };
+
   return (
     <>
-      <div className="print:hidden lg:flex lg:min-h-0 lg:flex-1 lg:flex-col">
+      <div className="print:hidden flex flex-1 min-h-0 min-w-0 w-full flex-col overflow-hidden">
         {/* Sin page header y sin scroll de página: la cuadrícula toma el alto
-            restante del viewport vía flex (sin cálculos con vh) */}
-        <div className="grid grid-cols-1 gap-5 lg:min-h-0 lg:flex-1 lg:grid-cols-12">
+            restante del viewport vía flex */}
+        {/* El POS es una pantalla de escritorio: catálogo y carrito van SIEMPRE
+            lado a lado (productos izquierda, carrito derecha), sin depender de
+            un breakpoint que los apile en ventanas angostas. */}
+        <div className="grid flex-1 min-h-0 grid-cols-12 gap-3 sm:gap-4 overflow-hidden">
           {/* ═══════════ PRODUCT CATALOG (8 COLS) ═══════════ */}
-          <div className="flex flex-col gap-3.5 min-w-0 lg:col-span-8">
-            <div className="flex gap-3">
+          <div className="flex min-h-0 flex-1 flex-col gap-3 min-w-0 overflow-hidden col-span-8">
+            <div className="flex shrink-0 gap-3">
               <SearchBar
                 placeholder="Escanear código de barras o buscar producto..."
                 containerClassName="w-full flex-1"
@@ -856,55 +1102,79 @@ export default function PuntoDeVentaPage() {
               </div>
             </div>
 
-            <div className="grid flex-1 content-start grid-cols-2 sm:grid-cols-3 xl:grid-cols-4 gap-3.5 overflow-y-auto pr-1">
-              {filtered.map((p) => (
-                <button
-                  key={`catalog-${p.id}`}
-                  onClick={() => addToCart(p)}
-                  className="group flex flex-col justify-between rounded-xl border border-border bg-card p-3.5 text-left transition-all hover:border-primary hover:shadow-md w-full"
-                >
-                  <div className="w-full">
-                    <div className="mb-2.5 flex h-32 w-full items-center justify-center overflow-hidden rounded-lg bg-muted/40 group-hover:bg-primary/5 relative">
-                      {p.imagen && !failedImages[p.id] ? (
-                        <img
-                          src={p.imagen}
-                          alt={p.nombre}
-                          className="h-32 w-full object-contain p-2 transition-transform duration-200 group-hover:scale-105"
-                          onError={() => setFailedImages((prev) => ({ ...prev, [p.id]: true }))}
-                        />
-                      ) : (
-                        <Package size={36} className="text-muted-foreground/40" />
-                      )}
-                      {!p.iva_incluido && (
-                        <span className="absolute top-1.5 right-1.5 rounded-sm bg-warning/90 px-1.5 py-0.5 text-[10px] font-semibold leading-none text-warning-foreground shadow-sm">
-                          +IVA
-                        </span>
-                      )}
+            <div
+              ref={scrollRef}
+              className="flex-1 min-h-0 overflow-y-auto overscroll-contain pr-1"
+            >
+              <div className="grid content-start grid-cols-2 gap-3.5 sm:grid-cols-3 xl:grid-cols-4 pb-4">
+                {filtered.map((p) => (
+                  <button
+                    key={`catalog-${p.id}`}
+                    onClick={() => addToCart(p)}
+                    className="group flex flex-col justify-between rounded-xl border border-border bg-card p-3.5 text-left transition-all hover:border-primary hover:shadow-md w-full"
+                  >
+                    <div className="w-full">
+                      <div className="mb-2.5 flex h-32 w-full items-center justify-center overflow-hidden rounded-lg bg-muted/40 group-hover:bg-primary/5 relative">
+                        {p.imagen && !failedImages[p.id] ? (
+                          <img
+                            src={p.imagen}
+                            alt={p.nombre}
+                            className="h-32 w-full object-contain p-2 transition-transform duration-200 group-hover:scale-105"
+                            onError={() => setFailedImages((prev) => ({ ...prev, [p.id]: true }))}
+                          />
+                        ) : (
+                          <Package size={36} className="text-muted-foreground/40" />
+                        )}
+                        {!p.iva_incluido && (
+                          <span className="absolute top-1.5 right-1.5 rounded-sm bg-warning/90 px-1.5 py-0.5 text-[10px] font-semibold leading-none text-warning-foreground shadow-sm">
+                            +IVA
+                          </span>
+                        )}
+                      </div>
+                      <div className="text-sm font-semibold leading-tight text-foreground line-clamp-2">
+                        {p.nombre}
+                      </div>
+                      <div className="mt-1 font-mono text-xs text-muted-foreground">
+                        {p.codigo}
+                      </div>
                     </div>
-                    <div className="text-sm font-semibold leading-tight text-foreground line-clamp-2">
-                      {p.nombre}
-                    </div>
-                    <div className="mt-1 font-mono text-xs text-muted-foreground">
-                      {p.codigo}
-                    </div>
-                  </div>
 
-                  <div className="mt-3 flex flex-wrap items-center justify-between gap-1.5 border-t border-border/40 pt-2.5 w-full">
-                    <span className="font-mono text-sm sm:text-base font-bold text-primary truncate min-w-0">
-                      {fmt(getPrecio(p), monedaSeleccionada)}
-                    </span>
-                    <span className="text-[11px] font-medium text-muted-foreground bg-muted/80 px-2 py-0.5 rounded-md shrink-0">
-                      Stock: {p.stock}
-                    </span>
+                    <div className="mt-3 flex flex-wrap items-center justify-between gap-1.5 border-t border-border/40 pt-2.5 w-full">
+                      <span className="font-mono text-sm sm:text-base font-bold text-primary truncate min-w-0">
+                        {fmt(getPrecio(p), monedaSeleccionada)}
+                      </span>
+                      <span className="text-[11px] font-medium text-muted-foreground bg-muted/80 px-2 py-0.5 rounded-md shrink-0">
+                        Stock: {p.stock}
+                      </span>
+                    </div>
+                  </button>
+                ))}
+
+                {/* Centinela para la carga diferida: al entrar en vista carga la siguiente página */}
+                <div ref={sentinelRef} className="col-span-full flex items-center justify-center py-2">
+                  {loadingMore && (
+                    <span className="text-xs font-medium text-muted-foreground">Cargando más productos…</span>
+                  )}
+                </div>
+
+                {loadingProducts && filtered.length === 0 && (
+                  <div className="col-span-full py-10 text-center text-sm text-muted-foreground">
+                    Cargando productos…
                   </div>
-                </button>
-              ))}
+                )}
+
+                {!loadingProducts && filtered.length === 0 && (
+                  <div className="col-span-full py-10 text-center text-sm text-muted-foreground">
+                    {search.trim() ? "No se encontraron productos." : "No hay productos con existencias."}
+                  </div>
+                )}
+              </div>
             </div>
           </div>
 
           {/* ═══════════ CART PANEL (4 COLS) ═══════════ */}
-          <Card className="flex flex-col lg:col-span-4 min-w-0">
-            <div className="flex items-center justify-between border-b border-border px-5 py-4">
+          <Card className="flex flex-1 min-h-0 flex-col min-w-0 overflow-hidden col-span-4">
+            <div className="flex shrink-0 items-center justify-between border-b border-border px-4 py-3">
               <div className="flex items-center gap-2">
                 <h3 className="text-sm font-semibold">Carrito de Venta</h3>
                 {monedaSeleccionada && (
@@ -931,7 +1201,7 @@ export default function PuntoDeVentaPage() {
             </div>
 
             {/* Selector de Cliente en Carrito de Venta (Consumidor Final por defecto) */}
-            <div className="border-b border-border bg-muted/20 px-4 py-2.5">
+            <div className="shrink-0 border-b border-border bg-muted/20 px-4 py-2">
               <div className="flex items-center gap-2">
                 <div className="flex-1">
                   <Combobox
@@ -960,12 +1230,12 @@ export default function PuntoDeVentaPage() {
               </div>
             </div>
 
-            <div className="flex-1 divide-y divide-border overflow-y-auto">
+            <div className="flex-1 min-h-0 divide-y divide-border overflow-y-auto">
               {cart.length === 0 ? (
                 <EmptyState icon={ShoppingCart} message="Sin productos en el carrito" />
               ) : (
                 cart.map(({ product: p, qty }) => (
-                  <div key={`cart-${p.id}`} className="flex items-center gap-3 px-5 py-3">
+                  <div key={`cart-${p.id}`} className="flex items-center gap-3 px-4 py-2.5">
                     <div className="min-w-0 flex-1">
                       <div className="truncate text-sm font-medium text-foreground">
                         {p.nombre}
@@ -1002,8 +1272,8 @@ export default function PuntoDeVentaPage() {
             </div>
 
             {/* Cart Footer: resumen + botón Finalizar */}
-            <div className="space-y-3 border-t border-border px-5 py-4">
-              <div className="space-y-1.5 text-sm">
+            <div className="shrink-0 space-y-2 border-t border-border px-4 py-3 bg-card">
+              <div className="space-y-1 text-sm">
                 <div className="flex justify-between text-muted-foreground">
                   <span>Subtotal</span>
                   <span className="font-mono">{fmt(subtotal, monedaSeleccionada)}</span>
@@ -1020,15 +1290,21 @@ export default function PuntoDeVentaPage() {
                     <span className="font-mono">−{fmt(descuento, monedaSeleccionada)}</span>
                   </div>
                 )}
-                <div className="flex justify-between border-t border-border pt-1.5 text-base font-semibold">
+                <div className="flex justify-between border-t border-border pt-1 text-base font-semibold">
                   <span>Total ({monedaSeleccionada || "—"})</span>
                   <span className="font-mono text-primary text-lg">{fmt(total, monedaSeleccionada)}</span>
                 </div>
               </div>
               <Button
-                className="w-full py-3 font-semibold text-sm"
+                className="w-full py-2.5 font-semibold text-sm cursor-pointer"
                 disabled={cart.length === 0}
-                onClick={() => setShowCheckout(true)}
+                onClick={() => {
+                    setShowCheckout(true);
+                    // Límite y deuda del cliente se releen al abrir: si estaban
+                    // desactualizados, la validación de la pantalla dejaba pasar
+                    // ventas que el backend luego rechazaba.
+                    void fetchClientes();
+                  }}
               >
                 <Check size={16} className="mr-1.5" />
                 Finalizar
@@ -1036,27 +1312,13 @@ export default function PuntoDeVentaPage() {
             </div>
           </Card>
         </div>
+      </div>
 
         {/* Checkout Modal */}
         {(() => {
           const metodoSimpleObj = metodosPago.find((m) => m.id === (metodoPagoSeleccionado ?? metodosPago[0]?.id)) || null;
           const monedaSimpleObj = monedas.find((m) => m.codigo === metodoSimpleObj?.moneda_codigo) || null;
           const codMonedaSimple = monedaSimpleObj?.codigo || monedaSeleccionada;
-
-          const monedaVentaDoc = monedas.find((m) => m.codigo === monedaSeleccionada);
-          const tasaCustomNumDoc = parseFloat(tasaCustomStr);
-          const tasaDocDoc = monedaVentaDoc
-            ? tasaUsdDocumento(monedaVentaDoc, Number.isFinite(tasaCustomNumDoc) && tasaCustomNumDoc > 0 ? tasaCustomNumDoc : null, monedas)
-            : 1;
-          const tasaLineaSimple = monedaSimpleObj ? tasaUsd(monedaSimpleObj, monedas) : 1;
-          const esMismaMonedaSimple = !!monedaSimpleObj && !!monedaVentaDoc && monedaSimpleObj.id === monedaVentaDoc.id;
-
-          let totalSimpleEnMonedaMetodo = esMismaMonedaSimple ? total : (total / tasaDocDoc) * tasaLineaSimple;
-          if (Number.isFinite(totalSimpleEnMonedaMetodo)) {
-            totalSimpleEnMonedaMetodo = Math.ceil(totalSimpleEnMonedaMetodo * 100) / 100;
-          } else {
-            totalSimpleEnMonedaMetodo = 0;
-          }
 
           return (
             <Modal
@@ -1065,9 +1327,13 @@ export default function PuntoDeVentaPage() {
               title="Finalizar Venta"
               className="max-w-none w-[90vw] h-[88vh] overflow-y-auto"
             >
-              <div className="grid grid-cols-12 gap-6 h-full">
+              {/* Fila única acotada al alto disponible (minmax(0,1fr)): así, cuando la
+                  columna derecha crece (p. ej. al mostrar el panel de crédito) NO
+                  estira la fila ni empuja hacia abajo los botones de la columna
+                  central; solo esa columna derecha hace scroll. */}
+              <div className="grid h-full min-h-0 grid-cols-12 grid-rows-[minmax(0,1fr)] gap-6">
                 {/* COLUMNA 1: FORMAS DE PAGO (col-span-3) - Lista Vertical a la Izquierda Extrema */}
-                <div className="col-span-3 space-y-3 border-r border-border pr-4 flex flex-col justify-between">
+                <div className="col-span-3 min-h-0 space-y-3 border-r border-border pr-4 flex flex-col justify-between">
                   <div className="space-y-3">
                     <div className="flex items-center justify-between border-b border-border/50 pb-2">
                       <Label className="text-xs font-extrabold text-foreground uppercase tracking-wider">Forma de Pago</Label>
@@ -1083,14 +1349,17 @@ export default function PuntoDeVentaPage() {
                     {!isPagoMixto ? (
                       /* Lista Vertical de Métodos de Pago en 1 Columna Hacia Abajo */
                       <div className="space-y-2 max-h-[500px] overflow-y-auto pr-1">
-                      {metodosPago.map((m) => {
+                      {ordenarMetodosPorMoneda(metodosPago).map((m) => {
                         const isSelected = (metodoPagoSeleccionado ?? metodosPago[0]?.id) === m.id;
                         return (
                           <button
                             key={`metodo-card-${m.id}`}
                             type="button"
                             onClick={() => {
-                              setMetodoPagoSeleccionado(m.id);
+                              // Igual que el selector de fuera: cambia método,
+                              // caja y moneda del documento (por eso el resumen
+                              // de la derecha se actualiza al elegir).
+                              handleSelectMetodo(m.id);
                               setLineasPago([{ key: 1, metodoId: m.id, montoStr: "" }]);
                             }}
                             className={`w-full text-left p-3 rounded-xl border transition-all cursor-pointer flex items-center justify-between ${
@@ -1201,27 +1470,8 @@ export default function PuntoDeVentaPage() {
                 </div>
 
                 {/* COLUMNA 2: DETALLES DE PAGO Y ACCIONES (col-span-4) */}
-                <div className="col-span-4 space-y-4 border-r border-border pr-4 flex flex-col justify-between">
+                <div className="col-span-4 min-h-0 space-y-4 border-r border-border pr-4 flex flex-col justify-between">
                   <div className="space-y-4">
-                    {/* Tarjeta Informativa del Total en la Moneda del Método Seleccionado */}
-                    {!isPagoMixto && (
-                      <div className="rounded-xl border border-primary/30 bg-primary/10 p-3 space-y-1">
-                        <div className="flex items-center justify-between text-xs">
-                          <span className="font-bold text-foreground uppercase tracking-wider text-[11px]">
-                            Total con {metodoSimpleObj?.nombre || "Método"}:
-                          </span>
-                          <span className="font-mono font-black text-base text-primary">
-                            {fmt(totalSimpleEnMonedaMetodo, codMonedaSimple)}
-                          </span>
-                        </div>
-                        {!esMismaMonedaSimple && codMonedaSimple !== monedaSeleccionada && (
-                          <p className="text-[10px] text-muted-foreground font-mono text-right">
-                            Tasa: 1 {monedaSeleccionada} = {(tasaLineaSimple / tasaDocDoc).toFixed(4)} {codMonedaSimple}
-                          </p>
-                        )}
-                      </div>
-                    )}
-
                     {/* Monto Ingresado Input */}
                     <div>
                       <div className="flex justify-between items-center mb-1">
@@ -1236,7 +1486,7 @@ export default function PuntoDeVentaPage() {
                         step="any"
                         min="0"
                         value={lineasPago[0]?.montoStr ?? ""}
-                        placeholder={fmt(totalSimpleEnMonedaMetodo, codMonedaSimple)}
+                        placeholder="Vacío = total"
                         onChange={(e) => {
                           const v = e.target.value;
                           setLineasPago([{ key: 1, metodoId: metodoSimpleObj?.id ?? metodoPagoSeleccionado, montoStr: v }]);
@@ -1278,7 +1528,7 @@ export default function PuntoDeVentaPage() {
                   <button
                     type="button"
                     disabled={submitting || cart.length === 0}
-                    onClick={() => handleCheckout("completo")}
+                    onClick={handlePagarCompleto}
                     className="w-full h-14 bg-emerald-500 hover:bg-emerald-600 active:scale-[0.98] text-white font-black text-base rounded-xl shadow-md transition-all disabled:opacity-50 cursor-pointer flex items-center justify-center tracking-wide"
                   >
                     {submitting ? "Procesando..." : "Pagar Completo"}
@@ -1287,7 +1537,7 @@ export default function PuntoDeVentaPage() {
                   <button
                     type="button"
                     disabled={submitting || cart.length === 0}
-                    onClick={() => handleCheckout("credito")}
+                    onClick={handlePedirTodoACredito}
                     className="w-full h-14 bg-rose-500 hover:bg-rose-600 active:scale-[0.98] text-white font-black text-base rounded-xl shadow-md transition-all disabled:opacity-50 cursor-pointer flex items-center justify-center tracking-wide"
                   >
                     {submitting ? "Procesando..." : "Todo a Crédito"}
@@ -1295,13 +1545,8 @@ export default function PuntoDeVentaPage() {
                 </div>
 
                 {lineasPago.some((p) => p.montoStr !== "") && (
-                  <Button
-                    variant="outline"
-                    className={`w-full h-11 font-bold text-sm border-primary/40 ${
-                      esCredito
-                        ? "bg-amber-500/10 border-amber-500/40 text-amber-700 dark:text-amber-300 hover:bg-amber-500/20"
-                        : "text-primary hover:bg-primary/10"
-                    }`}
+                  <button
+                    type="button"
                     disabled={
                       submitting ||
                       cart.length === 0 ||
@@ -1309,11 +1554,14 @@ export default function PuntoDeVentaPage() {
                       (esCredito && (!clienteObj || !clienteObj.recibe_credito || disponibleCredito < deudaVenta))
                     }
                     onClick={() => handleCheckout()}
+                    className="w-full h-14 bg-sky-500 hover:bg-sky-600 active:scale-[0.98] text-white font-black text-base rounded-xl shadow-md transition-all disabled:opacity-50 cursor-pointer flex items-center justify-center tracking-wide"
                   >
-                    {esCredito
-                      ? `Registrar Pago Parcial (Pagado: ${fmt(pagadoTotal, monedaSeleccionada)} | Crédito: ${fmt(deudaVenta, monedaSeleccionada)})`
-                      : `Registrar Pago Personalizado (${fmt(pagadoTotal, monedaSeleccionada)})`}
-                  </Button>
+                    {submitting
+                      ? "Procesando..."
+                      : esCredito
+                        ? "Registrar Pago Parcial"
+                        : "Registrar Pago Personalizado"}
+                  </button>
                 )}
 
                 <Button variant="outline" className="w-full h-10 text-sm font-medium" onClick={cerrarCheckout} disabled={submitting}>
@@ -1323,7 +1571,8 @@ export default function PuntoDeVentaPage() {
             </div>
 
             {/* COLUMNA 3: CLIENTE, RESUMEN Y TOTALES (col-span-5) */}
-            <div className="col-span-5 flex flex-col justify-between space-y-4">
+            {/* Esta es la única columna que scrollea: cliente, resumen de crédito y totales */}
+            <div className="col-span-5 min-h-0 overflow-y-auto pr-1 flex flex-col justify-between space-y-4">
               <div className="space-y-4">
                 {/* Cliente Selector (ENCIMA DEL RESUMEN DEL PEDIDO) */}
                 <Field label="Cliente de la Venta">
@@ -1348,17 +1597,32 @@ export default function PuntoDeVentaPage() {
                   </div>
                 </Field>
 
-                {/* Informaciones de Crédito si la venta incluye Crédito / Pago Parcial */}
-                {esCredito && !clienteObj && (
+                {/* Informaciones de Crédito si la venta incluye Crédito / Pago Parcial.
+                    También se muestran cuando el usuario pulsa "Todo a Crédito",
+                    aunque la venta todavía no tenga saldo (deuda 0). */}
+                {(esCredito || creditoSolicitado) && !clienteObj && (
                   <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 p-3.5 text-sm text-amber-800 dark:text-amber-200 space-y-2">
                     <div className="flex items-start gap-2">
                       <AlertTriangle size={18} className="mt-0.5 shrink-0 text-amber-600 dark:text-amber-400" />
                       <div>
-                        <p className="font-bold text-xs">Venta con Pago Parcial / Crédito</p>
-                        <p className="mt-0.5 text-xs opacity-90">
-                          Se ingresó un pago de <strong>{fmt(pagadoTotal, monedaSeleccionada)}</strong> (menor al total). El saldo restante de <strong>{fmt(deudaVenta, monedaSeleccionada)}</strong> quedará registrado como deuda.
+                        <p className="font-bold text-sm">
+                          {esCredito ? "Venta con Pago Parcial / Crédito" : "Venta a crédito"}
                         </p>
-                        <p className="mt-1 text-xs font-semibold text-amber-900 dark:text-amber-100">
+                        <p className="mt-1 text-sm opacity-90 leading-snug">
+                          {esCredito ? (
+                            <>
+                              Se ingresó un pago de <strong>{fmt(pagadoTotal, monedaSeleccionada)}</strong>. El saldo
+                              restante de <strong>{fmt(deudaVenta, monedaSeleccionada)}</strong> quedará registrado como
+                              deuda.
+                            </>
+                          ) : (
+                            <>
+                              Los <strong>{fmt(total, monedaSeleccionada)}</strong> de esta venta quedarán a cargo del
+                              cliente como deuda.
+                            </>
+                          )}
+                        </p>
+                        <p className="mt-1.5 text-sm font-semibold text-amber-900 dark:text-amber-100">
                           ⚠️ Debes seleccionar o crear un cliente arriba para continuar.
                         </p>
                       </div>
@@ -1366,36 +1630,68 @@ export default function PuntoDeVentaPage() {
                   </div>
                 )}
 
-                {esCredito && clienteObj && (
+                {(esCredito || creditoSolicitado) && clienteObj && (
                   <div className="space-y-2">
-                    {(!clienteObj.recibe_credito || disponibleCredito < deudaVenta) ? (
-                      <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 p-3.5 text-sm text-amber-800 dark:text-amber-200 space-y-2.5">
-                        <div className="flex items-start gap-2">
-                          <AlertTriangle size={18} className="mt-0.5 shrink-0 text-amber-600 dark:text-amber-400" />
-                          <div>
-                            <p className="font-bold text-xs">
+                    {clienteSinCreditoSuficiente ? (
+                      <div className="rounded-xl border border-amber-500/40 bg-amber-500/10 p-4 text-amber-900 dark:text-amber-100 space-y-3">
+                        <div className="flex items-start gap-2.5">
+                          <AlertTriangle size={20} className="mt-0.5 shrink-0 text-amber-600 dark:text-amber-400" />
+                          <div className="min-w-0">
+                            <p className="font-bold text-base leading-tight">
                               {!clienteObj.recibe_credito
-                                ? `Crédito no habilitado para ${clienteObj.nombre}`
-                                : `Límite de crédito en ${monedaSeleccionada} insuficiente`}
+                                ? `Crédito no habilitado`
+                                : `Crédito insuficiente en ${monedaSeleccionada}`}
                             </p>
-                            <p className="mt-0.5 text-xs opacity-90">
+                            <p className="mt-1 text-sm opacity-90 leading-snug">
                               {!clienteObj.recibe_credito
-                                ? `Este cliente no tiene permiso para comprar a crédito. Puedes otorgárselo ahora con un clic.`
-                                : `Límite actual: ${fmt(limiteMoneda, monedaSeleccionada)}. Se requieren ${fmt(deudaMoneda + deudaVenta, monedaSeleccionada)}.`}
+                                ? `${clienteObj.nombre} no tiene permiso para comprar a crédito. Puedes otorgárselo con un clic.`
+                                : `Necesita un límite de ${fmt(deudaMoneda + montoCreditoNecesario, monedaSeleccionada)} para esta compra.`}
                             </p>
                           </div>
                         </div>
 
-                        <Button
-                          type="button"
-                          size="sm"
-                          disabled={grantingCredit}
-                          onClick={handleHabilitarCreditoRapido}
-                          className="w-full bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs h-9 shadow-sm cursor-pointer"
-                        >
-                          <Zap size={14} className="mr-1 fill-current" />
-                          {grantingCredit ? "Otorgando Crédito..." : `Otorgar Crédito Rápido a ${clienteObj.nombre}`}
-                        </Button>
+                        {/* Límite / Deuda / Disponible */}
+                        <div className="grid grid-cols-3 gap-2 rounded-lg bg-amber-500/10 p-3 text-center">
+                          <div>
+                            <div className="text-[11px] uppercase tracking-wide opacity-75">Límite</div>
+                            <div className="font-mono text-base font-extrabold">{fmt(limiteMoneda, monedaSeleccionada)}</div>
+                          </div>
+                          <div>
+                            <div className="text-[11px] uppercase tracking-wide opacity-75">Deuda</div>
+                            <div className="font-mono text-base font-extrabold">{fmt(deudaMoneda, monedaSeleccionada)}</div>
+                          </div>
+                          <div>
+                            <div className="text-[11px] uppercase tracking-wide opacity-75">Disponible</div>
+                            <div className="font-mono text-base font-extrabold text-danger">{fmt(disponibleCredito, monedaSeleccionada)}</div>
+                          </div>
+                        </div>
+
+                        <div className="flex gap-2">
+                          <Button
+                            type="button"
+                            size="sm"
+                            disabled={grantingCredit}
+                            onClick={handleHabilitarCreditoRapido}
+                            className="flex-1 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-sm h-11 shadow-sm cursor-pointer"
+                          >
+                            <Zap size={16} className="mr-1.5 fill-current" />
+                            {grantingCredit ? "Otorgando Crédito..." : `Otorgar Crédito Rápido a ${clienteObj.nombre}`}
+                          </Button>
+                          {/* Ajuste manual del límite en un modal aparte, sin
+                              cerrar el de venta */}
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="outline"
+                            disabled={ajustandoLimite}
+                            onClick={() => setShowAjusteCredito(true)}
+                            title="Ajustar límite de crédito manualmente"
+                            aria-label="Ajustar límite de crédito"
+                            className="shrink-0 w-11 h-11 border-amber-500/50 text-amber-700 dark:text-amber-300 hover:bg-amber-500/20 cursor-pointer"
+                          >
+                            <Plus size={18} />
+                          </Button>
+                        </div>
                       </div>
                     ) : (
                       <div className="rounded-xl border border-emerald-500/30 bg-emerald-500/10 p-3 text-sm text-emerald-800 dark:text-emerald-200">
@@ -1480,8 +1776,8 @@ export default function PuntoDeVentaPage() {
 
                   {/* Total Original de la Venta */}
                   <div className="flex justify-between items-center pt-2 border-t border-border/40 text-muted-foreground">
-                    <span className="font-semibold text-foreground">Total Venta</span>
-                    <span className="font-mono text-base font-bold text-foreground">
+                    <span className="font-semibold text-base text-foreground">Total Venta</span>
+                    <span className="font-mono text-2xl font-black text-primary">
                       {fmt(total, monedaSeleccionada)}
                     </span>
                   </div>
@@ -1512,13 +1808,13 @@ export default function PuntoDeVentaPage() {
                       </p>
                     )}
                   </div>
-                ) : pagosResueltos.some((l) => l.vuelto > 0.009) || pagadoTotal - total > 0.009 ? (
+                ) : vueltoResumen ? (
                   <div className="rounded-2xl border-2 border-emerald-500/50 bg-emerald-500/15 p-4 flex items-center justify-between mt-2">
                     <span className="text-sm font-black uppercase tracking-wider text-emerald-800 dark:text-emerald-300">
                       Vuelto / Cambio:
                     </span>
                     <span className="text-3xl font-black font-mono text-emerald-600 dark:text-emerald-400">
-                      {fmt(pagosResueltos.reduce((s, l) => s + l.vuelto, 0) || Math.max(0, pagadoTotal - total), monedaSeleccionada)}
+                      {fmt(vueltoResumen.monto, vueltoResumen.codigo)}
                     </span>
                   </div>
                 ) : (
@@ -1533,11 +1829,179 @@ export default function PuntoDeVentaPage() {
       );
     })()}
 
+        {/* Modal de ajuste manual del límite de crédito. Se anida sobre el de venta
+            (se renderiza después) y al cerrarlo NO se cierra el checkout. */}
+        <Modal
+          open={showAjusteCredito}
+          onClose={() => setShowAjusteCredito(false)}
+          title={`Ajustar crédito de ${clienteObj?.nombre || "cliente"}`}
+          className="max-w-md w-[92vw]"
+          zIndex={300}
+          overlayClassName="bg-background/90 backdrop-blur-md"
+        >
+          <div className="space-y-4">
+            {/* Estado actual: la moneda va UNA sola vez en el encabezado y los importes
+                en columna, para no repetirla ni mezclar etiqueta y valor */}
+            <div className="rounded-xl border border-border bg-muted/40 p-4">
+              <p className="mb-3 text-[11px] font-bold uppercase tracking-wider text-muted-foreground">
+                Crédito en {monedaSeleccionada}
+              </p>
+              <div className="space-y-2">
+                <div className="flex items-center justify-between">
+                  <span className="text-sm text-muted-foreground">Límite</span>
+                  <span className="font-mono text-sm font-bold text-foreground">
+                    {fmtNumber(limiteMoneda)}
+                  </span>
+                </div>
+                <div className="flex items-center justify-between">
+                  <span className="text-sm text-muted-foreground">Deuda actual</span>
+                  <span className="font-mono text-sm font-bold text-danger">
+                    {fmtNumber(deudaMoneda)}
+                  </span>
+                </div>
+                <div className="flex items-center justify-between border-t border-border pt-2">
+                  <span className="text-sm font-semibold text-foreground">Disponible</span>
+                  <span className="font-mono text-xl font-black text-primary">
+                    {fmtNumber(disponibleCredito)}
+                  </span>
+                </div>
+              </div>
+            </div>
+
+            {/* Selector de modo: sumar/restar un monto, o fijar el valor exacto */}
+            <div className="grid grid-cols-2 gap-1 rounded-lg bg-muted/60 p-1">
+              <button
+                type="button"
+                onClick={() => setModoAjuste("suma")}
+                className={`h-9 rounded-md text-sm font-bold transition-colors cursor-pointer ${
+                  modoAjuste === "suma"
+                    ? "bg-card text-foreground shadow-sm"
+                    : "text-muted-foreground hover:text-foreground"
+                }`}
+              >
+                Sumar / Restar
+              </button>
+              <button
+                type="button"
+                onClick={() => setModoAjuste("fijo")}
+                className={`h-9 rounded-md text-sm font-bold transition-colors cursor-pointer ${
+                  modoAjuste === "fijo"
+                    ? "bg-card text-foreground shadow-sm"
+                    : "text-muted-foreground hover:text-foreground"
+                }`}
+              >
+                Fijar valor
+              </button>
+            </div>
+
+            <div>
+              <Label className="text-xs font-bold uppercase tracking-wider">
+                {modoAjuste === "suma"
+                  ? `Monto a sumar o restar (${monedaSeleccionada})`
+                  : `Nuevo límite (${monedaSeleccionada})`}
+              </Label>
+              <Input
+                type="number"
+                step="any"
+                min="0"
+                autoFocus
+                value={ajusteLimite}
+                placeholder={modoAjuste === "suma" ? "Ej: 5000" : fmtNumber(limiteMoneda)}
+                onChange={(e) => setAjusteLimite(e.target.value)}
+                className="mt-1 h-12 text-right font-mono text-lg font-bold"
+                onKeyDown={(e) => {
+                  if (e.key !== "Enter") return;
+                  if (modoAjuste === "suma") ajustarLimite(1);
+                  else fijarLimite();
+                }}
+              />
+            </div>
+
+            {/* Vista previa del resultado */}
+            <div className="rounded-lg border border-border px-3 py-2 text-sm">
+              <span className="text-muted-foreground">Quedaría en: </span>
+              <span className="font-mono font-bold text-primary">
+                {(() => {
+                  const v = parseFloat(ajusteLimite);
+                  if (!Number.isFinite(v)) return fmtNumber(limiteMoneda);
+                  const nuevo =
+                    modoAjuste === "suma"
+                      ? Math.max(0, limiteMoneda + v)
+                      : Math.max(0, v);
+                  return fmtNumber(nuevo);
+                })()}
+              </span>
+            </div>
+
+            {modoAjuste === "suma" ? (
+              <div className="grid grid-cols-2 gap-3">
+                <Button
+                  type="button"
+                  variant="outline"
+                  disabled={ajustandoLimite}
+                  onClick={() => ajustarLimite(-1)}
+                  className="h-11 font-bold cursor-pointer"
+                >
+                  <Minus size={16} className="mr-1.5" /> Restar
+                </Button>
+                <Button
+                  type="button"
+                  disabled={ajustandoLimite}
+                  onClick={() => ajustarLimite(1)}
+                  className="h-11 font-bold cursor-pointer bg-primary hover:bg-primary/90 text-primary-foreground"
+                >
+                  <Plus size={16} className="mr-1.5" />
+                  {ajustandoLimite ? "Guardando..." : "Sumar"}
+                </Button>
+              </div>
+            ) : (
+              <Button
+                type="button"
+                disabled={ajustandoLimite}
+                onClick={fijarLimite}
+                className="w-full h-11 font-bold cursor-pointer bg-primary hover:bg-primary/90 text-primary-foreground"
+              >
+                <Check size={16} className="mr-1.5" />
+                {ajustandoLimite ? "Guardando..." : "Guardar límite"}
+              </Button>
+            )}
+
+            <div className="flex gap-2">
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                disabled={ajustandoLimite}
+                onClick={() => {
+                  // En modo "suma" se propone el faltante; en modo "fijo" se
+                  // propone el límite exacto que haría falta para esta venta.
+                  const falta = Math.max(0, Math.ceil(montoCreditoNecesario - disponibleCredito));
+                  setModoAjuste("fijo");
+                  setAjusteLimite(String(limiteMoneda + falta));
+                }}
+                className="flex-1 text-xs cursor-pointer"
+              >
+                Usar lo justo para esta venta
+              </Button>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={() => setShowAjusteCredito(false)}
+                className="cursor-pointer"
+              >
+                Cerrar
+              </Button>
+            </div>
+          </div>
+        </Modal>
+
         {/* Modal de creación de cliente (disponible desde Carrito de Venta y Checkout) */}
         <ClienteModal
           open={showClienteModal}
           mode="create"
           cliente={null}
+          zIndex={300}
           onClose={() => setShowClienteModal(false)}
           onSuccess={(msg, newClienteData) => {
             toast(msg, "success");
@@ -1671,7 +2135,6 @@ export default function PuntoDeVentaPage() {
             </div>
           </div>
         </Modal>
-      </div>
 
       {/* Hidden Receipt Component (Visible only when printing) */}
       {lastSaleData && (

@@ -65,7 +65,9 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
       {children}
 
       {/* Toast container */}
-      <div className="fixed bottom-4 right-4 z-[100] flex flex-col gap-2 max-w-sm">
+      {/* z-[300]: por encima del overlay/contenido del modal (100/101) y de los
+          dropdowns (200), para que los avisos nunca queden tapados */}
+      <div className="fixed bottom-4 right-4 z-[300] flex flex-col gap-2 max-w-sm">
         <AnimatePresence mode="popLayout">
           {toasts.map((t) => (
             <motion.div
