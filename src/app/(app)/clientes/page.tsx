@@ -129,7 +129,6 @@ export default function ClientesPage() {
   }, [clientes, search, sortKey, sortOrder]);
 
   const headers: HeaderConfig[] = [
-    { key: "id", label: "#", sortable: true },
     { key: "nombre", label: "Cliente", sortable: true },
     { key: "tipo", label: "Tipo", sortable: true },
     { key: "documento", label: "Documento", sortable: true },
@@ -179,13 +178,13 @@ export default function ClientesPage() {
       <Table headers={headers} sortKey={sortKey} sortOrder={sortOrder} onSort={handleSort}>
         {loading ? (
           <Tr>
-            <Td colSpan={9} className="text-center py-8 text-muted-foreground">
+            <Td colSpan={8} className="text-center py-8 text-muted-foreground">
               Cargando...
             </Td>
           </Tr>
         ) : filteredClientes.length === 0 ? (
           <Tr>
-            <Td colSpan={9} className="text-center py-8 text-muted-foreground">
+            <Td colSpan={8} className="text-center py-8 text-muted-foreground">
               {search ? "No se encontraron resultados" : "No hay clientes registrados"}
             </Td>
           </Tr>
@@ -193,7 +192,6 @@ export default function ClientesPage() {
           filteredClientes.map((c: Cliente) => {
             return (
               <Tr key={c.id}>
-                <Td mono>{String(c.id).padStart(2, "0")}</Td>
                 <Td>
                   <span className="font-semibold">{c.nombre}</span>
                 </Td>

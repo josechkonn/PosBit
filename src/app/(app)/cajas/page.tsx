@@ -129,7 +129,6 @@ export default function CajasPage() {
   }, [cajas, sortKey, sortOrder]);
 
   const headers: HeaderConfig[] = [
-    { key: "id", label: "#", sortable: true },
     { key: "nombre", label: "Nombre", sortable: true },
     "Moneda",
     { key: "saldo_actual", label: "Saldo Actual", sortable: true },
@@ -304,7 +303,6 @@ export default function CajasPage() {
         <Table headers={headers} sortKey={sortKey} sortOrder={sortOrder} onSort={handleSort}>
           {sortedCajas.map((c) => (
             <Tr key={c.id}>
-              <Td mono>{String(c.id).padStart(2, "0")}</Td>
               <Td>
                 <span className="font-semibold">{c.nombre}</span>
               </Td>

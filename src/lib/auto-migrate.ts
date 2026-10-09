@@ -1,14 +1,22 @@
-import { pool } from "./db";
+import { Pool, PoolClient } from "pg";
 import fs from "fs";
 import path from "path";
 
 let migrationPromise: Promise<void> | null = null;
 
-export async function ensureSchemaAndMigrate(): Promise<void> {
+export async function ensureSchemaAndMigrate(customPool?: Pool | PoolClient): Promise<void> {
   if (migrationPromise) return migrationPromise;
 
   migrationPromise = (async () => {
-    const client = await pool.connect();
+    let client: PoolClient | Pool = customPool as any;
+    let releaseNeeded = false;
+
+    if (!client) {
+      const { pool } = await import("./db");
+      client = await pool.connect();
+      releaseNeeded = true;
+    }
+
     try {
       // 1. Verificar si existe la tabla 'ventas' (indicador de BD inicializada)
       const tableCheck = await client.query(`
@@ -63,7 +71,9 @@ export async function ensureSchemaAndMigrate(): Promise<void> {
     } catch (error) {
       console.error("❌ Error en migración automática:", error);
     } finally {
-      client.release();
+      if (releaseNeeded && "release" in client && typeof client.release === "function") {
+        (client as PoolClient).release();
+      }
     }
   })();
 

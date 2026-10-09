@@ -87,7 +87,6 @@ export default function CategoriasPage() {
   }, [categorias, sortKey, sortOrder]);
 
   const headers: HeaderConfig[] = [
-    { key: "id", label: "#", sortable: true },
     { key: "nombre", label: "Nombre", sortable: true },
     { key: "descripcion", label: "Descripción", sortable: true },
     { key: "productos_count", label: "Productos", sortable: true },
@@ -146,7 +145,6 @@ export default function CategoriasPage() {
         >
           {sortedCategorias.map((c: Categoria) => (
             <Tr key={c.id}>
-              <Td mono>{String(c.id).padStart(2, "0")}</Td>
               <Td>
                 <span className="font-medium">{c.nombre}</span>
               </Td>

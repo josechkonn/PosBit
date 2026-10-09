@@ -99,7 +99,6 @@ export default function MetodosPagoPage() {
   }, [metodos, sortKey, sortOrder]);
 
   const headers: HeaderConfig[] = [
-    { key: "id", label: "#", sortable: true },
     { key: "nombre", label: "Nombre", sortable: true },
     { key: "tipo", label: "Tipo", sortable: true },
     { key: "caja_nombre", label: "Caja", sortable: true },
@@ -159,7 +158,6 @@ export default function MetodosPagoPage() {
         >
           {sortedMetodos.map((m: MetodoPago) => (
             <Tr key={m.id}>
-              <Td mono>{String(m.id).padStart(2, "0")}</Td>
               <Td>
                 <span className="font-semibold">{m.nombre}</span>
               </Td>

@@ -87,7 +87,6 @@ export default function MarcasPage() {
   }, [marcas, sortKey, sortOrder]);
 
   const headers: HeaderConfig[] = [
-    { key: "id", label: "#", sortable: true },
     { key: "nombre", label: "Marca", sortable: true },
     { key: "pais", label: "País de Origen", sortable: true },
     { key: "productos_count", label: "Productos", sortable: true },
@@ -131,20 +130,19 @@ export default function MarcasPage() {
       >
         {loading ? (
           <Tr>
-            <Td colSpan={6} className="text-center py-8 text-muted-foreground">
+            <Td colSpan={5} className="text-center py-8 text-muted-foreground">
               Cargando...
             </Td>
           </Tr>
         ) : sortedMarcas.length === 0 ? (
           <Tr>
-            <Td colSpan={6} className="text-center py-8 text-muted-foreground">
+            <Td colSpan={5} className="text-center py-8 text-muted-foreground">
               No hay marcas registradas
             </Td>
           </Tr>
         ) : (
           sortedMarcas.map((b: Marca) => (
             <Tr key={b.id}>
-              <Td mono>{String(b.id).padStart(2, "0")}</Td>
               <Td>
                 <span className="font-semibold">{b.nombre}</span>
               </Td>

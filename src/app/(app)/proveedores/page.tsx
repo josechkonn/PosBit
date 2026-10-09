@@ -119,7 +119,6 @@ export default function ProveedoresPage() {
   }, [proveedores, search, sortKey, sortOrder]);
 
   const headers: HeaderConfig[] = [
-    { key: "id", label: "#", sortable: true },
     { key: "nombre", label: "Empresa", sortable: true },
     { key: "contacto", label: "Contacto", sortable: true },
     { key: "email", label: "Correo", sortable: true },
@@ -173,20 +172,19 @@ export default function ProveedoresPage() {
       >
         {loading ? (
           <Tr>
-            <Td colSpan={8} className="text-center py-8 text-muted-foreground">
+            <Td colSpan={7} className="text-center py-8 text-muted-foreground">
               Cargando...
             </Td>
           </Tr>
         ) : filteredProveedores.length === 0 ? (
           <Tr>
-            <Td colSpan={8} className="text-center py-8 text-muted-foreground">
+            <Td colSpan={7} className="text-center py-8 text-muted-foreground">
               {search ? "No se encontraron resultados" : "No hay proveedores registrados"}
             </Td>
           </Tr>
         ) : (
           filteredProveedores.map((s: Proveedor) => (
             <Tr key={s.id}>
-              <Td mono>{String(s.id).padStart(2, "0")}</Td>
               <Td>
                 <span className="font-semibold">{s.nombre}</span>
               </Td>

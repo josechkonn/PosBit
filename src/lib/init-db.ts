@@ -60,6 +60,9 @@ export async function ensureDatabase(): Promise<void> {
 
     const { seedAdminUser } = await import("./seed-admin");
     await seedAdminUser();
+
+    const { ensureSchemaAndMigrate } = await import("./auto-migrate");
+    await ensureSchemaAndMigrate(appPool);
   } finally {
     await appPool.query("SELECT pg_advisory_unlock($1)", [LOCK_ID]).catch(() => {});
     await appPool.end();

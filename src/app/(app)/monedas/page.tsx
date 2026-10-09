@@ -100,7 +100,6 @@ export default function MonedasPage() {
   }, [monedas, sortKey, sortOrder]);
 
   const headers: HeaderConfig[] = [
-    { key: "id", label: "#", sortable: true },
     { key: "nombre", label: "Moneda", sortable: true },
     { key: "codigo", label: "Código", sortable: true },
     { key: "simbolo", label: "Símbolo", sortable: true },
@@ -146,20 +145,19 @@ export default function MonedasPage() {
       >
         {loading ? (
           <Tr>
-            <Td colSpan={8} className="text-center py-8 text-muted-foreground">
+            <Td colSpan={7} className="text-center py-8 text-muted-foreground">
               Cargando...
             </Td>
           </Tr>
         ) : sortedMonedas.length === 0 ? (
           <Tr>
-            <Td colSpan={8} className="text-center py-8 text-muted-foreground">
+            <Td colSpan={7} className="text-center py-8 text-muted-foreground">
               No hay monedas registradas
             </Td>
           </Tr>
         ) : (
           sortedMonedas.map((c: Moneda) => (
             <Tr key={c.id}>
-              <Td mono>{String(c.id).padStart(2, "0")}</Td>
               <Td>
                 <span className="font-semibold">{c.nombre}</span>
               </Td>
