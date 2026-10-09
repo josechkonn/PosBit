@@ -37,6 +37,7 @@ interface Producto {
   categoria_id: string | null;
   marca_id: string | null;
   moneda_base_id?: string | null;
+  moneda_costo_id?: string | null;
   stock: number;
   stock_minimo: number;
   activo: boolean;
@@ -121,52 +122,83 @@ export function ProductoModal({ open, mode, producto, monedas: monedasProp, defa
   const [ivaIncluido, setIvaIncluido] = useState(true);
   const [pendingImageFile, setPendingImageFile] = useState<File | null>(null);
 
-  // Pricing: each moneda has its own precio_venta and precio_compra
+  // Pricing: cada moneda tiene su precio de venta y su precio de compra. La
+  // moneda de VENTA y la de COMPRA se eligen por separado (p. ej. costo en USD
+  // y precio de venta en COP): `moneda_base_id` / `moneda_costo_id`.
   interface PrecioEntry {
     precioVenta: string;
     precioCompra: string;
   }
   const [preciosPorMoneda, setPreciosPorMoneda] = useState<Record<string, PrecioEntry>>({});
-  const [baseMonedaId, setBaseMonedaId] = useState<string | null>(null);
+  const [ventaMonedaId, setVentaMonedaId] = useState<string | null>(null);
+  const [costoMonedaId, setCostoMonedaId] = useState<string | null>(null);
 
-  const baseMoneda = useMemo(
-    () => effectiveMonedas.find((m) => m.id === baseMonedaId),
-    [effectiveMonedas, baseMonedaId]
+  const ventaMoneda = useMemo(
+    () => effectiveMonedas.find((m) => m.id === ventaMonedaId),
+    [effectiveMonedas, ventaMonedaId]
+  );
+  const costoMoneda = useMemo(
+    () => effectiveMonedas.find((m) => m.id === costoMonedaId),
+    [effectiveMonedas, costoMonedaId]
   );
 
-  const cambiarMonedaBaseRef = (monedaId: string) => {
-    setBaseMonedaId(monedaId);
-
-    const refEntry = preciosPorMoneda[monedaId];
-    const precioInput = parseFloat(refEntry?.precioVenta || "") || 0;
-    const costoInput = parseFloat(refEntry?.precioCompra || "") || 0;
-
-    if (precioInput <= 0 && costoInput <= 0) return;
-
-    // Los precios de las demás monedas se derivan con `convertir` (respeta la
-    // arista directa de referencia, p. ej. COP ↔ BS = 3.2, en modo directo).
-    const refMoneda = effectiveMonedas.find((m) => m.id === monedaId);
+  /**
+   * Re-calcula `field` en TODAS las monedas a partir de la moneda de referencia
+   * indicada. Los precios se derivan con `convertir` (respeta la arista directa
+   * de referencia, p. ej. COP ↔ BS = 3.2, en modo directo).
+   * `limpiar`: si el valor de la referencia está vacío, ¿poner "" en las demás?
+   */
+  const derivarCampo = (
+    field: "precioVenta" | "precioCompra",
+    refId: string | null,
+    valor: number,
+    limpiar: boolean
+  ) => {
+    if (!refId) return;
+    const refMoneda = effectiveMonedas.find((m) => m.id === refId);
+    if (!refMoneda) return;
 
     setPreciosPorMoneda((prev) => {
       const next = { ...prev };
       for (const m of effectiveMonedas) {
-        if (m.id === monedaId) continue;
+        if (m.id === refId) continue;
         const dec = m.decimales ?? 2;
-        const currentEntry = (prev as Record<string, PrecioEntry>)[m.id] || { precioVenta: "", precioCompra: "" };
-
-        next[m.id] = {
-          precioVenta:
-            precioInput > 0
-              ? convertir(precioInput, refMoneda, m, effectiveMonedas, dec).toFixed(dec)
-              : currentEntry.precioVenta,
-          precioCompra:
-            costoInput > 0
-              ? convertir(costoInput, refMoneda, m, effectiveMonedas, dec).toFixed(dec)
-              : currentEntry.precioCompra,
-        };
+        const current = prev[m.id] || { precioVenta: "", precioCompra: "" };
+        const nuevo =
+          valor > 0
+            ? convertir(valor, refMoneda, m, effectiveMonedas, dec).toFixed(dec)
+            : limpiar
+              ? ""
+              : current[field];
+        next[m.id] =
+          field === "precioVenta" ? { ...current, precioVenta: nuevo } : { ...current, precioCompra: nuevo };
       }
       return next;
     });
+  };
+
+  /** Cambia la moneda de referencia de VENTA y rederiva los precios de venta. */
+  const cambiarVentaRef = (monedaId: string) => {
+    setVentaMonedaId(monedaId);
+    const valor = parseFloat(preciosPorMoneda[monedaId]?.precioVenta || "") || 0;
+    derivarCampo("precioVenta", monedaId, valor, false);
+  };
+
+  /** Cambia la moneda de referencia de COMPRA y rederiva los precios de compra. */
+  const cambiarCostoRef = (monedaId: string) => {
+    setCostoMonedaId(monedaId);
+    const valor = parseFloat(preciosPorMoneda[monedaId]?.precioCompra || "") || 0;
+    derivarCampo("precioCompra", monedaId, valor, false);
+  };
+
+  /**
+   * El precio de compra y el de venta pueden estar en monedas distintas: para
+   * compararlos (regla "compra ≤ venta") se convierte el costo a la moneda de
+   * venta con las tasas actuales.
+   */
+  const compraEnVentaMoneda = (compra: number): number => {
+    if (!costoMoneda || !ventaMoneda) return compra;
+    return convertir(compra, costoMoneda, ventaMoneda, effectiveMonedas, Number(ventaMoneda.decimales ?? 2));
   };
 
   const actualizarPrecio = (monedaId: string, field: "precioVenta" | "precioCompra", value: string) => {
@@ -175,41 +207,13 @@ export function ProductoModal({ open, mode, producto, monedas: monedasProp, defa
       [monedaId]: { ...prev[monedaId], [field]: value },
     }));
 
-    // Auto-calculate for other currencies when reference currency prices change
-    if (monedaId === baseMonedaId) {
-      const baseEntry = { ...preciosPorMoneda[monedaId], [field]: value };
-      const precioInput = parseFloat(baseEntry.precioVenta) || 0;
-      const costoInput = parseFloat(baseEntry.precioCompra) || 0;
+    // Solo la moneda de REFERENCIA de ese campo redera las demás monedas
+    const esReferencia =
+      (field === "precioVenta" && monedaId === ventaMonedaId) ||
+      (field === "precioCompra" && monedaId === costoMonedaId);
+    if (!esReferencia) return;
 
-      const refMoneda = effectiveMonedas.find((m) => m.id === baseMonedaId);
-
-      // Derivar los precios de las demás monedas con `convertir` (respeta la
-      // arista directa de referencia en modo directo).
-      setPreciosPorMoneda((prev) => {
-        const next = { ...prev };
-        for (const m of effectiveMonedas) {
-          if (m.id === baseMonedaId) continue;
-          const dec = m.decimales ?? 2;
-          const currentEntry = (prev as Record<string, PrecioEntry>)[m.id] || { precioVenta: "", precioCompra: "" };
-
-          next[m.id] = {
-            precioVenta:
-              precioInput > 0
-                ? convertir(precioInput, refMoneda, m, effectiveMonedas, dec).toFixed(dec)
-                : field === "precioVenta"
-                  ? ""
-                  : currentEntry.precioVenta,
-            precioCompra:
-              costoInput > 0
-                ? convertir(costoInput, refMoneda, m, effectiveMonedas, dec).toFixed(dec)
-                : field === "precioCompra"
-                  ? ""
-                  : currentEntry.precioCompra,
-          };
-        }
-        return next;
-      });
-    }
+    derivarCampo(field, monedaId, parseFloat(value) || 0, true);
   };
 
   // Load categories, brands, and fallback currencies
@@ -319,17 +323,17 @@ export function ProductoModal({ open, mode, producto, monedas: monedasProp, defa
       }
       setPreciosPorMoneda(precios);
 
-      if (producto.moneda_base_id) {
-        setBaseMonedaId(producto.moneda_base_id);
-      } else {
-        const basePrice = producto.precios?.find((p) => p.es_base);
-        if (basePrice) {
-          setBaseMonedaId(basePrice.moneda_id);
-        } else if (effectiveMonedas.length > 0) {
-          const defaultBase = effectiveMonedas.find((m) => m.es_base) || effectiveMonedas[0];
-          setBaseMonedaId(defaultBase.id);
-        }
-      }
+      // Moneda de referencia de VENTA (precio_base) y de COMPRA (costo_base);
+      // sin moneda de compra guardada = misma que la de venta (comportamiento
+      // anterior). El costo puede tener su propia moneda.
+      const monedaVentaInicial =
+        producto.moneda_base_id ||
+        producto.precios?.find((p) => p.es_base)?.moneda_id ||
+        (effectiveMonedas.length > 0
+          ? (effectiveMonedas.find((m) => m.es_base) || effectiveMonedas[0]).id
+          : null);
+      setVentaMonedaId(monedaVentaInicial);
+      setCostoMonedaId(producto.moneda_costo_id || monedaVentaInicial);
     } else if (mode === "create") {
       setCodigo("");
       setNombre("");
@@ -352,12 +356,13 @@ export function ProductoModal({ open, mode, producto, monedas: monedasProp, defa
 
       const defaultBase = effectiveMonedas.find((m) => m.es_base) || effectiveMonedas[0];
       if (defaultBase) {
-        setBaseMonedaId(defaultBase.id);
+        setVentaMonedaId(defaultBase.id);
+        setCostoMonedaId(defaultBase.id);
       }
     }
   }, [producto, mode, open]);
 
-  // Ensure prices entries and baseMonedaId are updated when effectiveMonedas arrives
+  // Ensure prices entries and the reference currencies are updated when effectiveMonedas arrives
   useEffect(() => {
     if (!open || effectiveMonedas.length === 0) return;
 
@@ -373,11 +378,12 @@ export function ProductoModal({ open, mode, producto, monedas: monedasProp, defa
       return changed ? next : prev;
     });
 
-    setBaseMonedaId((prevBase) => {
-      if (prevBase && effectiveMonedas.some((m) => m.id === prevBase)) return prevBase;
+    const defaultId = () => {
       const defaultBase = effectiveMonedas.find((m) => m.es_base) || effectiveMonedas[0];
       return defaultBase ? defaultBase.id : null;
-    });
+    };
+    setVentaMonedaId((prev) => (prev && effectiveMonedas.some((m) => m.id === prev) ? prev : defaultId()));
+    setCostoMonedaId((prev) => (prev && effectiveMonedas.some((m) => m.id === prev) ? prev : defaultId()));
   }, [open, effectiveMonedas]);
 
   const handleImageUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -440,14 +446,17 @@ export function ProductoModal({ open, mode, producto, monedas: monedasProp, defa
       return true;
     }
     if (s === 2) {
-      if (!baseMonedaId) { setError("Selecciona una moneda de referencia"); return false; }
-      const entry = preciosPorMoneda[baseMonedaId];
-      if (!entry || entry.precioCompra === "" || parseFloat(entry.precioCompra) < 0) { setError("Ingresa un precio de compra válido para la moneda de referencia"); return false; }
-      if (!entry || !entry.precioVenta || parseFloat(entry.precioVenta) <= 0) { setError("Ingresa un precio de venta válido para la moneda de referencia"); return false; }
-      
-      const compra = parseFloat(entry.precioCompra);
-      const venta = parseFloat(entry.precioVenta);
-      if (compra > venta) {
+      if (!ventaMonedaId) { setError("Selecciona una moneda de venta"); return false; }
+      if (!costoMonedaId) { setError("Selecciona una moneda de compra"); return false; }
+      const entryVenta = preciosPorMoneda[ventaMonedaId];
+      const entryCosto = preciosPorMoneda[costoMonedaId];
+      if (!entryCosto || entryCosto.precioCompra === "" || parseFloat(entryCosto.precioCompra) < 0) { setError("Ingresa un precio de compra válido para la moneda de compra"); return false; }
+      if (!entryVenta || !entryVenta.precioVenta || parseFloat(entryVenta.precioVenta) <= 0) { setError("Ingresa un precio de venta válido para la moneda de venta"); return false; }
+
+      const compra = parseFloat(entryCosto.precioCompra);
+      const venta = parseFloat(entryVenta.precioVenta);
+      // Cada precio puede estar en una moneda distinta: se comparan convertidos
+      if (compraEnVentaMoneda(compra) > venta) {
         setError("El precio de compra no puede ser mayor al precio de venta");
         return false;
       }
@@ -484,7 +493,8 @@ export function ProductoModal({ open, mode, producto, monedas: monedasProp, defa
         stock_minimo: stockMinimo,
         activo,
         iva_incluido: ivaIncluido,
-        moneda_base_id: baseMonedaId,
+        moneda_base_id: ventaMonedaId,
+        moneda_costo_id: costoMonedaId,
       };
 
       const preciosMap: Record<string, { precio: number; costo: number }> = {};
@@ -499,20 +509,23 @@ export function ProductoModal({ open, mode, producto, monedas: monedasProp, defa
       }
       body.precios = preciosMap;
 
-      const baseEntry = baseMonedaId ? preciosPorMoneda[baseMonedaId] : null;
-      const precioVenta = baseEntry?.precioVenta ? parseFloat(baseEntry.precioVenta) : 0;
-      const precioCompra = baseEntry?.precioCompra ? parseFloat(baseEntry.precioCompra) : 0;
+      const ventaEntry = ventaMonedaId ? preciosPorMoneda[ventaMonedaId] : null;
+      const costoEntry = costoMonedaId ? preciosPorMoneda[costoMonedaId] : null;
+      const precioVenta = ventaEntry?.precioVenta ? parseFloat(ventaEntry.precioVenta) : 0;
+      const precioCompra = costoEntry?.precioCompra ? parseFloat(costoEntry.precioCompra) : 0;
 
-      if (precioCompra > precioVenta) {
+      if (compraEnVentaMoneda(precioCompra) > precioVenta) {
         throw new Error("El precio de compra no puede ser mayor al precio de venta");
       }
 
-      // `precio_base`/`costo_base` se guardan EN LA MONEDA DEL PRODUCTO
-      // (moneda_base_id), tal cual como se escribieron en esa moneda
-      const decBase = Number(baseMoneda?.decimales ?? 2);
+      // `precio_base` se guarda EN LA MONEDA DE VENTA (moneda_base_id) y
+      // `costo_base` EN LA DE COMPRA (moneda_costo_id), tal cual se escribieron
+      const decVenta = Number(ventaMoneda?.decimales ?? 2);
+      const decCosto = Number(costoMoneda?.decimales ?? 2);
 
       if (mode === "create") {
-        if (!baseMonedaId) throw new Error("Selecciona una moneda base");
+        if (!ventaMonedaId) throw new Error("Selecciona una moneda de venta");
+        if (!costoMonedaId) throw new Error("Selecciona una moneda de compra");
         body.precio_base = precioVenta;
         body.costo_base = precioCompra;
 
@@ -537,11 +550,11 @@ export function ProductoModal({ open, mode, producto, monedas: monedasProp, defa
         }
       } else if (mode === "edit" && producto) {
         body.id = producto.id;
-        if (baseMonedaId && baseEntry?.precioVenta) {
-          body.precio_base = redondear(precioVenta, decBase);
+        if (ventaMonedaId && ventaEntry?.precioVenta) {
+          body.precio_base = redondear(precioVenta, decVenta);
         }
-        if (baseMonedaId && baseEntry?.precioCompra) {
-          body.costo_base = redondear(precioCompra, decBase);
+        if (costoMonedaId && costoEntry?.precioCompra) {
+          body.costo_base = redondear(precioCompra, decCosto);
         }
 
         const res = await fetch("/api/productos", {
@@ -585,6 +598,111 @@ export function ProductoModal({ open, mode, producto, monedas: monedasProp, defa
   };
 
   const stepWidth = isFormMode ? "max-w-4xl w-[92vw]" : "max-w-xl w-[90vw]";
+
+  /**
+   * Tarjeta de una moneda en el paso de precios: permite marcarla como moneda
+   * de referencia de COMPRA y/o de VENTA y edita sus dos precios (los que no
+   * son referencia de su campo se muestran auto-calculados).
+   */
+  const renderMonedaCard = (m: Moneda, prefijo: "create" | "edit") => {
+    const esVenta = m.id === ventaMonedaId;
+    const esCosto = m.id === costoMonedaId;
+    const esRef = esVenta || esCosto;
+    const entry = preciosPorMoneda[m.id];
+    const tasa = typeof m.tasa === "string" ? parseFloat(m.tasa) : Number(m.tasa);
+
+    return (
+      <div
+        key={m.id}
+        className={`rounded-lg border p-4 space-y-3 transition-colors ${
+          esRef ? "border-primary bg-primary/5 shadow-sm" : "border-border/70 bg-muted/60 opacity-85"
+        }`}
+      >
+        <div className="flex items-center gap-2 flex-wrap">
+          <span className="text-sm font-semibold flex-1 min-w-0">
+            {m.simbolo} {m.codigo} {m.es_base ? "(Moneda Base del Sistema)" : `(Tasa: ${tasa})`}
+          </span>
+          {esCosto && (
+            <span className="text-[10px] font-bold uppercase tracking-wide text-primary bg-primary/10 px-2 py-0.5 rounded-full">
+              Ref. compra
+            </span>
+          )}
+          {esVenta && (
+            <span className="text-[10px] font-bold uppercase tracking-wide text-primary bg-primary/10 px-2 py-0.5 rounded-full">
+              Ref. venta
+            </span>
+          )}
+          {!esRef && (
+            <span className="text-[10px] font-medium text-muted-foreground bg-muted/80 px-2 py-0.5 rounded-full">
+              Auto-calculado
+            </span>
+          )}
+        </div>
+
+        <div className="flex items-center gap-5">
+          <label
+            htmlFor={`${prefijo}-costo-${m.id}`}
+            className="flex items-center gap-1.5 text-xs text-muted-foreground cursor-pointer select-none"
+          >
+            <input
+              type="radio"
+              name={`${prefijo}MonedaCostoRef`}
+              id={`${prefijo}-costo-${m.id}`}
+              checked={esCosto}
+              onChange={() => cambiarCostoRef(m.id)}
+              className="h-4 w-4 accent-primary cursor-pointer"
+            />
+            Moneda de compra
+          </label>
+          <label
+            htmlFor={`${prefijo}-venta-${m.id}`}
+            className="flex items-center gap-1.5 text-xs text-muted-foreground cursor-pointer select-none"
+          >
+            <input
+              type="radio"
+              name={`${prefijo}MonedaVentaRef`}
+              id={`${prefijo}-venta-${m.id}`}
+              checked={esVenta}
+              onChange={() => cambiarVentaRef(m.id)}
+              className="h-4 w-4 accent-primary cursor-pointer"
+            />
+            Moneda de venta
+          </label>
+        </div>
+
+        <div className="grid grid-cols-2 gap-3">
+          <div>
+            <Label className={`text-xs ${!esCosto ? "text-muted-foreground" : ""}`}>Precio de compra ({m.codigo})</Label>
+            <Input
+              type="number"
+              step={1 / Math.pow(10, m.decimales ?? 2)}
+              min="0"
+              disabled={!esCosto}
+              readOnly={!esCosto}
+              className={!esCosto ? "bg-muted/90 text-muted-foreground cursor-not-allowed border-border/50 select-none" : ""}
+              value={entry?.precioCompra ?? ""}
+              onChange={(e) => actualizarPrecio(m.id, "precioCompra", e.target.value)}
+              placeholder={esCosto ? `0.${"0".repeat(m.decimales ?? 2)}` : "Calculado..."}
+            />
+          </div>
+          <div>
+            <Label className={`text-xs ${!esVenta ? "text-muted-foreground" : ""}`}>Precio de venta ({m.codigo})</Label>
+            <Input
+              type="number"
+              step={1 / Math.pow(10, m.decimales ?? 2)}
+              min="0"
+              disabled={!esVenta}
+              readOnly={!esVenta}
+              className={!esVenta ? "bg-muted/90 text-muted-foreground cursor-not-allowed border-border/50 select-none" : ""}
+              value={entry?.precioVenta ?? ""}
+              onChange={(e) => actualizarPrecio(m.id, "precioVenta", e.target.value)}
+              placeholder={esVenta ? `0.${"0".repeat(m.decimales ?? 2)}` : "Calculado..."}
+            />
+          </div>
+        </div>
+      </div>
+    );
+  };
 
   return (
     <Modal
@@ -863,7 +981,8 @@ export function ProductoModal({ open, mode, producto, monedas: monedasProp, defa
             className="space-y-4"
           >
             <p className="text-xs text-muted-foreground">
-              Define los precios para cada moneda. Selecciona la moneda base de referencia.
+              Define el precio de compra y el de venta de cada producto. Puedes usar una
+              moneda distinta para cada uno (p. ej. costo en USD y precio de venta en COP).
             </p>
 
             {loadingMonedas ? (
@@ -876,78 +995,7 @@ export function ProductoModal({ open, mode, producto, monedas: monedasProp, defa
                 No hay monedas activas registradas. Ve a la sección de Configuración/Monedas para habilitar al menos una moneda.
               </Alert>
             ) : (
-              effectiveMonedas.map((m) => {
-                const isBase = m.id === baseMonedaId;
-                const entry = preciosPorMoneda[m.id];
-                const tasa = typeof m.tasa === "string" ? parseFloat(m.tasa) : Number(m.tasa);
-
-                return (
-                  <div
-                    key={m.id}
-                    className={`rounded-lg border p-4 space-y-3 transition-colors ${
-                      isBase
-                        ? "border-primary bg-primary/5 shadow-sm"
-                        : "border-border/70 bg-muted/60 opacity-85"
-                    }`}
-                  >
-                    <div className="flex items-center gap-3">
-                      <input
-                        type="radio"
-                        name="baseMoneda"
-                        checked={isBase}
-                        onChange={() => cambiarMonedaBaseRef(m.id)}
-                        className="h-4 w-4 accent-primary cursor-pointer"
-                        id={`moneda-base-${m.id}`}
-                      />
-                      <label htmlFor={`moneda-base-${m.id}`} className="text-sm font-semibold cursor-pointer select-none flex-1 flex items-center justify-between">
-                        <span className={!isBase ? "text-muted-foreground" : ""}>
-                          {m.simbolo} {m.codigo} {m.es_base ? "(Moneda Base del Sistema)" : `(Tasa: ${tasa})`}
-                        </span>
-                        {isBase ? (
-                          <span className="text-[10px] font-bold uppercase tracking-wide text-primary bg-primary/10 px-2 py-0.5 rounded-full">
-                            Moneda Referencia
-                          </span>
-                        ) : (
-                          <span className="text-[10px] font-medium text-muted-foreground bg-muted/80 px-2 py-0.5 rounded-full">
-                            Auto-calculado
-                          </span>
-                        )}
-                      </label>
-                    </div>
-
-                    <div className="grid grid-cols-2 gap-3">
-                      <div>
-                        <Label className={`text-xs ${!isBase ? "text-muted-foreground" : ""}`}>Precio de compra ({m.codigo})</Label>
-                        <Input
-                          type="number"
-                          step={1 / Math.pow(10, m.decimales ?? 2)}
-                          min="0"
-                          disabled={!isBase}
-                          readOnly={!isBase}
-                          className={!isBase ? "bg-muted/90 text-muted-foreground cursor-not-allowed border-border/50 select-none" : ""}
-                          value={entry?.precioCompra ?? ""}
-                          onChange={(e) => actualizarPrecio(m.id, "precioCompra", e.target.value)}
-                          placeholder={isBase ? `0.${"0".repeat(m.decimales ?? 2)}` : "Calculado..."}
-                        />
-                      </div>
-                      <div>
-                        <Label className={`text-xs ${!isBase ? "text-muted-foreground" : ""}`}>Precio de venta ({m.codigo})</Label>
-                        <Input
-                          type="number"
-                          step={1 / Math.pow(10, m.decimales ?? 2)}
-                          min="0"
-                          disabled={!isBase}
-                          readOnly={!isBase}
-                          className={!isBase ? "bg-muted/90 text-muted-foreground cursor-not-allowed border-border/50 select-none" : ""}
-                          value={entry?.precioVenta ?? ""}
-                          onChange={(e) => actualizarPrecio(m.id, "precioVenta", e.target.value)}
-                          placeholder={isBase ? `0.${"0".repeat(m.decimales ?? 2)}` : "Calculado..."}
-                        />
-                      </div>
-                    </div>
-                  </div>
-                );
-              })
+              effectiveMonedas.map((m) => renderMonedaCard(m, "create"))
             )}
           </motion.div>
         )}
@@ -998,20 +1046,24 @@ export function ProductoModal({ open, mode, producto, monedas: monedasProp, defa
                 <span className="font-mono font-medium">{codigo || "—"}</span>
                 <span className="text-muted-foreground">Nombre:</span>
                 <span className="font-medium">{nombre || "—"}</span>
-                <span className="text-muted-foreground">Moneda referencia:</span>
+                <span className="text-muted-foreground">Moneda de compra:</span>
                 <span className="font-mono font-medium">
-                  {baseMoneda ? `${baseMoneda.simbolo} ${baseMoneda.codigo}` : "—"}
+                  {costoMoneda ? `${costoMoneda.simbolo} ${costoMoneda.codigo}` : "—"}
                 </span>
-                <span className="text-muted-foreground">Precio compra (Costo):</span>
+                <span className="text-muted-foreground">Precio de compra (Costo):</span>
                 <span className="font-mono font-medium">
-                  {baseMoneda && preciosPorMoneda[baseMoneda.id]?.precioCompra
-                    ? `${baseMoneda.simbolo} ${parseFloat(preciosPorMoneda[baseMoneda.id].precioCompra).toLocaleString("es-BO", { minimumFractionDigits: baseMoneda.decimales ?? 2, maximumFractionDigits: baseMoneda.decimales ?? 2 })}`
+                  {costoMoneda && preciosPorMoneda[costoMoneda.id]?.precioCompra
+                    ? `${costoMoneda.simbolo} ${parseFloat(preciosPorMoneda[costoMoneda.id].precioCompra).toLocaleString("es-BO", { minimumFractionDigits: costoMoneda.decimales ?? 2, maximumFractionDigits: costoMoneda.decimales ?? 2 })}`
                     : "—"}
                 </span>
-                <span className="text-muted-foreground">Precio venta:</span>
+                <span className="text-muted-foreground">Moneda de venta:</span>
                 <span className="font-mono font-medium">
-                  {baseMoneda && preciosPorMoneda[baseMoneda.id]?.precioVenta
-                    ? `${baseMoneda.simbolo} ${parseFloat(preciosPorMoneda[baseMoneda.id].precioVenta).toLocaleString("es-BO", { minimumFractionDigits: baseMoneda.decimales ?? 2, maximumFractionDigits: baseMoneda.decimales ?? 2 })}`
+                  {ventaMoneda ? `${ventaMoneda.simbolo} ${ventaMoneda.codigo}` : "—"}
+                </span>
+                <span className="text-muted-foreground">Precio de venta:</span>
+                <span className="font-mono font-medium">
+                  {ventaMoneda && preciosPorMoneda[ventaMoneda.id]?.precioVenta
+                    ? `${ventaMoneda.simbolo} ${parseFloat(preciosPorMoneda[ventaMoneda.id].precioVenta).toLocaleString("es-BO", { minimumFractionDigits: ventaMoneda.decimales ?? 2, maximumFractionDigits: ventaMoneda.decimales ?? 2 })}`
                     : "—"}
                 </span>
                 <span className="text-muted-foreground">Existencias:</span>
@@ -1143,81 +1195,11 @@ export function ProductoModal({ open, mode, producto, monedas: monedasProp, defa
             </div>
 
             <p className="text-xs text-muted-foreground">
-              Precios por moneda. Marca cuál es la moneda base de referencia.
+              Precios por moneda. Elige por separado la moneda de compra y la de venta;
+              pueden ser distintas (p. ej. costo en USD y precio de venta en COP).
             </p>
 
-            {effectiveMonedas.map((m) => {
-              const isBase = m.id === baseMonedaId;
-              const entry = preciosPorMoneda[m.id];
-              const tasa = typeof m.tasa === "string" ? parseFloat(m.tasa) : Number(m.tasa);
-
-              return (
-                <div
-                  key={m.id}
-                  className={`rounded-lg border p-4 space-y-3 transition-colors ${
-                    isBase
-                      ? "border-primary bg-primary/5 shadow-sm"
-                      : "border-border/70 bg-muted/60 opacity-85"
-                  }`}
-                >
-                  <div className="flex items-center gap-3">
-                    <input
-                      type="radio"
-                      name="baseMonedaEdit"
-                      checked={isBase}
-                      onChange={() => cambiarMonedaBaseRef(m.id)}
-                      className="h-4 w-4 accent-primary cursor-pointer"
-                      id={`moneda-base-edit-${m.id}`}
-                    />
-                    <label htmlFor={`moneda-base-edit-${m.id}`} className="text-sm font-semibold cursor-pointer select-none flex-1 flex items-center justify-between">
-                      <span className={!isBase ? "text-muted-foreground" : ""}>
-                        {m.simbolo} {m.codigo} {m.es_base ? "(Moneda Base del Sistema)" : `(Tasa: ${tasa})`}
-                      </span>
-                      {isBase ? (
-                        <span className="text-[10px] font-bold uppercase tracking-wide text-primary bg-primary/10 px-2 py-0.5 rounded-full">
-                          Moneda Referencia
-                        </span>
-                      ) : (
-                        <span className="text-[10px] font-medium text-muted-foreground bg-muted/80 px-2 py-0.5 rounded-full">
-                          Auto-calculado
-                        </span>
-                      )}
-                    </label>
-                  </div>
-
-                  <div className="grid grid-cols-2 gap-3">
-                    <div>
-                      <Label className={`text-xs ${!isBase ? "text-muted-foreground" : ""}`}>Precio de compra ({m.codigo})</Label>
-                      <Input
-                        type="number"
-                        step={1 / Math.pow(10, m.decimales ?? 2)}
-                        min="0"
-                        disabled={!isBase}
-                        readOnly={!isBase}
-                        className={!isBase ? "bg-muted/90 text-muted-foreground cursor-not-allowed border-border/50 select-none" : ""}
-                        value={entry?.precioCompra ?? ""}
-                        onChange={(e) => actualizarPrecio(m.id, "precioCompra", e.target.value)}
-                        placeholder={isBase ? `0.${"0".repeat(m.decimales ?? 2)}` : "Calculado..."}
-                      />
-                    </div>
-                    <div>
-                      <Label className={`text-xs ${!isBase ? "text-muted-foreground" : ""}`}>Precio de venta ({m.codigo})</Label>
-                      <Input
-                        type="number"
-                        step={1 / Math.pow(10, m.decimales ?? 2)}
-                        min="0"
-                        disabled={!isBase}
-                        readOnly={!isBase}
-                        className={!isBase ? "bg-muted/90 text-muted-foreground cursor-not-allowed border-border/50 select-none" : ""}
-                        value={entry?.precioVenta ?? ""}
-                        onChange={(e) => actualizarPrecio(m.id, "precioVenta", e.target.value)}
-                        placeholder={isBase ? `0.${"0".repeat(m.decimales ?? 2)}` : "Calculado..."}
-                      />
-                    </div>
-                  </div>
-                </div>
-              );
-            })}
+            {effectiveMonedas.map((m) => renderMonedaCard(m, "edit"))}
 
             <div className="grid grid-cols-2 gap-4">
               <div>

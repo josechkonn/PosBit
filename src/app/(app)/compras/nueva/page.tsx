@@ -79,6 +79,7 @@ interface ProductoSearch {
   stock: number;
   costo_base: number | string;
   moneda_base_id: string | null;
+  moneda_costo_id: string | null;
   categoria_nombre: string | null;
   precios: ProductoPrecio[] | null;
 }
@@ -91,10 +92,11 @@ interface LineItem {
   cantidad: number;
   costo_unit: number;
   subtotal: number;
-  // Base para recalcular al cambiar la tasa: `costo_base` está en la moneda
-  // del producto; `costoManual` solo se llena si el usuario lo edita a mano
+  // Base para recalcular al cambiar la tasa: `costo_base` está en la moneda de
+  // COMPRA del producto; `costoManual` solo se llena si el usuario lo edita a mano
   costo_base: number;
   moneda_base_id: string | null;
+  moneda_costo_id: string | null;
   costoManual: number | null;
 }
 
@@ -130,9 +132,11 @@ function getCostoInMoneda(
 
   if (!moneda) return costoBase;
 
-  // Moneda propia del producto (sin moneda propia = moneda base del sistema)
+  // Moneda del COSTO del producto (moneda_costo_id; sin ella = la de venta)
   const prodMoneda =
-    monedas.find((m) => m.id === producto.moneda_base_id) || monedas.find((m) => m.es_base) || moneda;
+    monedas.find((m) => m.id === (producto.moneda_costo_id ?? producto.moneda_base_id)) ||
+    monedas.find((m) => m.es_base) ||
+    moneda;
 
   const tasaProdUsd = tasaUsd(prodMoneda, monedas);
   const tasaDocUsd = tasaUsdDocumento(moneda, tasaCustom, monedas);
@@ -213,7 +217,9 @@ export default function NuevaCompraPage() {
     if (item.costoManual !== null) return item.costoManual;
     if (!selectedMoneda) return item.costo_base;
     const prodMoneda =
-      monedas.find((m) => m.id === item.moneda_base_id) || monedas.find((m) => m.es_base) || selectedMoneda;
+      monedas.find((m) => m.id === (item.moneda_costo_id ?? item.moneda_base_id)) ||
+      monedas.find((m) => m.es_base) ||
+      selectedMoneda;
     const tasaProdUsd = tasaUsd(prodMoneda, monedas);
     const tasaDocUsd = tasaUsdDocumento(selectedMoneda, tasaCustomNum, monedas);
     if (tasaProdUsd <= 0) return item.costo_base;
@@ -335,6 +341,7 @@ export default function NuevaCompraPage() {
         subtotal: costo,
         costo_base: parseFloat(String(producto.costo_base)) || 0,
         moneda_base_id: producto.moneda_base_id ?? null,
+        moneda_costo_id: producto.moneda_costo_id ?? null,
         costoManual: null,
       };
       setItems((prev) => [...prev, newItem]);

@@ -96,5 +96,31 @@ check("precios: sin base → USD fijo", pUSDb?.precio ?? 0, 10, 1e-9);
 const pCOPb = preciosUSD.find((p) => p.moneda_codigo === "COP");
 check("precios: COP deriva desde USD", pCOPb?.precio ?? 0, 28551.49, 0.2);
 
+console.log("\n── preciosDeProducto (moneda de COMPRA independiente) ──");
+// Venta en COP, costo en USD (caso típico: se compra en USD, se vende en COP)
+const productoMixto = { precio_base: 100000, costo_base: 8, moneda_base_id: "3", moneda_costo_id: "1" };
+const preciosMixto = preciosDeProducto(productoMixto, catalogo, USD);
+const mCOP = preciosMixto.find((p) => p.moneda_codigo === "COP");
+const mUSD = preciosMixto.find((p) => p.moneda_codigo === "USD");
+const mVES = preciosMixto.find((p) => p.moneda_codigo === "VES");
+check("mixto: precio en COP (moneda de venta) es exacto", mCOP?.precio ?? 0, 100000, 1e-9);
+check("mixto: precio en USD deriva de COP", mUSD?.precio ?? 0, 35.02, 0.01);
+check("mixto: costo en USD (moneda de compra) es exacto", mUSD?.costo ?? 0, 8, 1e-9);
+check("mixto: costo en COP deriva de USD", mCOP?.costo ?? 0, convertir(8, USD, COP, catalogo), 0.01);
+check("mixto: costo en VES deriva de USD", mVES?.costo ?? 0, convertir(8, USD, VES, catalogo), 0.01);
+check("mixto: es_base marca la moneda de VENTA", Number(mCOP?.es_base ?? false), 1, 1e-9);
+check("mixto: la moneda de COMPRA no es es_base", Number(mUSD?.es_base ?? true), 0, 1e-9);
+
+// Retrocompatible: sin moneda_costo_id el costo sigue en la moneda de venta
+const preciosSinCosto = preciosDeProducto(
+  { precio_base: 100000, costo_base: 80000, moneda_base_id: "3" },
+  catalogo,
+  USD
+);
+const sCOP = preciosSinCosto.find((p) => p.moneda_codigo === "COP");
+const sUSD = preciosSinCosto.find((p) => p.moneda_codigo === "USD");
+check("retro: sin moneda_costo_id el costo COP es exacto", sCOP?.costo ?? 0, 80000, 1e-9);
+check("retro: sin moneda_costo_id el costo USD deriva de COP", sUSD?.costo ?? 0, 28.02, 0.01);
+
 console.log(fallos === 0 ? "\n✅ TODAS LAS PRUEBAS PASARON" : `\n❌ ${fallos} FALLAS`);
 process.exit(fallos === 0 ? 0 : 1);

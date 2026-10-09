@@ -3,7 +3,7 @@ export const dynamic = 'force-dynamic';
 import { NextResponse } from "next/server";
 import { requireSession } from "@/lib/auth-server";
 import { query, queryOne, transaction } from "@/lib/db";
-import { aBase, desdeBase, tasaUsd, tasaUsdDocumento, monedaDeProducto } from "@/lib/money";
+import { aBase, desdeBase, tasaUsd, tasaUsdDocumento, monedaDeProducto, monedaCostoDeProducto } from "@/lib/money";
 
 function generarNumero(tipo: string) {
   const year = new Date().getFullYear();
@@ -222,9 +222,13 @@ export async function POST(request: Request) {
         const producto = productoRes.rows[0];
         const stockAnterior = parseInt(producto.stock, 10);
 
-        // `precioUnitBase` guarda el equivalente USD del precio; el precio del
-        // producto/costo está en LA MONEDA DEL PRODUCTO, así que se convierte.
-        const monedaProducto = monedaDeProducto(producto, monedaBase, monedasCatalogo);
+        // `precioUnitBase` guarda el equivalente USD del precio. En retornos de
+        // Cliente se usa la moneda de VENTA del producto; en retornos a
+        // Proveedor, la moneda de COMPRA (costo), que puede ser distinta.
+        const monedaProducto =
+          tipo === "Cliente"
+            ? monedaDeProducto(producto, monedaBase, monedasCatalogo)
+            : monedaCostoDeProducto(producto, monedaBase, monedasCatalogo);
         const precioProductoEnMonedaProducto = Number(
           tipo === "Cliente" ? producto.precio_base : producto.costo_base
         ) || 0;
@@ -378,9 +382,12 @@ export async function DELETE(request: Request) {
         // `precio_unit_base` está en USD; el kardex guarda además el costo
         // convertido a la moneda del producto
         // Catálogo completo (incluso monedas inactivas) para resolver la cadena
-      const monedasCatalogo = (await client.query(`SELECT * FROM monedas`)).rows;
+        const monedasCatalogo = (await client.query(`SELECT * FROM monedas`)).rows;
         const monedaBase = monedasCatalogo.find((m: any) => m.es_base) || monedasCatalogo[0];
-        const monedaProducto = monedaDeProducto(productoRes.rows[0], monedaBase, monedasCatalogo);
+        const monedaProducto =
+          retorno.tipo === "Cliente"
+            ? monedaDeProducto(productoRes.rows[0], monedaBase, monedasCatalogo)
+            : monedaCostoDeProducto(productoRes.rows[0], monedaBase, monedasCatalogo);
         const costoUnitProducto = desdeBase(
           Number(item.precio_unit_base) || 0,
           tasaUsd(monedaProducto, monedasCatalogo),

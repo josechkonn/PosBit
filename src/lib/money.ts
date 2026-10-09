@@ -218,8 +218,9 @@ export function desdeBase(montoBase: number, tasaDocUsd: number, decimales = 2):
 }
 
 /**
- * Moneda propia de un producto (`productos.moneda_base_id`).
- * Si no tiene, se usa `porDefecto` (la moneda de la venta/compra en curso).
+ * Moneda propia de un producto (`productos.moneda_base_id`), usada para su
+ * PRECIO DE VENTA (`precio_base`). Si no tiene, se usa `porDefecto` (la moneda
+ * de la venta/compra en curso).
  */
 export function monedaDeProducto<T extends MonedaConversion>(
   producto: { moneda_base_id?: string | null } | null | undefined,
@@ -227,6 +228,25 @@ export function monedaDeProducto<T extends MonedaConversion>(
   catalogo: T[]
 ): T {
   const id = producto?.moneda_base_id;
+  if (!id) return porDefecto;
+  const encontrada = catalogo.find((m) => String(m.id) === String(id));
+  return (encontrada as T) || porDefecto;
+}
+
+/**
+ * Moneda del COSTO DE COMPRA de un producto (`productos.moneda_costo_id`),
+ * usada para `costo_base`. Puede diferir de la moneda de venta (p. ej. costo en
+ * USD, precio de venta en COP). Sin moneda propia = misma que la de venta.
+ */
+export function monedaCostoDeProducto<T extends MonedaConversion>(
+  producto: {
+    moneda_costo_id?: string | null;
+    moneda_base_id?: string | null;
+  } | null | undefined,
+  porDefecto: T,
+  catalogo: T[]
+): T {
+  const id = producto?.moneda_costo_id ?? producto?.moneda_base_id;
   if (!id) return porDefecto;
   const encontrada = catalogo.find((m) => String(m.id) === String(id));
   return (encontrada as T) || porDefecto;
@@ -246,24 +266,27 @@ export interface PrecioPorMonedaCalculado {
 }
 
 /**
- * Precios por moneda de un producto, derivados SIEMPRE del precio base
- * (`precio_base`/`costo_base` están en la moneda del producto). Solo la fila de
- * la moneda base es fija; las demás se calculan con las tasas ACTUALES
- * (dinámicas). Así un cambio de conversión (p. ej. activar COP↔USD directa) se
- * refleja en todos los precios sin tener que reescribir la base de datos.
+ * Precios por moneda de un producto, derivados SIEMPRE de los valores base.
+ * `precio_base` está en la moneda de VENTA (`moneda_base_id`) y `costo_base` en
+ * la de COMPRA (`moneda_costo_id`, NULL = misma que la de venta); cada uno se
+ * convierte a cada moneda con las tasas ACTUALES (dinámicas). Así un cambio de
+ * conversión (p. ej. activar COP↔USD directa) se refleja en todos los precios
+ * sin tener que reescribir la base de datos.
  */
 export function preciosDeProducto<T extends MonedaConversion>(
   producto: {
     precio_base?: number | string | null;
     costo_base?: number | string | null;
     moneda_base_id?: string | null;
+    moneda_costo_id?: string | null;
   } | null | undefined,
   catalogo: T[],
   baseSistema?: T | null
 ): PrecioPorMonedaCalculado[] {
   const baseSistemaEf = baseSistema ?? catalogo.find((m) => m.es_base) ?? catalogo[0];
   if (!baseSistemaEf) return [];
-  const base = monedaDeProducto(producto, baseSistemaEf, catalogo);
+  const monedaVenta = monedaDeProducto(producto, baseSistemaEf, catalogo);
+  const monedaCosto = monedaCostoDeProducto(producto, baseSistemaEf, catalogo);
   const precioBaseN = Number(producto?.precio_base);
   const costoBaseN = Number(producto?.costo_base);
   const precioBase = Number.isFinite(precioBaseN) ? precioBaseN : 0;
@@ -271,7 +294,8 @@ export function preciosDeProducto<T extends MonedaConversion>(
 
   return catalogo
     .map((mo) => {
-      const esBase = String(mo.id) === String(base.id);
+      const esVenta = String(mo.id) === String(monedaVenta.id);
+      const esCosto = String(mo.id) === String(monedaCosto.id);
       const dec = Number(mo.decimales ?? 2);
       return {
         moneda_id: String(mo.id),
@@ -280,9 +304,11 @@ export function preciosDeProducto<T extends MonedaConversion>(
         tasa: mo.tasa,
         usa_tasa_usd_directa: mo.usa_tasa_usd_directa ?? false,
         tasa_usd_directa: mo.tasa_usd_directa ?? null,
-        es_base: esBase,
-        precio: esBase ? precioBase : convertir(precioBase, base, mo, catalogo, dec),
-        costo: esBase ? costoBase : convertir(costoBase, base, mo, catalogo, dec),
+        // `es_base` marca la fila de la moneda de VENTA (la "de referencia" del
+        // producto); el costo puede tener su propia moneda exacta aparte.
+        es_base: esVenta,
+        precio: esVenta ? precioBase : convertir(precioBase, monedaVenta, mo, catalogo, dec),
+        costo: esCosto ? costoBase : convertir(costoBase, monedaCosto, mo, catalogo, dec),
       };
     })
     .sort(

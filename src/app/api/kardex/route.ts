@@ -3,7 +3,7 @@ export const dynamic = 'force-dynamic';
 import { NextResponse } from "next/server";
 import { requireSession } from "@/lib/auth-server";
 import { query, queryOne, execute, transaction } from "@/lib/db";
-import { aBase, tasaUsd, monedaDeProducto } from "@/lib/money";
+import { aBase, tasaUsd, monedaCostoDeProducto } from "@/lib/money";
 
 export async function GET() {
   try {
@@ -14,11 +14,12 @@ export async function GET() {
         p.nombre as producto_nombre,
         p.codigo as producto_codigo,
         p.moneda_base_id,
+        p.moneda_costo_id,
         pm.codigo as producto_moneda_codigo,
         pm.simbolo as producto_moneda_simbolo
       FROM kardex k
       JOIN productos p ON k.producto_id = p.id
-      LEFT JOIN monedas pm ON p.moneda_base_id = pm.id
+      LEFT JOIN monedas pm ON COALESCE(p.moneda_costo_id, p.moneda_base_id) = pm.id
       ORDER BY k.fecha DESC, k.id DESC
     `);
     return NextResponse.json(movimientos);
@@ -65,12 +66,12 @@ export async function POST(request: Request) {
         [nuevoStock, producto_id]
       );
 
-      // `costo_unit` en la moneda del producto y `costo_unit_base` en USD
+      // `costo_unit` en la moneda de COMPRA del producto y `costo_unit_base` en USD
       // Catálogo completo (incluso monedas inactivas) para resolver la cadena
       const monedasCatalogo = (await client.query(`SELECT * FROM monedas`)).rows;
       const monedaBase = monedasCatalogo.find((m: any) => m.es_base) || monedasCatalogo[0];
-      const monedaProducto = monedaDeProducto(producto.rows[0], monedaBase, monedasCatalogo);
-      const costoUnitBase = aBase(Number(producto.rows[0].costo_base) || 0, tasaUsd(monedaProducto, monedasCatalogo));
+      const monedaCosto = monedaCostoDeProducto(producto.rows[0], monedaBase, monedasCatalogo);
+      const costoUnitBase = aBase(Number(producto.rows[0].costo_base) || 0, tasaUsd(monedaCosto, monedasCatalogo));
 
       const res = await client.query(
         `INSERT INTO kardex (producto_id, fecha, tipo, motivo, cantidad, costo_unit, costo_unit_base, saldo_anterior, saldo_actual) 

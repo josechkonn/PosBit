@@ -3,7 +3,7 @@ export const dynamic = 'force-dynamic';
 import { NextResponse } from "next/server";
 import { requireSession } from "@/lib/auth-server";
 import { query, queryOne, execute, transaction } from "@/lib/db";
-import { aBase, convertir, tasaUsd, monedaDeProducto, preciosDeProducto } from "@/lib/money";
+import { aBase, convertir, tasaUsd, monedaDeProducto, monedaCostoDeProducto, preciosDeProducto } from "@/lib/money";
 
 export async function GET(request: Request) {
   try {
@@ -37,7 +37,7 @@ export async function GET(request: Request) {
       SELECT 
         p.id, p.codigo, p.nombre, p.descripcion, p.imagen,
         p.stock, p.stock_minimo, p.activo, p.iva_incluido, p.moneda_base_id,
-        p.precio_base, p.costo_base,
+        p.precio_base, p.costo_base, p.moneda_costo_id,
         p.categoria_id, p.marca_id, p.proveedor_id,
         c.nombre as categoria_nombre,
         m.nombre as marca_nombre,
@@ -81,7 +81,7 @@ export async function POST(request: Request) {
   try {
     await requireSession();
     const body = await request.json();
-    const { codigo, nombre, descripcion, categoria_id, marca_id, proveedor_id, stock, stock_minimo, precio_base, costo_base, activo, iva_incluido, moneda_base_id } = body;
+    const { codigo, nombre, descripcion, categoria_id, marca_id, proveedor_id, stock, stock_minimo, precio_base, costo_base, activo, iva_incluido, moneda_base_id, moneda_costo_id } = body;
 
     if (!codigo || !nombre || precio_base === undefined || costo_base === undefined) {
       return NextResponse.json({ error: "Campos requeridos: codigo, nombre, precio_base, costo_base" }, { status: 400 });
@@ -89,22 +89,24 @@ export async function POST(request: Request) {
 
     const result = await transaction(async (client) => {
       const res = await client.query(
-        `INSERT INTO productos (codigo, nombre, descripcion, categoria_id, marca_id, proveedor_id, stock, stock_minimo, precio_base, costo_base, activo, iva_incluido, moneda_base_id) 
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13) 
+        `INSERT INTO productos (codigo, nombre, descripcion, categoria_id, marca_id, proveedor_id, stock, stock_minimo, precio_base, costo_base, activo, iva_incluido, moneda_base_id, moneda_costo_id) 
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14) 
          RETURNING *`,
-        [codigo, nombre, descripcion || null, categoria_id || null, marca_id || null, proveedor_id || null, stock || 0, stock_minimo ?? 5, precio_base, costo_base, activo !== false, iva_incluido !== false, moneda_base_id || null]
+        [codigo, nombre, descripcion || null, categoria_id || null, marca_id || null, proveedor_id || null, stock || 0, stock_minimo ?? 5, precio_base, costo_base, activo !== false, iva_incluido !== false, moneda_base_id || null, moneda_costo_id || null]
       );
 
       const producto = res.rows[0];
 
-      // `precio_base`/`costo_base` están en LA MONEDA DEL PRODUCTO; los precios
-      // por moneda se derivan de ahí con la cadena de conversiones (src/lib/money.ts)
+      // `precio_base` está en la moneda de VENTA (moneda_base_id) y `costo_base`
+      // en la de COMPRA (moneda_costo_id, NULL = misma); los precios por moneda
+      // se derivan de ahí con la cadena de conversiones (src/lib/money.ts)
       // Catálogo completo (incluso monedas inactivas): los precios históricos
       // deben poder convertirse aunque la moneda esté desactivada
       const monedas = await client.query(`SELECT * FROM monedas`);
       const catalogo = monedas.rows;
       const monedaBase = catalogo.find((m: any) => m.es_base) || catalogo[0];
       const monedaProducto = monedaDeProducto(producto, monedaBase, catalogo);
+      const monedaCosto = monedaCostoDeProducto(producto, monedaBase, catalogo);
 
       for (const moneda of catalogo) {
         let precio: number;
@@ -116,7 +118,7 @@ export async function POST(request: Request) {
         } else {
           const decimales = Number(moneda.decimales ?? 2);
           precio = convertir(Number(precio_base), monedaProducto, moneda, catalogo, decimales);
-          costo = convertir(Number(costo_base), monedaProducto, moneda, catalogo, decimales);
+          costo = convertir(Number(costo_base), monedaCosto, moneda, catalogo, decimales);
         }
 
         await client.query(
@@ -127,8 +129,9 @@ export async function POST(request: Request) {
       }
 
       if (stock > 0) {
-        // El kardex guarda el costo en la moneda del producto y su equivalente USD
-        const costoUsd = aBase(Number(costo_base), tasaUsd(monedaProducto, catalogo));
+        // El kardex guarda el costo en la moneda de COMPRA del producto y su
+        // equivalente USD
+        const costoUsd = aBase(Number(costo_base), tasaUsd(monedaCosto, catalogo));
         await client.query(
           `INSERT INTO kardex (producto_id, fecha, tipo, motivo, cantidad, costo_unit, costo_unit_base, saldo_anterior, saldo_actual) 
            VALUES ($1, NOW(), 'Entrada', 'Existencias iniciales', $2, $3, $4, 0, $2)`,
@@ -157,7 +160,7 @@ export async function PUT(request: Request) {
   try {
     await requireSession();
     const body = await request.json();
-    const { id, codigo, nombre, descripcion, categoria_id, marca_id, proveedor_id, stock, stock_minimo, precio_base, costo_base, activo, iva_incluido, moneda_base_id } = body;
+    const { id, codigo, nombre, descripcion, categoria_id, marca_id, proveedor_id, stock, stock_minimo, precio_base, costo_base, activo, iva_incluido, moneda_base_id, moneda_costo_id } = body;
 
     if (!id) {
       return NextResponse.json({ error: "ID requerido" }, { status: 400 });
@@ -170,6 +173,25 @@ export async function PUT(request: Request) {
       }
 
       const productoAnterior = productoActual.rows[0];
+
+      // Las columnas de moneda se VACÍAN si vienen explícitamente en `null`
+      // (volver a la moneda del sistema, o a la de venta para el costo); un
+      // COALESCE no puede distinguir "no enviado" de "vaciar". Si la clave no
+      // viene en el body, se conserva el valor anterior.
+      const enviado = (campo: string) => Object.prototype.hasOwnProperty.call(body, campo);
+      const limpiarMonedaVenta = enviado("moneda_base_id") && moneda_base_id == null;
+      const limpiarMonedaCosto = enviado("moneda_costo_id") && moneda_costo_id == null;
+      const setMonedaVenta = limpiarMonedaVenta ? "NULL" : "COALESCE($14, moneda_base_id)";
+      const setMonedaCosto = limpiarMonedaCosto ? "NULL" : "COALESCE($15, moneda_costo_id)";
+
+      const params: any[] = [
+        id, codigo, nombre, descripcion, categoria_id, marca_id, proveedor_id || null, stock, stock_minimo,
+        precio_base, costo_base, activo, iva_incluido,
+      ];
+      // Los parámetros se anexan solo si su columna los usa, para que el número
+      // de `$n` del SQL coincida con el de los valores enviados.
+      if (!limpiarMonedaVenta) params.push(moneda_base_id || null);
+      if (!limpiarMonedaCosto) params.push(moneda_costo_id || null);
 
       const res = await client.query(
         `UPDATE productos 
@@ -185,23 +207,25 @@ export async function PUT(request: Request) {
              costo_base = COALESCE($11, costo_base),
              activo = COALESCE($12, activo),
              iva_incluido = COALESCE($13, iva_incluido),
-             moneda_base_id = COALESCE($14, moneda_base_id)
+             moneda_base_id = ${setMonedaVenta},
+             moneda_costo_id = ${setMonedaCosto}
          WHERE id = $1 
          RETURNING *`,
-        [id, codigo, nombre, descripcion, categoria_id, marca_id, proveedor_id || null, stock, stock_minimo, precio_base, costo_base, activo, iva_incluido, moneda_base_id || null]
+        params
       );
 
       const nuevoPrecio = precio_base ?? productoAnterior.precio_base;
       const nuevoCosto = costo_base ?? productoAnterior.costo_base;
 
-      // Igual que en el POST: todo se deriva de `precio_base`/`costo_base`
-      // (en la moneda del producto) hacia cada moneda del catálogo
+      // Igual que en el POST: `precio_base` se deriva desde la moneda de venta y
+      // `costo_base` desde la de compra (independientes) hacia cada moneda
       // Catálogo completo (incluso monedas inactivas): los precios históricos
       // deben poder convertirse aunque la moneda esté desactivada
       const monedas = await client.query(`SELECT * FROM monedas`);
       const catalogo = monedas.rows;
       const monedaBase = catalogo.find((m: any) => m.es_base) || catalogo[0];
       const monedaProducto = monedaDeProducto(res.rows[0], monedaBase, catalogo);
+      const monedaCosto = monedaCostoDeProducto(res.rows[0], monedaBase, catalogo);
 
       for (const moneda of catalogo) {
         let precio: number;
@@ -213,7 +237,7 @@ export async function PUT(request: Request) {
         } else {
           const decimales = Number(moneda.decimales ?? 2);
           precio = convertir(Number(nuevoPrecio), monedaProducto, moneda, catalogo, decimales);
-          costo = convertir(Number(nuevoCosto), monedaProducto, moneda, catalogo, decimales);
+          costo = convertir(Number(nuevoCosto), monedaCosto, moneda, catalogo, decimales);
         }
 
         await client.query(

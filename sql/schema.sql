@@ -203,6 +203,25 @@ CREATE TABLE IF NOT EXISTS productos (
     actualizado_en TIMESTAMP NOT NULL DEFAULT NOW()
 );
 
+-- Migración: moneda de COMPRA independiente de la de VENTA.
+-- `precio_base` se expresa en `moneda_base_id` (venta) y `costo_base` en
+-- `moneda_costo_id` (compra); NULL = misma moneda que la de venta (comportamiento
+-- anterior, ningún producto existente cambia).
+-- El tipo se elige según `monedas.id` real: INTEGER en BD nueva, UUID en la ya
+-- migrada (migrate-to-uuid.sql convierte la FK recién creada en el primer arranque).
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = 'public' AND table_name = 'monedas'
+          AND column_name = 'id' AND udt_name = 'uuid'
+    ) THEN
+        ALTER TABLE productos ADD COLUMN IF NOT EXISTS moneda_costo_id uuid REFERENCES monedas(id) ON DELETE SET NULL;
+    ELSE
+        ALTER TABLE productos ADD COLUMN IF NOT EXISTS moneda_costo_id INTEGER REFERENCES monedas(id) ON DELETE SET NULL;
+    END IF;
+END $$;
+
 -- ============================================================================
 -- 6. PRODUCTO PRECIOS (precios calculados por moneda)
 -- ============================================================================

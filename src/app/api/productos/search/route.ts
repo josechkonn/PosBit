@@ -10,8 +10,8 @@ import { preciosDeProducto } from "@/lib/money";
  * Lightweight product search for autocomplete.
  * Returns up to 15 active products with their per-currency prices.
  *
- * Los precios por moneda se DERIVAN en lectura desde `precio_base`/`costo_base`
- * con las tasas actuales; solo la moneda base del producto es un valor fijo.
+ * Los precios por moneda se DERIVAN en lectura desde `precio_base` (moneda de
+ * venta) y `costo_base` (moneda de compra) con las tasas actuales.
  */
 export async function GET(request: Request) {
   try {
@@ -27,6 +27,7 @@ export async function GET(request: Request) {
       `
       SELECT 
         p.id, p.codigo, p.nombre, p.precio_base, p.costo_base, p.moneda_base_id,
+        p.moneda_costo_id,
         p.stock, c.nombre as categoria_nombre
       FROM productos p
       LEFT JOIN categorias c ON p.categoria_id = c.id

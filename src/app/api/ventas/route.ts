@@ -3,7 +3,7 @@ export const dynamic = 'force-dynamic';
 import { NextResponse } from "next/server";
 import { requireSession } from "@/lib/auth-server";
 import { query, queryOne, execute, transaction } from "@/lib/db";
-import { aBase, convertir, redondear, tasaUsd, tasaUsdDocumento, monedaDeProducto, tasaMostrada, tasaPar } from "@/lib/money";
+import { aBase, convertir, redondear, tasaUsd, tasaUsdDocumento, monedaDeProducto, monedaCostoDeProducto, tasaMostrada, tasaPar } from "@/lib/money";
 
 function generarNumero() {
   const year = new Date().getFullYear();
@@ -340,6 +340,7 @@ export async function POST(request: Request) {
       for (const item of items) {
         const producto = await client.query(`SELECT * FROM productos WHERE id = $1`, [item.producto_id]);
         const monedaProducto = monedaDeProducto(producto.rows[0], monedaVenta, monedasCatalogo);
+        const monedaCosto = monedaCostoDeProducto(producto.rows[0], monedaVenta, monedasCatalogo);
         const precioUnitBase = aBase(item.precio_unit, tasaUsdVenta);
         const subtotalItem = item.cantidad * item.precio_unit;
         const subtotalBase = aBase(subtotalItem, tasaUsdVenta);
@@ -368,9 +369,10 @@ export async function POST(request: Request) {
         const stockAnterior = stockRes.rows[0].anterior;
         const nuevoStock = stockRes.rows[0].actual;
 
-        // El kardex guarda el costo en la moneda del producto y su equivalente USD
+        // El kardex guarda el costo en la moneda de COMPRA del producto y su
+        // equivalente USD
         const costoProducto = Number(producto.rows[0].costo_base) || 0;
-        const costoUsd = aBase(costoProducto, tasaUsd(monedaProducto, monedasCatalogo));
+        const costoUsd = aBase(costoProducto, tasaUsd(monedaCosto, monedasCatalogo));
         await client.query(
           `INSERT INTO kardex (producto_id, fecha, tipo, motivo, referencia_tipo, referencia_id, cantidad, costo_unit, costo_unit_base, saldo_anterior, saldo_actual) 
            VALUES ($1, NOW(), 'Salida', $2, 'venta', $3, $4, $5, $6, $7, $8)`,
@@ -524,10 +526,10 @@ export async function DELETE(request: Request) {
 
         await client.query(`UPDATE productos SET stock = $1 WHERE id = $2`, [nuevoStock, item.producto_id]);
 
-        // La devolución vuelve al costo del producto (en SU moneda) y su equivalente USD
-        const monedaProducto = monedaDeProducto(productoActual.rows[0], monedaVenta, monedasCatalogo);
+        // La devolución vuelve al costo del producto (en SU moneda de compra) y su equivalente USD
+        const monedaCosto = monedaCostoDeProducto(productoActual.rows[0], monedaVenta, monedasCatalogo);
         const costoProducto = Number(productoActual.rows[0]?.costo_base) || 0;
-        const costoUsd = aBase(costoProducto, tasaUsd(monedaProducto, monedasCatalogo));
+        const costoUsd = aBase(costoProducto, tasaUsd(monedaCosto, monedasCatalogo));
         await client.query(
           `INSERT INTO kardex (producto_id, fecha, tipo, motivo, referencia_tipo, referencia_id, cantidad, costo_unit, costo_unit_base, saldo_anterior, saldo_actual) 
            VALUES ($1, NOW(), 'Entrada', $2, 'venta_anulada', $3, $4, $5, $6, $7, $8)`,

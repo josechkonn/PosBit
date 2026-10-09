@@ -24,6 +24,7 @@ interface Producto {
   categoria_id: string | null;
   marca_id: string | null;
   moneda_base_id?: string | null;
+  moneda_costo_id?: string | null;
   stock: number;
   stock_minimo: number;
   activo: boolean;

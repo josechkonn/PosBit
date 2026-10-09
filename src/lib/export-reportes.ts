@@ -90,8 +90,9 @@ function toSecciones(active: string, md: MonedaReporte): SeccionTabla[] {
         p.categoria_nombre || "",
         p.marca_nombre || "",
         p.stock,
-        // costo_base/precio_base están en la moneda propia del producto
-        money(p.costo_base, p.moneda_codigo || codigo),
+        // costo_base está en la moneda de COMPRA del producto y precio_base en
+        // la de VENTA; pueden ser distintas (moneda_costo_codigo vs moneda_codigo)
+        money(p.costo_base, p.moneda_costo_codigo || p.moneda_codigo || codigo),
         money(p.precio_base, p.moneda_codigo || codigo),
         p.moneda_codigo || codigo,
       ]),

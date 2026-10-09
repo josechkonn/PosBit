@@ -3,7 +3,7 @@ export const dynamic = 'force-dynamic';
 import { NextResponse } from "next/server";
 import { requireSession } from "@/lib/auth-server";
 import { transaction } from "@/lib/db";
-import { aBase, tasaUsd, monedaDeProducto } from "@/lib/money";
+import { aBase, tasaUsd, monedaCostoDeProducto } from "@/lib/money";
 
 export async function POST(request: Request) {
   try {
@@ -49,12 +49,12 @@ export async function POST(request: Request) {
         await client.query(`UPDATE productos SET stock = $1 WHERE id = $2`, [nuevoStock, producto.id]);
 
         // Registrar en kardex (usamos 'Ajuste' como tipo global)
-        // `costo_unit` en la moneda del producto, `costo_unit_base` en USD
+        // `costo_unit` en la moneda de COMPRA del producto, `costo_unit_base` en USD
         // Catálogo completo (incluso monedas inactivas) para resolver la cadena
         const monedasCatalogo = (await client.query(`SELECT * FROM monedas`)).rows;
         const monedaBase = monedasCatalogo.find((m: any) => m.es_base) || monedasCatalogo[0];
-        const monedaProducto = monedaDeProducto(producto, monedaBase, monedasCatalogo);
-        const costoUnitBase = aBase(Number(producto.costo_base) || 0, tasaUsd(monedaProducto, monedasCatalogo));
+        const monedaCosto = monedaCostoDeProducto(producto, monedaBase, monedasCatalogo);
+        const costoUnitBase = aBase(Number(producto.costo_base) || 0, tasaUsd(monedaCosto, monedasCatalogo));
 
         await client.query(
           `INSERT INTO kardex (producto_id, fecha, tipo, motivo, cantidad, costo_unit, costo_unit_base, saldo_anterior, saldo_actual, creado_por)
