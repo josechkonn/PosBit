@@ -13,7 +13,7 @@ import { fmt } from "@/lib/format";
 import { cn } from "@/lib/utils";
 
 interface Moneda {
-  id: number;
+  id: string;
   nombre: string;
   codigo: string;
   simbolo: string;

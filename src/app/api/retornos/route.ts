@@ -296,7 +296,7 @@ export async function POST(request: Request) {
           // se usa el monto exacto del retorno (evita diferencias por conversión);
           // si no, se convierte del USD con la cadena de monedas.
           const monto =
-            docMoneda && Number(docMoneda.id) === Number(credito.moneda_id)
+            docMoneda && String(docMoneda.id) === String(credito.moneda_id)
               ? totalRetornoMoneda
               : desdeBase(totalRetorno, tasaUsd(moneda, monedasCatalogo), Number(moneda.decimales ?? 2));
           const nuevoSaldo = Math.max(0, parseFloat(credito.saldo) - monto);

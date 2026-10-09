@@ -9,8 +9,8 @@ import { fmt, fmtDate } from "@/lib/format";
 import { Calendar, Hash, Package, Tag, User } from "lucide-react";
 
 interface RetornoItem {
-  id: number;
-  retorno_id: number;
+  id: string;
+  retorno_id: string;
   producto_nombre: string;
   producto_codigo: string;
   cantidad: number;
@@ -19,7 +19,7 @@ interface RetornoItem {
 }
 
 interface Retorno {
-  id: number;
+  id: string;
   numero: string;
   tipo: string;
   venta_numero: string | null;
@@ -39,7 +39,7 @@ interface RetornoDetailModalProps {
   retorno: Retorno | null;
   items: RetornoItem[];
   onClose: () => void;
-  onDelete?: (id: number) => void;
+  onDelete?: (id: string) => void;
 }
 
 export function RetornoDetailModal({ open, retorno, items, onClose, onDelete }: RetornoDetailModalProps) {

@@ -11,7 +11,7 @@ import { CategoriaModal } from "@/components/categoria/categoria-modal";
 import { useToast } from "@/components/ui/toast";
 
 interface Categoria {
-  id: number;
+  id: string;
   nombre: string;
   descripcion: string | null;
   activo: boolean;

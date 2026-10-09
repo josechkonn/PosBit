@@ -19,7 +19,7 @@ interface PorCobrarItem {
 }
 
 interface LimiteCredito {
-  moneda_id: number;
+  moneda_id: string;
   codigo: string;
   simbolo?: string;
   es_base?: boolean;
@@ -27,7 +27,7 @@ interface LimiteCredito {
 }
 
 interface Cliente {
-  id: number;
+  id: string;
   nombre: string;
   tipo: string;
   documento: string | null;
@@ -65,8 +65,8 @@ export function ClienteModal({ open, mode, cliente, onClose, onSuccess, zIndex }
   const [ciudad, setCiudad] = useState("");
   const [direccion, setDireccion] = useState("");
   const [recibeCredito, setRecibeCredito] = useState(false);
-  const [limites, setLimites] = useState<{ moneda_id: number; limite: string }[]>([]);
-  const [monedas, setMonedas] = useState<{ id: number; codigo: string }[]>([]);
+  const [limites, setLimites] = useState<{ moneda_id: string; limite: string }[]>([]);
+  const [monedas, setMonedas] = useState<{ id: string; codigo: string }[]>([]);
   const [activo, setActivo] = useState(true);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
@@ -82,7 +82,7 @@ export function ClienteModal({ open, mode, cliente, onClose, onSuccess, zIndex }
 
   useEffect(() => {
     if (!open || monedas.length === 0) return;
-    const guardados = new Map<number, string>();
+    const guardados = new Map<string, string>();
     (cliente?.limites_credito || []).forEach((l) => guardados.set(l.moneda_id, String(l.limite ?? "0")));
 
     setLimites(

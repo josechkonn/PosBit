@@ -18,11 +18,11 @@ import { fmt, fmtDateTime } from "@/lib/format";
 import { redondear, tasaUsd } from "@/lib/money";
 
 interface Moneda {
-  id: number;
+  id: string;
   codigo: string;
   simbolo: string;
   tasa: number | string;
-  tasa_ref_moneda_id?: number | null;
+  tasa_ref_moneda_id?: string | null;
   decimales: number;
   es_base: boolean;
   activo?: boolean;
@@ -34,9 +34,9 @@ interface Producto {
   nombre: string;
   descripcion: string | null;
   imagen: string | null;
-  categoria_id: number | null;
-  marca_id: number | null;
-  moneda_base_id?: number | null;
+  categoria_id: string | null;
+  marca_id: string | null;
+  moneda_base_id?: string | null;
   stock: number;
   stock_minimo: number;
   activo: boolean;
@@ -46,7 +46,7 @@ interface Producto {
   categoria_nombre: string | null;
   marca_nombre: string | null;
   precios: Array<{
-    moneda_id: number;
+    moneda_id: string;
     moneda_codigo: string;
     moneda_simbolo: string;
     precio: number;
@@ -56,17 +56,17 @@ interface Producto {
 }
 
 interface Categoria {
-  id: number;
+  id: string;
   nombre: string;
 }
 
 interface Marca {
-  id: number;
+  id: string;
   nombre: string;
 }
 
 interface Proveedor {
-  id: number;
+  id: string;
   nombre: string;
 }
 
@@ -77,7 +77,7 @@ interface ProductoModalProps {
   mode: ProductoModalMode;
   producto: Producto | null;
   monedas: Moneda[];
-  defaultProveedorId?: number | null;
+  defaultProveedorId?: string | null;
   onClose: () => void;
   onSuccess: (message: string) => void;
 }
@@ -126,15 +126,15 @@ export function ProductoModal({ open, mode, producto, monedas: monedasProp, defa
     precioVenta: string;
     precioCompra: string;
   }
-  const [preciosPorMoneda, setPreciosPorMoneda] = useState<Record<number, PrecioEntry>>({});
-  const [baseMonedaId, setBaseMonedaId] = useState<number | null>(null);
+  const [preciosPorMoneda, setPreciosPorMoneda] = useState<Record<string, PrecioEntry>>({});
+  const [baseMonedaId, setBaseMonedaId] = useState<string | null>(null);
 
   const baseMoneda = useMemo(
     () => effectiveMonedas.find((m) => m.id === baseMonedaId),
     [effectiveMonedas, baseMonedaId]
   );
 
-  const cambiarMonedaBaseRef = (monedaId: number) => {
+  const cambiarMonedaBaseRef = (monedaId: string) => {
     setBaseMonedaId(monedaId);
 
     const refEntry = preciosPorMoneda[monedaId];
@@ -156,7 +156,7 @@ export function ProductoModal({ open, mode, producto, monedas: monedasProp, defa
         if (m.id === monedaId) continue;
         const tasaTarget = tasaUsd(m, effectiveMonedas);
         const dec = m.decimales ?? 2;
-        const currentEntry = prev[m.id] || { precioVenta: "", precioCompra: "" };
+        const currentEntry = (prev as Record<string, PrecioEntry>)[m.id] || { precioVenta: "", precioCompra: "" };
 
         next[m.id] = {
           precioVenta:
@@ -173,7 +173,7 @@ export function ProductoModal({ open, mode, producto, monedas: monedasProp, defa
     });
   };
 
-  const actualizarPrecio = (monedaId: number, field: "precioVenta" | "precioCompra", value: string) => {
+  const actualizarPrecio = (monedaId: string, field: "precioVenta" | "precioCompra", value: string) => {
     setPreciosPorMoneda((prev) => ({
       ...prev,
       [monedaId]: { ...prev[monedaId], [field]: value },
@@ -198,7 +198,7 @@ export function ProductoModal({ open, mode, producto, monedas: monedasProp, defa
           if (m.id === baseMonedaId) continue;
           const tasaTarget = tasaUsd(m, effectiveMonedas);
           const dec = m.decimales ?? 2;
-          const currentEntry = prev[m.id] || { precioVenta: "", precioCompra: "" };
+          const currentEntry = (prev as Record<string, PrecioEntry>)[m.id] || { precioVenta: "", precioCompra: "" };
 
           next[m.id] = {
             precioVenta:
@@ -318,7 +318,7 @@ export function ProductoModal({ open, mode, producto, monedas: monedasProp, defa
       setIvaIncluido(producto.iva_incluido ?? true);
 
       // Populate per-currency prices for editing
-      const precios: Record<number, { precioVenta: string; precioCompra: string }> = {};
+      const precios: Record<string, { precioVenta: string; precioCompra: string }> = {};
       for (const p of producto.precios || []) {
         precios[p.moneda_id] = {
           precioVenta: p.precio.toString(),
@@ -352,7 +352,7 @@ export function ProductoModal({ open, mode, producto, monedas: monedasProp, defa
       setActivo(true);
       setIvaIncluido(true);
 
-      const empty: Record<number, { precioVenta: string; precioCompra: string }> = {};
+      const empty: Record<string, { precioVenta: string; precioCompra: string }> = {};
       for (const m of effectiveMonedas) {
         empty[m.id] = { precioVenta: "", precioCompra: "" };
       }
@@ -485,9 +485,9 @@ export function ProductoModal({ open, mode, producto, monedas: monedasProp, defa
         codigo,
         nombre,
         descripcion: descripcion || null,
-        categoria_id: categoriaId ? parseInt(categoriaId) : null,
-        marca_id: marcaId ? parseInt(marcaId) : null,
-        proveedor_id: proveedorId ? parseInt(proveedorId) : null,
+        categoria_id: categoriaId || null,
+        marca_id: marcaId || null,
+        proveedor_id: proveedorId || null,
         stock,
         stock_minimo: stockMinimo,
         activo,
@@ -495,7 +495,7 @@ export function ProductoModal({ open, mode, producto, monedas: monedasProp, defa
         moneda_base_id: baseMonedaId,
       };
 
-      const preciosMap: Record<number, { precio: number; costo: number }> = {};
+      const preciosMap: Record<string, { precio: number; costo: number }> = {};
       for (const m of effectiveMonedas) {
         const entry = preciosPorMoneda[m.id];
         if (entry) {

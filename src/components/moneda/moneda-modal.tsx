@@ -12,12 +12,12 @@ import { fmtDateTime } from "@/lib/format";
 type MonedaModalMode = "create" | "edit" | "view" | "delete";
 
 interface Moneda {
-  id: number;
+  id: string;
   nombre: string;
   codigo: string;
   simbolo: string;
   tasa: number | string;
-  tasa_ref_moneda_id?: number | null;
+  tasa_ref_moneda_id?: string | null;
   decimales: number;
   es_base: boolean;
   activo: boolean;
@@ -94,7 +94,7 @@ export function MonedaModal({ open, mode, moneda, onClose, onSuccess }: MonedaMo
             simbolo,
             tasa: esBase ? 1 : parseFloat(tasa),
             // NULL = la tasa es contra la moneda base (USD)
-            tasa_ref_moneda_id: esBase ? null : tasaRefId ? parseInt(tasaRefId) : null,
+            tasa_ref_moneda_id: esBase ? null : tasaRefId || null,
             decimales: parseInt(decimales) || 2,
             es_base: esBase,
             activo,
@@ -114,7 +114,7 @@ export function MonedaModal({ open, mode, moneda, onClose, onSuccess }: MonedaMo
             tasa: esBase ? 1 : parseFloat(tasa),
             // NULL = la tasa es contra la moneda base (USD); el PUT distingue
             // "no vino" de "vino null", así que siempre se envía
-            tasa_ref_moneda_id: esBase ? null : tasaRefId ? parseInt(tasaRefId) : null,
+            tasa_ref_moneda_id: esBase ? null : tasaRefId || null,
             decimales: parseInt(decimales) || 2,
             es_base: esBase,
             activo,

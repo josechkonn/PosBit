@@ -13,7 +13,7 @@ import { ProveedorModal } from "@/components/proveedor/proveedor-modal";
 import { useToast } from "@/components/ui/toast";
 
 interface Proveedor {
-  id: number;
+  id: string;
   nombre: string;
   contacto: string | null;
   email: string | null;

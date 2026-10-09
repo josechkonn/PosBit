@@ -20,7 +20,7 @@ interface PorCobrarItem {
 }
 
 interface Cliente {
-  id: number;
+  id: string;
   nombre: string;
   tipo: string;
   documento: string | null;

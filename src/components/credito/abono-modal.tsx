@@ -10,9 +10,9 @@ import { fmt } from "@/lib/format";
 import { convertir } from "@/lib/money";
 
 interface Credito {
-  id: number;
+  id: string;
   numero: string;
-  cliente_id: number;
+  cliente_id: string;
   cliente_nombre: string;
   venta_numero: string | null;
   fecha: string;
@@ -20,27 +20,27 @@ interface Credito {
   saldo: number | string;
   abonado: number | string;
   estado: string;
-  moneda_id: number;
+  moneda_id: string;
   moneda_codigo: string;
   moneda_simbolo: string;
 }
 
 interface MetodoPago {
-  id: number;
+  id: string;
   nombre: string;
   tipo: string;
-  caja_id: number | null;
+  caja_id: string | null;
   moneda_codigo: string;
-  moneda_id?: number;
+  moneda_id?: string;
   activo?: boolean;
 }
 
 interface Moneda {
-  id: number;
+  id: string;
   codigo: string;
   simbolo: string;
   tasa: number | string;
-  tasa_ref_moneda_id?: number | null;
+  tasa_ref_moneda_id?: string | null;
   decimales?: number;
   es_base: boolean;
 }
@@ -103,7 +103,7 @@ export function AbonoModal({ open, credito, onClose, onSuccess }: AbonoModalProp
 
   const handleMetodoChange = (id: string) => {
     setMetodoPagoId(id);
-    const metodo = metodosPago.find((m) => m.id === parseInt(id, 10));
+    const metodo = metodosPago.find((m) => m.id === id);
     setCajaId(metodo?.caja_id ? String(metodo.caja_id) : "");
 
     // Automatically update monto input to full debt in selected currency
@@ -123,7 +123,7 @@ export function AbonoModal({ open, credito, onClose, onSuccess }: AbonoModalProp
     }
   };
 
-  const metodoSeleccionado = metodosPago.find(m => m.id === parseInt(metodoPagoId, 10));
+  const metodoSeleccionado = metodosPago.find(m => m.id === metodoPagoId);
   const monedaAbono = monedas.find(m => m.id === metodoSeleccionado?.moneda_id || m.codigo === metodoSeleccionado?.moneda_codigo);
   const monedaCredito = monedas.find(m => m.id === credito?.moneda_id);
 
@@ -156,8 +156,8 @@ export function AbonoModal({ open, credito, onClose, onSuccess }: AbonoModalProp
           monto: parseFloat(monto),
           fecha,
           moneda_id: monedaAbono?.id || credito.moneda_id,
-          metodo_pago_id: metodoPagoId ? parseInt(metodoPagoId, 10) : null,
-          caja_id: cajaId ? parseInt(cajaId, 10) : null,
+          metodo_pago_id: metodoPagoId || null,
+          caja_id: cajaId || null,
           observaciones: observaciones || null,
         }),
       });

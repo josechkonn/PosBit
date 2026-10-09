@@ -12,7 +12,7 @@ import { fmtDateTime } from "@/lib/format";
 type CategoriaModalMode = "create" | "edit" | "view" | "delete";
 
 interface Categoria {
-  id: number;
+  id: string;
   nombre: string;
   descripcion: string | null;
   activo: boolean;

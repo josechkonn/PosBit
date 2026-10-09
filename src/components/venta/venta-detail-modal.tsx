@@ -9,7 +9,7 @@ import { fmt, fmtDate } from "@/lib/format";
 import { Calendar, CreditCard, Hash, Package, User } from "lucide-react";
 
 interface VentaItem {
-  id: number;
+  id: string;
   producto_nombre: string;
   producto_codigo: string;
   cantidad: number;
@@ -20,7 +20,7 @@ interface VentaItem {
 }
 
 interface VentaDetail {
-  id: number;
+  id: string;
   numero: string;
   cliente: string | null;
   cliente_nombre: string | null;
@@ -44,7 +44,7 @@ interface VentaDetailModalProps {
   venta: VentaDetail | null;
   items: VentaItem[];
   onClose: () => void;
-  onDelete?: (id: number) => void;
+  onDelete?: (id: string) => void;
 }
 
 export function VentaDetailModal({ open, venta, items, onClose, onDelete }: VentaDetailModalProps) {

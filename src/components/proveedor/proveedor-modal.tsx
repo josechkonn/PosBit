@@ -12,7 +12,7 @@ import { fmtDateTime } from "@/lib/format";
 type ProveedorModalMode = "create" | "edit" | "view" | "delete";
 
 interface Proveedor {
-  id: number;
+  id: string;
   nombre: string;
   contacto: string | null;
   email: string | null;

@@ -145,6 +145,18 @@ async function startPostgres() {
   splashStatus('Iniciando base de datos...');
   const port = await findAvailablePort();
   const dbUrl = await pgManager.start(port);
+
+  // Migración automática integer → UUID (idempotente)
+  try {
+    splashStatus('Verificando esquema de base de datos...');
+    const { runUuidMigration } = require('./migrate-uuid.cjs');
+    await runUuidMigration(pgManager.pgBinDir, port);
+    splashStatus('Esquema actualizado');
+  } catch (migrateErr) {
+    console.error('[PosBit] Error en migración automática:', migrateErr);
+    // No abortar: la app puede funcionar parcialmente o el usuario puede reportar
+  }
+
   splashStatus('Base de datos lista');
   return dbUrl;
 }

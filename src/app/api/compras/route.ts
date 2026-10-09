@@ -199,7 +199,7 @@ export async function DELETE(request: Request) {
       // debe resolverse aunque una moneda del histórico esté desactivada
       const monedasCatalogo = (await client.query(`SELECT * FROM monedas`)).rows;
       const monedaCompra =
-        monedasCatalogo.find((m: any) => Number(m.id) === Number(compra.rows[0].moneda_id)) || monedasCatalogo[0];
+        monedasCatalogo.find((m: any) => String(m.id) === String(compra.rows[0].moneda_id)) || monedasCatalogo[0];
 
       for (const item of items.rows) {
         const productoActual = await client.query(`SELECT * FROM productos WHERE id = $1`, [item.producto_id]);

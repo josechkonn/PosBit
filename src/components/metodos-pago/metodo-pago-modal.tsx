@@ -15,17 +15,17 @@ const TIPOS_PAGO = ["Efectivo", "Electronico", "Tarjeta"];
 type MetodoModalMode = "create" | "edit" | "view" | "delete";
 
 interface Caja {
-  id: number;
+  id: string;
   nombre: string;
   moneda_codigo: string;
   moneda_simbolo: string;
 }
 
 interface MetodoPago {
-  id: number;
+  id: string;
   nombre: string;
   tipo: string;
-  caja_id: number | null;
+  caja_id: string | null;
   activo: boolean;
   creado_en: string;
   actualizado_en: string;
@@ -46,7 +46,7 @@ interface MetodoPagoModalProps {
 export function MetodoPagoModal({ open, mode, metodo, cajas, onClose, onSuccess }: MetodoPagoModalProps) {
   const [nombre, setNombre] = useState("");
   const [tipo, setTipo] = useState("");
-  const [cajaId, setCajaId] = useState<number | null>(null);
+  const [cajaId, setCajaId] = useState<string | null>(null);
   const [activo, setActivo] = useState(true);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
@@ -216,7 +216,7 @@ export function MetodoPagoModal({ open, mode, metodo, cajas, onClose, onSuccess 
           <Field label="Caja">
             <Select
               value={cajaId?.toString() || ""}
-              onChange={(e) => setCajaId(e.target.value ? parseInt(e.target.value) : null)}
+              onChange={(e) => setCajaId(e.target.value || null)}
             >
               <option value="">Sin caja asignada</option>
               {cajas.map((c) => (

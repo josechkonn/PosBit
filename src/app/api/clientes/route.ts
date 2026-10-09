@@ -34,7 +34,7 @@ async function upsertLimites(client: any, clienteId: number, limites: any) {
 }
 
 // Mantiene la columna histórica limite_credito = límite en la moneda base
-async function sincronizarLimiteBase(client: any, clienteId: number) {
+async function sincronizarLimiteBase(client: any, clienteId: string) {
   await client.query(
     `UPDATE clientes cl
      SET limite_credito = COALESCE(

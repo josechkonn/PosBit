@@ -11,7 +11,7 @@ import { useConfirm } from "@/components/ui/confirm-dialog";
 import { fmt, fmtDate } from "@/lib/format";
 
 interface CompraItem {
-  id: number;
+  id: string;
   producto_nombre: string;
   producto_codigo: string;
   cantidad: number;
@@ -22,7 +22,7 @@ interface CompraItem {
 }
 
 interface CompraDetail {
-  id: number;
+  id: string;
   numero: string;
   proveedor_nombre: string;
   fecha: string;
@@ -45,7 +45,7 @@ interface CompraDetailModalProps {
   compra: CompraDetail | null;
   items: CompraItem[];
   onClose: () => void;
-  onDelete?: (id: number) => void;
+  onDelete?: (id: string) => void;
 }
 
 export function CompraDetailModal({ open, compra, items, onClose, onDelete }: CompraDetailModalProps) {

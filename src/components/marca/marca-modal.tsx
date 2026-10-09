@@ -12,7 +12,7 @@ import { fmtDateTime } from "@/lib/format";
 type MarcaModalMode = "create" | "edit" | "view" | "delete";
 
 interface Marca {
-  id: number;
+  id: string;
   nombre: string;
   pais: string | null;
   activo: boolean;

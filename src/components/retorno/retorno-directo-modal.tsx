@@ -24,10 +24,10 @@ interface ItemOriginal {
 interface RetornoDirectoModalProps {
   open: boolean;
   tipo: "Cliente" | "Proveedor";
-  referenciaId: number | null;
+  referenciaId: string | null;
   referenciaNumero: string;
-  clienteId?: number | null;
-  proveedorId?: number | null;
+  clienteId?: string | null;
+  proveedorId?: string | null;
   tipoPago?: string | null;
   items: ItemOriginal[];
   monedaCodigo?: string;

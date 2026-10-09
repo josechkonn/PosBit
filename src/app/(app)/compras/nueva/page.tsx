@@ -31,7 +31,7 @@ import { MetodoPagoSelect } from "@/components/ui/metodo-pago-select";
 /* ───── Types ───── */
 
 interface Proveedor {
-  id: number;
+  id: string;
   nombre: string;
   contacto: string | null;
   rif: string | null;
@@ -39,21 +39,21 @@ interface Proveedor {
 }
 
 interface MonedaInfo {
-  id: number;
+  id: string;
   codigo: string;
   simbolo: string;
   tasa: number | string;
-  tasa_ref_moneda_id?: number | null;
+  tasa_ref_moneda_id?: string | null;
   decimales?: number;
   es_base: boolean;
   activo?: boolean;
 }
 
 interface MetodoPago {
-  id: number;
+  id: string;
   nombre: string;
   tipo: string;
-  caja_id: number | null;
+  caja_id: string | null;
   caja_nombre: string | null;
   moneda_codigo: string | null;
   moneda_simbolo: string | null;
@@ -61,7 +61,7 @@ interface MetodoPago {
 }
 
 interface ProductoPrecio {
-  moneda_id: number;
+  moneda_id: string;
   moneda_codigo: string;
   moneda_simbolo: string;
   tasa: number;
@@ -76,7 +76,7 @@ interface ProductoSearch {
   nombre: string;
   stock: number;
   costo_base: number | string;
-  moneda_base_id: number | null;
+  moneda_base_id: string | null;
   categoria_nombre: string | null;
   precios: ProductoPrecio[] | null;
 }
@@ -92,7 +92,7 @@ interface LineItem {
   // Base para recalcular al cambiar la tasa: `costo_base` está en la moneda
   // del producto; `costoManual` solo se llena si el usuario lo edita a mano
   costo_base: number;
-  moneda_base_id: number | null;
+  moneda_base_id: string | null;
   costoManual: number | null;
 }
 
@@ -152,9 +152,9 @@ export default function NuevaCompraPage() {
   const [loadingData, setLoadingData] = useState(true);
 
   // ── Form state ──
-  const [proveedorId, setProveedorId] = useState<number | null>(null);
+  const [proveedorId, setProveedorId] = useState<string | null>(null);
   const [fecha, setFecha] = useState(new Date().toISOString().split("T")[0]);
-  const [metodoPagoId, setMetodoPagoId] = useState<number | null>(null);
+  const [metodoPagoId, setMetodoPagoId] = useState<string | null>(null);
   const [referencia, setReferencia] = useState("");
   const [observaciones, setObservaciones] = useState("");
   const [items, setItems] = useState<LineItem[]>([]);

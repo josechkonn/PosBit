@@ -16,8 +16,8 @@ import { fmt, fmtDateTime } from "@/lib/format";
 import * as XLSX from "xlsx";
 
 interface CierreCaja {
-  id: number;
-  caja_id: number;
+  id: string;
+  caja_id: string;
   caja_nombre: string;
   moneda_codigo: string;
   moneda_simbolo: string;
@@ -31,7 +31,7 @@ interface CierreCaja {
 }
 
 interface Caja {
-  id: number;
+  id: string;
   nombre: string;
   moneda_codigo: string;
   estado: string;
@@ -187,7 +187,7 @@ export default function CierresCajaPage() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          caja_id: parseInt(selectedCajaId),
+          caja_id: selectedCajaId,
           observaciones: observaciones.trim() || null,
         }),
       });

@@ -18,13 +18,13 @@
 // ============================================================================
 
 export interface MonedaConversion {
-  id: number;
+  id: string;
   codigo?: string | null;
   simbolo?: string | null;
   tasa: number | string;
   decimales?: number | null;
   es_base?: boolean | null;
-  tasa_ref_moneda_id?: number | null;
+  tasa_ref_moneda_id?: string | null;
 }
 
 /** Redondeo centralizado (antes había Math.round(x*100)/100 repartido en ~20 archivos). */
@@ -50,15 +50,17 @@ export function tasaUsd(
   if (!moneda) return 1;
 
   let tasa = tasaNumerica(moneda);
-  const vistos = new Set<number>([Number(moneda.id)]);
+  // Los ids de moneda son UUID: se comparan como cadena. Usar Number() aquí
+  // devolvería NaN y cortaría prematuramente la cadena de referencias.
+  const vistos = new Set<string>([String(moneda.id)]);
   let refId = moneda.tasa_ref_moneda_id ?? null;
   let saltos = 0;
 
   while (refId !== null && refId !== undefined && saltos++ < 10) {
-    const refNum = Number(refId);
-    if (vistos.has(refNum)) break; // ciclo: cortamos
-    vistos.add(refNum);
-    const ref = catalogo.find((m) => Number(m.id) === refNum);
+    const refClave = String(refId);
+    if (vistos.has(refClave)) break; // ciclo: cortamos
+    vistos.add(refClave);
+    const ref = catalogo.find((m) => String(m.id) === refClave);
     if (!ref) break;
     tasa *= tasaNumerica(ref);
     refId = ref.tasa_ref_moneda_id ?? null;
@@ -100,7 +102,7 @@ export function tasaUsdDocumento(
   const refId = moneda?.tasa_ref_moneda_id ?? null;
   if (refId === null || refId === undefined) return custom; // vs USD (o moneda base)
 
-  const ref = catalogo.find((m) => Number(m.id) === Number(refId));
+  const ref = catalogo.find((m) => String(m.id) === String(refId));
   return custom * (ref ? tasaUsd(ref, catalogo) : 1);
 }
 
@@ -125,12 +127,12 @@ export function desdeBase(montoBase: number, tasaDocUsd: number, decimales = 2):
  * Si no tiene, se usa `porDefecto` (la moneda de la venta/compra en curso).
  */
 export function monedaDeProducto<T extends MonedaConversion>(
-  producto: { moneda_base_id?: number | null } | null | undefined,
+  producto: { moneda_base_id?: string | null } | null | undefined,
   porDefecto: T,
   catalogo: T[]
 ): T {
   const id = producto?.moneda_base_id;
   if (!id) return porDefecto;
-  const encontrada = catalogo.find((m) => Number(m.id) === Number(id));
+  const encontrada = catalogo.find((m) => String(m.id) === String(id));
   return (encontrada as T) || porDefecto;
 }

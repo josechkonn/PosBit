@@ -11,17 +11,17 @@ import { MetodoPagoModal } from "@/components/metodos-pago/metodo-pago-modal";
 import { useToast } from "@/components/ui/toast";
 
 interface Caja {
-  id: number;
+  id: string;
   nombre: string;
   moneda_codigo: string;
   moneda_simbolo: string;
 }
 
 interface MetodoPago {
-  id: number;
+  id: string;
   nombre: string;
   tipo: string;
-  caja_id: number | null;
+  caja_id: string | null;
   activo: boolean;
   creado_en: string;
   actualizado_en: string;

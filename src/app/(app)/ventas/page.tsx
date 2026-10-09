@@ -17,14 +17,14 @@ import { fmt, fmtDate } from "@/lib/format";
 import * as XLSX from "xlsx";
 
 interface Venta {
-  id: number;
+  id: string;
   numero: string;
   cliente: string | null;
-  cliente_id: number | null;
+  cliente_id: string | null;
   cliente_nombre: string | null;
   tipo_pago: string | null;
   fecha: string;
-  moneda_id: number;
+  moneda_id: string;
   moneda_codigo: string;
   moneda_simbolo: string;
   metodo_pago_nombre: string | null;
@@ -36,7 +36,7 @@ interface Venta {
   estado: string;
   observaciones: string | null;
   items_count: number | string;
-  credito_id?: number | null;
+  credito_id?: string | null;
   credito_numero?: string | null;
   credito_monto_total?: number | string | null;
   credito_saldo?: number | string | null;
@@ -44,8 +44,8 @@ interface Venta {
 }
 
 interface VentaItem {
-  id: number;
-  venta_id: number;
+  id: string;
+  venta_id: string;
   producto_id: number;
   producto_nombre: string;
   producto_codigo: string;
@@ -194,7 +194,7 @@ export default function VentasPage() {
     setDetailOpen(true);
   };
 
-  const handleDelete = async (id: number) => {
+  const handleDelete = async (id: string) => {
     try {
       const res = await fetch(`/api/ventas?id=${id}`, { method: "DELETE" });
       if (res.ok) {

@@ -26,11 +26,11 @@ interface Producto {
   iva_incluido: boolean;
   precio_base: number;
   costo_base: number;
-  moneda_base_id?: number | null;
+  moneda_base_id?: string | null;
   categoria_nombre: string;
   marca_nombre: string;
   precios: Array<{
-    moneda_id: number;
+    moneda_id: string;
     moneda_codigo: string;
     moneda_simbolo: string;
     precio: number;
@@ -40,28 +40,28 @@ interface Producto {
 }
 
 interface Moneda {
-  id: number;
+  id: string;
   codigo: string;
   simbolo: string;
   tasa: number | string;
-  tasa_ref_moneda_id?: number | null;
+  tasa_ref_moneda_id?: string | null;
   decimales: number;
   es_base: boolean;
 }
 
 interface MetodoPago {
-  id: number;
+  id: string;
   nombre: string;
   tipo: string;
-  caja_id: number;
+  caja_id: string;
   moneda_codigo: string;
   activo?: boolean;
 }
 
 interface Caja {
-  id: number;
+  id: string;
   nombre: string;
-  moneda_id: number;
+  moneda_id: string;
   moneda_codigo: string;
   saldo_actual: number;
 }
@@ -74,7 +74,7 @@ interface CartItem {
 // Línea de pago mixto: una o varias, cada una en la moneda de SU método
 interface LineaPago {
   key: number;
-  metodoId: number | null; // null = usa el método de la venta (select del header)
+  metodoId: string | null; // null = usa el método de la venta (select del header)
   montoStr: string; // vacío = paga el resto que queda; "0" = no aporta
 }
 
@@ -85,7 +85,7 @@ interface PorCobrarItem {
 }
 
 interface LimiteCredito {
-  moneda_id: number;
+  moneda_id: string;
   codigo: string;
   simbolo?: string;
   es_base?: boolean;
@@ -93,7 +93,7 @@ interface LimiteCredito {
 }
 
 interface Cliente {
-  id: number;
+  id: string;
   nombre: string;
   tipo?: string;
   documento: string | null;
@@ -153,8 +153,8 @@ export default function PuntoDeVentaPage() {
 
   // Selection state
   const [monedaSeleccionada, setMonedaSeleccionada] = useState<string>("");
-  const [metodoPagoSeleccionado, setMetodoPagoSeleccionado] = useState<number | null>(null);
-  const [cajaSeleccionada, setCajaSeleccionada] = useState<number | null>(null);
+  const [metodoPagoSeleccionado, setMetodoPagoSeleccionado] = useState<string | null>(null);
+  const [cajaSeleccionada, setCajaSeleccionada] = useState<string | null>(null);
 
   // Pago mixto: líneas de pago; cada una en la moneda de su método de pago.
   // montoStr vacío = paga el resto que queda; "0" = no aporta nada.
@@ -424,7 +424,7 @@ export default function PuntoDeVentaPage() {
     }
   };
 
-  const handleSelectMetodo = (metodoId: number) => {
+  const handleSelectMetodo = (metodoId: string) => {
     const metodo = metodosPago.find((m) => m.id === metodoId);
     if (metodo) {
       setMetodoPagoSeleccionado(metodo.id);
@@ -844,7 +844,7 @@ export default function PuntoDeVentaPage() {
         subtotal: getPrecio(c.product) * c.qty,
       }));
 
-      let pagosToSend: Array<{ metodo_pago_id: number; monto: number }> = [];
+      let pagosToSend: Array<{ metodo_pago_id: string; monto: number }> = [];
       let montoPagadoFinal = pagadoTotal;
       let deudaFinal = deudaVenta;
 
@@ -876,7 +876,7 @@ export default function PuntoDeVentaPage() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          cliente_id: clienteId ? parseInt(clienteId, 10) : null,
+          cliente_id: clienteId || null,
           tipo_pago: isCreditoFinal ? "Credito" : "Contado",
           moneda_id: moneda?.id,
           metodo_pago_id: metodoIdFinal,
@@ -891,7 +891,7 @@ export default function PuntoDeVentaPage() {
 
       if (res.ok) {
         const data = await res.json();
-        const clienteObj = clientes.find((c) => c.id === parseInt(clienteId, 10));
+        const clienteObj = clientes.find((c) => c.id === clienteId);
         const metodoObj = metodosPago.find((m) => m.id === metodoIdFinal);
 
         setLastSaleData({
@@ -980,7 +980,7 @@ export default function PuntoDeVentaPage() {
     );
   }
 
-  const clienteObj = clientes.find((c) => c.id === parseInt(clienteId, 10));
+  const clienteObj = clientes.find((c) => c.id === clienteId);
 
   // Límite de crédito y deuda del cliente en la moneda de esta venta
   const deudaMoneda =

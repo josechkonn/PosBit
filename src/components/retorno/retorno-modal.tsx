@@ -18,14 +18,14 @@ interface Producto {
 }
 
 interface Venta {
-  id: number;
+  id: string;
   numero: string;
   cliente_nombre?: string | null;
   cliente?: string | null;
 }
 
 interface Compra {
-  id: number;
+  id: string;
   numero: string;
   proveedor_nombre?: string | null;
 }
@@ -59,8 +59,8 @@ export function RetornoModal({ open, onClose, onSuccess, initialTipo, initialVen
   const [items, setItems] = useState<ItemSeleccionado[]>([]);
 
   const [productos, setProductos] = useState<Producto[]>([]);
-  const [clientes, setClientes] = useState<{ id: number; nombre: string }[]>([]);
-  const [proveedores, setProveedores] = useState<{ id: number; nombre: string }[]>([]);
+  const [clientes, setClientes] = useState<{ id: string; nombre: string }[]>([]);
+  const [proveedores, setProveedores] = useState<{ id: string; nombre: string }[]>([]);
   const [ventas, setVentas] = useState<Venta[]>([]);
   const [compras, setCompras] = useState<Compra[]>([]);
   const [loading, setLoading] = useState(false);
@@ -131,12 +131,12 @@ export function RetornoModal({ open, onClose, onSuccess, initialTipo, initialVen
         items,
       };
       if (tipo === "Cliente") {
-        body.cliente_id = clienteId ? parseInt(clienteId, 10) : null;
-        body.venta_id = ventaId ? parseInt(ventaId, 10) : null;
+        body.cliente_id = clienteId || null;
+        body.venta_id = ventaId || null;
         body.abonar_credito = abonarCredito;
       } else {
-        body.proveedor_id = proveedorId ? parseInt(proveedorId, 10) : null;
-        body.compra_id = compraId ? parseInt(compraId, 10) : null;
+        body.proveedor_id = proveedorId || null;
+        body.compra_id = compraId || null;
       }
 
       const res = await fetch("/api/retornos", {

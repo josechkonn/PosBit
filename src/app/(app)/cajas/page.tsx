@@ -16,9 +16,9 @@ import { fmt, fmtDate } from "@/lib/format";
 import { cn } from "@/lib/utils";
 
 interface Caja {
-  id: number;
+  id: string;
   nombre: string;
-  moneda_id: number;
+  moneda_id: string;
   moneda_codigo: string;
   moneda_simbolo: string;
   es_base: boolean;
@@ -31,7 +31,7 @@ interface Caja {
 }
 
 interface Moneda {
-  id: number;
+  id: string;
   codigo: string;
   nombre: string;
   simbolo: string;

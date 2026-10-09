@@ -11,12 +11,12 @@ import { MonedaModal } from "@/components/moneda/moneda-modal";
 import { useToast } from "@/components/ui/toast";
 
 interface Moneda {
-  id: number;
+  id: string;
   nombre: string;
   codigo: string;
   simbolo: string;
   tasa: number | string;
-  tasa_ref_moneda_id?: number | null;
+  tasa_ref_moneda_id?: string | null;
   decimales: number;
   es_base: boolean;
   activo: boolean;

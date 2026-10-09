@@ -12,9 +12,9 @@ import { useToast } from "@/components/ui/toast";
 import { fmt, fmtDate } from "@/lib/format";
 
 interface Credito {
-  id: number;
+  id: string;
   numero: string;
-  cliente_id: number;
+  cliente_id: string;
   cliente_nombre: string;
   cliente_telefono: string | null;
   cliente_documento: string | null;
@@ -26,7 +26,7 @@ interface Credito {
   abonado: number | string;
   abonos_count: number | string;
   estado: string;
-  moneda_id: number;
+  moneda_id: string;
   moneda_codigo: string;
   moneda_simbolo: string;
 }

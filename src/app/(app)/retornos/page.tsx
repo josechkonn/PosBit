@@ -14,7 +14,7 @@ import { useConfirm } from "@/components/ui/confirm-dialog";
 import { fmt, fmtDate } from "@/lib/format";
 
 interface Retorno {
-  id: number;
+  id: string;
   numero: string;
   tipo: string;
   venta_numero: string | null;
@@ -32,8 +32,8 @@ interface Retorno {
 }
 
 interface RetornoItem {
-  id: number;
-  retorno_id: number;
+  id: string;
+  retorno_id: string;
   producto_nombre: string;
   producto_codigo: string;
   cantidad: number;
@@ -86,7 +86,7 @@ export default function RetornosPage() {
     setDetailOpen(true);
   };
 
-  const handleDelete = async (id: number) => {
+  const handleDelete = async (id: string) => {
     try {
       const res = await fetch(`/api/retornos?id=${id}`, { method: "DELETE" });
       if (res.ok) {

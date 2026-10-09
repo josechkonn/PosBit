@@ -15,9 +15,9 @@ import { useConfirm } from "@/components/ui/confirm-dialog";
 import { fmt, fmtDate } from "@/lib/format";
 
 interface Compra {
-  id: number;
+  id: string;
   numero: string;
-  proveedor_id: number;
+  proveedor_id: string;
   proveedor_nombre: string;
   fecha: string;
   moneda_codigo: string;
@@ -34,8 +34,8 @@ interface Compra {
 }
 
 interface CompraItem {
-  id: number;
-  compra_id: number;
+  id: string;
+  compra_id: string;
   producto_id: number;
   producto_nombre: string;
   producto_codigo: string;
@@ -137,7 +137,7 @@ export default function ComprasPage() {
     setDetailOpen(true);
   };
 
-  const handleDelete = async (id: number) => {
+  const handleDelete = async (id: string) => {
     try {
       const res = await fetch(`/api/compras?id=${id}`, { method: "DELETE" });
       if (res.ok) {

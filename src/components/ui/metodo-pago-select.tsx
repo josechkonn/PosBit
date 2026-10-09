@@ -16,7 +16,7 @@ import {
 import { cn } from "@/lib/utils";
 
 export interface MetodoPagoOption {
-  id: number;
+  id: string;
   nombre: string;
   tipo?: string;
   moneda_codigo?: string | null;
@@ -33,7 +33,7 @@ interface MetodoPagoSelectProps {
   metodos: MetodoPagoOption[];
   /** id del método seleccionado (null/"" = ninguno) */
   value: number | string | null;
-  onChange: (id: number | null) => void;
+  onChange: (id: string | null) => void;
   placeholder?: string;
   /** Muestra una fila vacía para deseleccionar ("Sin método de pago", etc.) */
   allowEmptyLabel?: string;
@@ -179,7 +179,7 @@ export function MetodoPagoSelect({
     return () => document.removeEventListener("keydown", handleKey);
   }, [open]);
 
-  const handleSelect = (id: number | null) => {
+  const handleSelect = (id: string | null) => {
     onChange(id);
     setOpen(false);
   };

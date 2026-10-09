@@ -17,22 +17,22 @@ import { cn } from "@/lib/utils";
 import * as XLSX from "xlsx";
 
 interface Transaccion {
-  id: number;
-  caja_id: number;
+  id: string;
+  caja_id: string;
   caja_nombre: string;
   fecha: string;
   tipo: "Entrada" | "Salida";
   monto: number | string;
-  moneda_id: number;
+  moneda_id: string;
   moneda_codigo: string;
   moneda_simbolo: string;
   descripcion: string | null;
   referencia_tipo: string | null;
-  referencia_id: number | null;
+  referencia_id: string | null;
 }
 
 interface Caja {
-  id: number;
+  id: string;
   nombre: string;
   moneda_codigo: string;
   estado: string;
@@ -192,7 +192,7 @@ export default function TransaccionesPage() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          caja_id: parseInt(newCajaId),
+          caja_id: newCajaId,
           tipo: newTipo,
           monto: montoNum,
           descripcion: newDescripcion.trim() || null,

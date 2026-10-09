@@ -21,9 +21,9 @@ interface Producto {
   nombre: string;
   descripcion: string | null;
   imagen: string | null;
-  categoria_id: number | null;
-  marca_id: number | null;
-  moneda_base_id?: number | null;
+  categoria_id: string | null;
+  marca_id: string | null;
+  moneda_base_id?: string | null;
   stock: number;
   stock_minimo: number;
   activo: boolean;
@@ -33,7 +33,7 @@ interface Producto {
   categoria_nombre: string | null;
   marca_nombre: string | null;
   precios: Array<{
-    moneda_id: number;
+    moneda_id: string;
     moneda_codigo: string;
     moneda_simbolo: string;
     precio: number;
@@ -43,7 +43,7 @@ interface Producto {
 }
 
 interface Moneda {
-  id: number;
+  id: string;
   codigo: string;
   simbolo: string;
   tasa: number;
@@ -82,8 +82,8 @@ export default function ProductosPage() {
   const [selectedCategoria, setSelectedCategoria] = useState("");
   const [selectedMarca, setSelectedMarca] = useState("");
   const [selectedEstado, setSelectedEstado] = useState("todos");
-  const [categorias, setCategorias] = useState<Array<{ id: number; nombre: string }>>([]);
-  const [marcas, setMarcas] = useState<Array<{ id: number; nombre: string }>>([]);
+  const [categorias, setCategorias] = useState<Array<{ id: string; nombre: string }>>([]);
+  const [marcas, setMarcas] = useState<Array<{ id: string; nombre: string }>>([]);
 
   const barcodeBuffer = useRef("");
   const lastKeyTime = useRef(0);

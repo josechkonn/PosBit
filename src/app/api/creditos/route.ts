@@ -128,7 +128,7 @@ export async function POST(request: Request) {
       // Convertir el monto del abono a la moneda del crédito para comparar
       // con el saldo (misma cadena de conversiones que en todo el sistema)
       const montoEnMonedaCredito =
-        Number(monedaAbono.id) === Number(monedaCredito.id)
+        String(monedaAbono.id) === String(monedaCredito.id)
           ? montoAbono
           : convertir(montoAbono, monedaAbono, monedaCredito, monedasCatalogo, Number(monedaCredito.decimales ?? 2));
 

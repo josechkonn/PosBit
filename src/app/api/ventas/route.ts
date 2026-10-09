@@ -173,9 +173,9 @@ export async function POST(request: Request) {
       // devuelve como vuelto en SU moneda. Sin `pagos`: `monto_pagado` si viene
       // (pago parcial); si no, crédito = 0 pagado y contado = total pagado.
       interface LineaPagoResuelta {
-        metodoId: number;
-        cajaId: number;
-        monedaId: number;
+        metodoId: string;
+        cajaId: string;
+        monedaId: string;
         tasaUsdLinea: number; // unidades de la moneda del método por 1 USD
         monto: number; // entregado en la moneda del método
         montoAplicado: number; // aplicado a la venta (moneda de la venta)
@@ -206,12 +206,12 @@ export async function POST(request: Request) {
           if (!met.caja_id || !met.moneda_id) {
             throw new Error(`El método de pago "${met.nombre}" no tiene una caja asignada`);
           }
-          const monedaLinea = monedasCatalogo.find((m: any) => Number(m.id) === Number(met.moneda_id));
+          const monedaLinea = monedasCatalogo.find((m: any) => String(m.id) === String(met.moneda_id));
           if (!monedaLinea) {
             throw new Error("Moneda del método de pago no encontrada");
           }
           const tasaUsdLinea = tasaUsd(monedaLinea, monedasCatalogo);
-          const esMonedaVenta = Number(met.moneda_id) === Number(moneda_id);
+          const esMonedaVenta = String(met.moneda_id) === String(moneda_id);
 
           // Entregado → moneda de la venta (vía USD con la tasa del documento)
           const montoVenta = esMonedaVenta
@@ -227,9 +227,9 @@ export async function POST(request: Request) {
           restante = redondear(restante - aplicado);
           pagado = redondear(pagado + aplicado);
           lineasPago.push({
-            metodoId: Number(met.id),
-            cajaId: Number(met.caja_id),
-            monedaId: Number(met.moneda_id),
+            metodoId: String(met.id),
+            cajaId: String(met.caja_id),
+            monedaId: String(met.moneda_id),
             tasaUsdLinea,
             monto: montoLinea,
             montoAplicado: aplicado,
@@ -278,7 +278,7 @@ export async function POST(request: Request) {
         if (!metodoRow.caja_moneda_id) {
           throw new Error("El método de pago seleccionado no tiene una caja asignada");
         }
-        if (Number(metodoRow.caja_moneda_id) !== Number(moneda_id)) {
+        if (String(metodoRow.caja_moneda_id) !== String(moneda_id)) {
           throw new Error("El método de pago debe tener la misma moneda que el crédito");
         }
 
@@ -341,13 +341,23 @@ export async function POST(request: Request) {
           [venta.id, item.producto_id, item.cantidad, item.precio_unit, precioUnitBase, subtotalItem, subtotalBase]
         );
 
-        const stockAnterior = producto.rows[0].stock;
-        const nuevoStock = stockAnterior - item.cantidad;
-
-        await client.query(
-          `UPDATE productos SET stock = $1 WHERE id = $2`,
-          [nuevoStock, item.producto_id]
+        // Stock atómico: decrementa solo si hay suficiente.
+        // Evita overselling con peticiones concurrentes en el mismo servidor.
+        // Devuelve el stock anterior para el kardex.
+        const stockRes = await client.query(
+          `UPDATE productos 
+           SET stock = stock - $1 
+           WHERE id = $2 AND stock >= $1 
+           RETURNING stock + $1 AS anterior, stock AS actual`,
+          [item.cantidad, item.producto_id]
         );
+
+        if (stockRes.rows.length === 0) {
+          throw new Error(`Stock insuficiente para producto ${item.producto_id}`);
+        }
+
+        const stockAnterior = stockRes.rows[0].anterior;
+        const nuevoStock = stockRes.rows[0].actual;
 
         // El kardex guarda el costo en la moneda del producto y su equivalente USD
         const costoProducto = Number(producto.rows[0].costo_base) || 0;
@@ -395,7 +405,7 @@ export async function POST(request: Request) {
 
       // Dinero que entra a la caja: una transacción por línea, en la moneda de
       // esa línea (el vuelto nunca entra a la caja)
-      const entradasCaja: { cajaId: number; monto: number; monedaId: number; montoBase: number; tasa: number }[] = [];
+      const entradasCaja: { cajaId: string; monto: number; monedaId: string; montoBase: number; tasa: number }[] = [];
       if (lineasPago.length > 0) {
         for (const l of lineasPago) {
           const efectivo = efectivoLinea(l);
@@ -405,11 +415,11 @@ export async function POST(request: Request) {
             monto: efectivo,
             monedaId: l.monedaId,
             montoBase: aBase(efectivo, l.tasaUsdLinea),
-            tasa: Number(monedasCatalogo.find((m: any) => Number(m.id) === l.monedaId)?.tasa) || 1,
+            tasa: Number(monedasCatalogo.find((m: any) => String(m.id) === String(l.monedaId))?.tasa) || 1,
           });
         }
       } else if (caja_id && metodo_pago_id && pagado > 0.009) {
-        entradasCaja.push({ cajaId: Number(caja_id), monto: pagado, monedaId: Number(moneda_id), montoBase: pagadoBase, tasa: tasaAplicada });
+        entradasCaja.push({ cajaId: String(caja_id), monto: pagado, monedaId: String(moneda_id), montoBase: pagadoBase, tasa: tasaAplicada });
       }
 
       for (const e of entradasCaja) {
@@ -496,7 +506,7 @@ export async function DELETE(request: Request) {
       // debe resolverse aunque una moneda del histórico esté desactivada
       const monedasCatalogo = (await client.query(`SELECT * FROM monedas`)).rows;
       const monedaVenta =
-        monedasCatalogo.find((m: any) => Number(m.id) === Number(venta.rows[0].moneda_id)) || monedasCatalogo[0];
+        monedasCatalogo.find((m: any) => String(m.id) === String(venta.rows[0].moneda_id)) || monedasCatalogo[0];
 
       for (const item of items.rows) {
         const productoActual = await client.query(`SELECT * FROM productos WHERE id = $1`, [item.producto_id]);

@@ -11,7 +11,7 @@ import { MarcaModal } from "@/components/marca/marca-modal";
 import { useToast } from "@/components/ui/toast";
 
 interface Marca {
-  id: number;
+  id: string;
   nombre: string;
   pais: string | null;
   activo: boolean;

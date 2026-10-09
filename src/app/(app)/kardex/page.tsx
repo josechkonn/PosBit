@@ -15,13 +15,13 @@ import { cn } from "@/lib/utils";
 import * as XLSX from "xlsx";
 
 interface KardexItem {
-  id: number;
+  id: string;
   producto_id: number;
   fecha: string;
   tipo: "Entrada" | "Salida" | "Ajuste";
   motivo: string | null;
   referencia_tipo: string | null;
-  referencia_id: number | null;
+  referencia_id: string | null;
   cantidad: number;
   costo_unit: number | string;
   costo_unit_base: number | string;
