@@ -16,12 +16,18 @@ export async function GET(request: Request) {
     await requireSession();
     const { searchParams } = new URL(request.url);
     const tipo = searchParams.get("tipo");
+    // Filtro opcional para el perfil del cliente: ?cliente_id=X
+    const clienteId = searchParams.get("cliente_id");
 
     let where = "";
     const params: any[] = [];
     if (tipo && tipo !== "Todos") {
       params.push(tipo);
       where = `WHERE rt.tipo = $${params.length}`;
+    }
+    if (clienteId) {
+      params.push(clienteId);
+      where += where ? ` AND rt.cliente_id = $${params.length}` : `WHERE rt.cliente_id = $${params.length}`;
     }
 
     // El monto del retorno se calcula en la moneda del documento de referencia
@@ -115,8 +121,9 @@ export async function GET(request: Request) {
       LEFT JOIN monedas mv ON v.moneda_id = mv.id
       LEFT JOIN compras c ON rt.compra_id = c.id
       LEFT JOIN monedas mc ON c.moneda_id = mc.id
+      ${where}
       ORDER BY ri.retorno_id, ri.id
-    `);
+    `, params);
 
     const summaryRow = await queryOne<{ clientes: string; proveedores: string; total_items: string }>(`
       SELECT

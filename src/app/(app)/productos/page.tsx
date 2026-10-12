@@ -11,6 +11,7 @@ import { SearchBar } from "@/components/ui/search-bar";
 import { Table, Td, Tr, HeaderConfig } from "@/components/ui/table";
 import { ProductoModal } from "@/components/producto/producto-modal";
 import { fmt } from "@/lib/format";
+import { margenSobreCosto } from "@/lib/money";
 import { cn } from "@/lib/utils";
 import { useToast } from "@/components/ui/toast";
 import * as XLSX from "xlsx";
@@ -33,6 +34,10 @@ interface Producto {
   costo_base: number;
   categoria_nombre: string | null;
   marca_nombre: string | null;
+  /** Proveedor principal (`productos.proveedor_id`). */
+  proveedor_nombre?: string | null;
+  /** Todos los proveedores del producto (relación N:M). */
+  proveedores?: Array<{ id: string; nombre: string }>;
   precios: Array<{
     moneda_id: string;
     moneda_codigo: string;
@@ -40,6 +45,17 @@ interface Producto {
     precio: number;
     costo: number;
     es_base: boolean;
+  }>;
+  presentaciones?: Array<{
+    id: string;
+    nombre: string;
+    unidades: number;
+    activo: boolean;
+    precio: number;
+    costo: number;
+    modo_venta?: "derivado" | "fijo" | "margen";
+    precio_override?: number | null;
+    margen_override?: number | null;
   }>;
 }
 
@@ -62,6 +78,76 @@ interface PaginationInfo {
 type ModalMode = "create" | "edit" | "view" | "delete";
 
 const PAGE_SIZE = 20;
+
+/** Modo de precio de una presentación (3 modos). */
+type ModoPres = "derivado" | "fijo" | "margen";
+
+/**
+ * Celda de presentaciones: cada una con su PRECIO real de venta.
+ *
+ * El precio llega ya resuelto por la API según el modo de cada presentación
+ * (`derivado` = unidad × unidades, `fijo` = override, `margen` = CPP ×
+ * unidades × (1+m)). Se muestra la etiqueta del modo solo cuando NO es
+ * derivado, para que el caso normal (que es el frecuente) quede limpio.
+ *
+ * El texto va en `text-xs` (no `text-[10px]`) a propósito: se lee de un vistazo
+ * sin obligar a acercar la pantalla.
+ */
+function PresentacionesCelda({
+  presentaciones,
+  codMoneda,
+}: {
+  presentaciones: Array<{
+    id: string;
+    nombre: string;
+    unidades: number;
+    precio: number;
+    modo_venta?: ModoPres;
+    precio_override?: number | null;
+    margen_override?: number | null;
+  }>;
+  codMoneda: string;
+}) {
+  if (presentaciones.length === 0) {
+    return <span className="text-muted-foreground">Por unidad</span>;
+  }
+
+  return (
+    <div className="flex flex-col gap-1">
+      {presentaciones.map((pr) => (
+        <div key={pr.id} className="flex items-baseline gap-2">
+          <span className="flex items-baseline gap-1.5">
+            <span className="font-medium text-foreground">{pr.nombre}</span>
+            <span className="text-xs text-muted-foreground">×{pr.unidades}</span>
+          </span>
+          <span className="font-mono text-xs font-semibold text-primary">
+            {fmt(pr.precio, codMoneda)}
+          </span>
+          {pr.modo_venta === "margen" && (
+            <span className="text-xs text-muted-foreground/80">+{pr.margen_override}%</span>
+          )}
+          {pr.modo_venta === "fijo" && (
+            <span className="rounded bg-muted px-1 py-px text-[10px] font-medium uppercase text-muted-foreground">
+              fijo
+            </span>
+          )}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+/**
+ * Margen real (%) del producto: precio de venta vs. costo de compra, ambos en
+ * la moneda de VENTA (la fila `es_base` de `precios`, ya derivada por la API con
+ * el método de conversión configurado). `null` si no hay costo/precio válido.
+ * Es markup sobre costo: misma semántica que `margen_ganancia`
+ * (precio = costo × (1 + margen/100)).
+ */
+function margenRealDeProducto(p: Producto): number | null {
+  const fila = p.precios?.find((pr) => pr.es_base);
+  return fila ? margenSobreCosto(fila.precio, fila.costo) : null;
+}
 
 export default function ProductosPage() {
   const [productos, setProductos] = useState<Producto[]>([]);
@@ -238,6 +324,9 @@ export default function ProductosPage() {
           const code = sortKey.replace("precio_", "");
           aVal = a.precios?.find((p) => p.moneda_codigo === code)?.precio ?? 0;
           bVal = b.precios?.find((p) => p.moneda_codigo === code)?.precio ?? 0;
+        } else if (sortKey === "margen") {
+          aVal = margenRealDeProducto(a) ?? -Infinity;
+          bVal = margenRealDeProducto(b) ?? -Infinity;
         }
 
         if (aVal === null || aVal === undefined) aVal = "";
@@ -255,18 +344,26 @@ export default function ProductosPage() {
     return list;
   }, [productos, search, selectedCategoria, selectedMarca, selectedEstado, sortKey, sortOrder]);
 
+  // Cada columna declara su banda con `group`: columnas contiguas del mismo grupo
+  // se fusionan bajo una cabecera de nivel superior. Así "USD / VES / COP" se lee
+  // como un bloque de Costos y otro de Precios, en vez de seis columnas sueltas.
+  // El orden del cuerpo DEBE seguir esta lista (la comprobación de `Table`
+  // avisa en desarrollo si el número de celdas no coincide).
   const headers: HeaderConfig[] = useMemo(() => [
-    "",
-    { key: "codigo", label: "Código", sortable: true },
-    { key: "nombre", label: "Producto", sortable: true },
-    { key: "categoria_nombre", label: "Categoría", sortable: true },
-    { key: "marca_nombre", label: "Marca", sortable: true },
-    { key: "stock", label: "Existencias", sortable: true },
-    "IVA",
-    ...monedas.map((m) => ({ key: `costo_${m.codigo}`, label: `Costo ${m.codigo}`, sortable: true })),
-    ...monedas.map((m) => ({ key: `precio_${m.codigo}`, label: `Precio ${m.codigo}`, sortable: true })),
-    "Estado",
-    "Acciones",
+    { label: "" },
+    { key: "codigo", label: "Código", sortable: true, group: "Datos del producto" },
+    { key: "nombre", label: "Nombre", sortable: true, group: "Datos del producto" },
+    { key: "stock", label: "Existencias", sortable: true, group: "Datos del producto" },
+    { label: "IVA", group: "Datos del producto" },
+    { label: "Precio caja", group: "Presentaciones" },
+    ...monedas.map((m) => ({ key: `costo_${m.codigo}`, label: m.codigo, sortable: true, group: "Costos" })),
+    ...monedas.map((m) => ({ key: `precio_${m.codigo}`, label: m.codigo, sortable: true, group: "Precios" })),
+    { key: "margen", label: "%", sortable: true, group: "Margen", className: "bg-warning/20 text-warning-strong" },
+    { key: "categoria_nombre", label: "Categoría", sortable: true, group: "Clasificación" },
+    { key: "marca_nombre", label: "Marca", sortable: true, group: "Clasificación" },
+    { key: "proveedor_nombre", label: "Proveedor", sortable: true, group: "Clasificación" },
+    { label: "Estado" },
+    { label: "Acciones" },
   ], [monedas]);
 
   const handleExport = () => {
@@ -295,6 +392,9 @@ export default function ProductosPage() {
         const pr = precios.find((x) => x.moneda_codigo === m.codigo);
         row[`Precio (${m.codigo})`] = pr ? pr.precio : 0;
       }
+
+      const margen = margenRealDeProducto(p);
+      row["Margen (%)"] = margen == null ? "" : Number(margen.toFixed(2));
 
       row["Estado"] = getEstado(p);
 
@@ -447,19 +547,20 @@ export default function ProductosPage() {
         >
           {loading ? (
             <Tr>
-              <Td colSpan={12 + monedas.length * 2} className="text-center py-8 text-muted-foreground">
+              <Td colSpan={headers.length} className="text-center py-8 text-muted-foreground">
                 Cargando...
               </Td>
             </Tr>
           ) : filteredProductos.length === 0 ? (
             <Tr>
-              <Td colSpan={12 + monedas.length * 2} className="text-center py-8 text-muted-foreground">
+              <Td colSpan={headers.length} className="text-center py-8 text-muted-foreground">
                 {search || activeFiltersCount > 0 ? "No se encontraron resultados para el filtro" : "No hay productos registrados"}
               </Td>
             </Tr>
           ) : (
             filteredProductos.map((p) => {
               const precios = p.precios?.filter((pr) => pr.moneda_id !== null) || [];
+              const margen = margenRealDeProducto(p);
               return (
                 <Tr key={p.id}>
                   <Td>
@@ -479,8 +580,6 @@ export default function ProductosPage() {
                   <Td>
                     <span className="font-medium text-foreground">{p.nombre}</span>
                   </Td>
-                  <Td>{p.categoria_nombre || "—"}</Td>
-                  <Td>{p.marca_nombre || "—"}</Td>
                   <Td>
                     <span
                       className={cn(
@@ -500,6 +599,12 @@ export default function ProductosPage() {
                       {p.iva_incluido ? "Incl." : "Excl."}
                     </span>
                   </Td>
+                  <Td>
+                    <PresentacionesCelda
+                      presentaciones={(p.presentaciones || []).filter((pr) => pr.activo)}
+                      codMoneda={monedas.find((m) => m.id === p.moneda_base_id)?.codigo ?? "USD"}
+                    />
+                  </Td>
                   {monedas.map((mon) => {
                     const precio = precios.find((pr) => pr.moneda_codigo === mon.codigo);
                     return (
@@ -516,6 +621,34 @@ export default function ProductosPage() {
                       </Td>
                     );
                   })}
+                  <Td className="bg-warning/10">
+                    {margen == null ? (
+                      <span className="text-muted-foreground">—</span>
+                    ) : (
+                      <span className="font-mono font-semibold text-warning-strong">
+                        {margen.toFixed(2)} %
+                      </span>
+                    )}
+                  </Td>
+                  <Td>{p.categoria_nombre || "—"}</Td>
+                  <Td>{p.marca_nombre || "—"}</Td>
+                  <Td>
+                    {p.proveedor_nombre ? (
+                      <span className="flex items-center gap-1.5">
+                        <span className="truncate">{p.proveedor_nombre}</span>
+                        {(p.proveedores?.length ?? 0) > 1 && (
+                          <span
+                            className="shrink-0 rounded bg-muted px-1 py-px text-[10px] font-medium text-muted-foreground"
+                            title={(p.proveedores || []).map((x) => x.nombre).join(", ")}
+                          >
+                            +{p.proveedores!.length - 1}
+                          </span>
+                        )}
+                      </span>
+                    ) : (
+                      <span className="text-muted-foreground">—</span>
+                    )}
+                  </Td>
                   <Td>
                     <StatusBadge status={getEstado(p)} />
                   </Td>

@@ -3,7 +3,8 @@ export const dynamic = 'force-dynamic';
 import { NextResponse } from "next/server";
 import { requireSession } from "@/lib/auth-server";
 import { query, queryOne } from "@/lib/db";
-import { preciosDeProducto } from "@/lib/money";
+import { preciosDeProducto, reglasConversion } from "@/lib/money";
+import { getConfiguracionGlobal } from "@/lib/global-config";
 
 // Expresión SQL: unidades de la moneda de COMPRA del producto (alias `p`) por 1
 // USD. `costo_base` está en `moneda_costo_id` (NULL = `moneda_base_id`), así que
@@ -21,6 +22,12 @@ const TASA_USD_COSTO_PROD = `
   ), 1)
 `;
 
+// Costo por unidad en USD: el CPP promedio ponderado (costo_promedio_base ya
+// está en la moneda base del sistema) o, solo legacy, costo_base convertido.
+const COSTO_UNIT_USD_PRODUCTO = `
+  COALESCE(NULLIF(p.costo_promedio_base, 0), p.costo_base / NULLIF(${TASA_USD_COSTO_PROD}, 0))
+`;
+
 export async function GET(request: Request) {
   try {
     await requireSession();
@@ -31,6 +38,11 @@ export async function GET(request: Request) {
     const fechaFin = searchParams.get("fecha_fin");
 
     const monedas = await query(`SELECT * FROM monedas WHERE activo = true ORDER BY es_base DESC, codigo ASC, id ASC`);
+
+    // Reglas del motor: los precios por moneda de los productos del reporte se
+    // derivan con el método configurado (costo=compras, precio=ventas), igual
+    // que el listado de productos y las compras.
+    const cfgGlobal = await getConfiguracionGlobal();
 
     const reportesData: any = {};
 
@@ -164,9 +176,10 @@ export async function GET(request: Request) {
           `SELECT id, codigo, simbolo, tasa, tasa_ref_moneda_id, decimales, es_base, activo, usa_tasa_usd_directa, tasa_usd_directa FROM monedas ORDER BY es_base DESC, codigo ASC, id ASC`
         );
         const baseSistemaReporte = catalogoReporte.find((m: any) => m.es_base) || catalogoReporte[0];
+        const reglasReporte = reglasConversion(cfgGlobal, catalogoReporte);
         const productosConPrecios = (productos as any[]).map((p) => ({
           ...p,
-          precios: preciosDeProducto(p, catalogoReporte, baseSistemaReporte),
+          precios: preciosDeProducto(p, catalogoReporte, baseSistemaReporte, reglasReporte),
         }));
 
         // El valor del inventario suma el costo de los productos del reporte
@@ -174,7 +187,7 @@ export async function GET(request: Request) {
         // su propia moneda de compra (`moneda_costo_id`, que puede diferir de la
         // de venta). Cuando no hay moneda de costo propia el factor es 1.
         const valorInventario = await queryOne(`
-          SELECT COALESCE(SUM(p.stock * p.costo_base / NULLIF(${TASA_USD_COSTO_PROD}, 0) * ${tasaUsdReporte}), 0) as valor_base
+          SELECT COALESCE(SUM(p.stock * ${COSTO_UNIT_USD_PRODUCTO} * ${tasaUsdReporte}), 0) as valor_base
           FROM productos p
           WHERE p.activo = true
             AND COALESCE(p.moneda_base_id, (SELECT id FROM monedas WHERE es_base = true LIMIT 1)) = '${moneda.id}'
@@ -223,7 +236,7 @@ export async function GET(request: Request) {
         const ganancia = await queryOne(`
           SELECT 
             COALESCE(SUM(v.subtotal), 0) as total_ingresos,
-            COALESCE(SUM(vi.cantidad * p.costo_base / NULLIF(${TASA_USD_COSTO_PROD}, 0) * (v.total / NULLIF(v.total_base, 0))), SUM(v.subtotal) * 0.7) as total_costos
+            COALESCE(SUM(vi.cantidad * ${COSTO_UNIT_USD_PRODUCTO} * (v.total / NULLIF(v.total_base, 0))), SUM(v.subtotal) * 0.7) as total_costos
           FROM ventas v
           JOIN venta_items vi ON v.id = vi.venta_id
           JOIN productos p ON vi.producto_id = p.id
@@ -251,7 +264,7 @@ export async function GET(request: Request) {
         };
       } else if (tipo === "tops") {
         const topProductos = await query(`
-          SELECT p.nombre, p.codigo, SUM(vi.cantidad) as cantidad_vendida, SUM(vi.subtotal) as total_ingresos
+          SELECT p.nombre, p.codigo, SUM(vi.cantidad) as cantidad_vendida, SUM(vi.subtotal - vi.descuento) as total_ingresos
           FROM venta_items vi
           JOIN ventas v ON vi.venta_id = v.id
           JOIN productos p ON vi.producto_id = p.id
@@ -265,7 +278,7 @@ export async function GET(request: Request) {
 
         const topProductosRentables = await query(`
           SELECT p.nombre, 
-                 SUM(vi.subtotal) - SUM(vi.cantidad * p.costo_base / NULLIF(${TASA_USD_COSTO_PROD}, 0) * (v.total / NULLIF(v.total_base, 0))) as ganancia
+                 SUM(vi.subtotal - vi.descuento) - SUM(vi.cantidad * ${COSTO_UNIT_USD_PRODUCTO} * (v.total / NULLIF(v.total_base, 0))) as ganancia
           FROM venta_items vi
           JOIN ventas v ON vi.venta_id = v.id
           JOIN productos p ON vi.producto_id = p.id

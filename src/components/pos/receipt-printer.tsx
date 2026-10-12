@@ -16,6 +16,8 @@ interface ReceiptProps {
     cantidad: number;
     precio_unit: number;
     subtotal: number;
+    /** Descuento de la línea (monto plano en la moneda de la venta). */
+    descuento?: number;
   }>;
   subtotal: number;
   impuesto: number;
@@ -103,10 +105,13 @@ export const ReceiptPrinter = forwardRef<HTMLDivElement, ReceiptProps>(
                 <td style={{ paddingBottom: "3px", verticalAlign: "top" }}>
                   {item.producto_nombre}
                   <div style={{ fontSize: "9px" }}>{monedaSimbolo}{fmt(item.precio_unit, monedaCodigo)} c/u</div>
+                  {(item.descuento ?? 0) > 0.009 && (
+                    <div style={{ fontSize: "9px" }}>Desc. -{monedaSimbolo}{fmt(item.descuento ?? 0, monedaCodigo)}</div>
+                  )}
                 </td>
                 <td style={{ textAlign: "center", paddingBottom: "3px", verticalAlign: "top" }}>{item.cantidad}</td>
                 <td style={{ textAlign: "right", paddingBottom: "3px", verticalAlign: "top" }}>
-                  {monedaSimbolo}{fmt(item.subtotal, monedaCodigo)}
+                  {monedaSimbolo}{fmt(item.subtotal - (item.descuento ?? 0), monedaCodigo)}
                 </td>
               </tr>
             ))}

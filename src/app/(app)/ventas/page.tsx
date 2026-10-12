@@ -2,18 +2,18 @@
 
 import { useState, useEffect, useCallback, useMemo } from "react";
 import { useRouter } from "next/navigation";
-import { Plus, Eye, Trash2, Download, Filter, RotateCcw, DollarSign } from "lucide-react";
+import { Plus, Eye, Trash2, Download, Filter, RotateCcw, DollarSign, Check } from "lucide-react";
 import { Badge, StatusBadge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { PageHeader } from "@/components/ui/page-header";
 import { SearchBar } from "@/components/ui/search-bar";
 import { Table, Td, Tr, HeaderConfig } from "@/components/ui/table";
 import { VentaDetailModal } from "@/components/venta/venta-detail-modal";
+import { VentaPagoModal } from "@/components/venta/venta-pago-modal";
 import { RetornoDirectoModal } from "@/components/retorno/retorno-directo-modal";
-import { AbonoModal } from "@/components/credito/abono-modal";
 import { useToast } from "@/components/ui/toast";
 import { useConfirm } from "@/components/ui/confirm-dialog";
-import { fmt, fmtDate } from "@/lib/format";
+import { fmt, fmtDate, fmtHora } from "@/lib/format";
 import * as XLSX from "xlsx";
 
 interface Venta {
@@ -24,6 +24,7 @@ interface Venta {
   cliente_nombre: string | null;
   tipo_pago: string | null;
   fecha: string;
+  creado_en: string;
   moneda_id: string;
   moneda_codigo: string;
   moneda_simbolo: string;
@@ -74,9 +75,9 @@ export default function VentasPage() {
   const [retornoOpen, setRetornoOpen] = useState(false);
   const [retornoVenta, setRetornoVenta] = useState<Venta | null>(null);
 
-  // Abono modal
-  const [abonoOpen, setAbonoOpen] = useState(false);
-  const [abonoCredito, setAbonoCredito] = useState<any>(null);
+  // Pago / Abono modal
+  const [pagoOpen, setPagoOpen] = useState(false);
+  const [pagoVenta, setPagoVenta] = useState<Venta | null>(null);
 
   // Sorting
   const [sortKey, setSortKey] = useState<string>("fecha");
@@ -127,6 +128,19 @@ export default function VentasPage() {
 
     if (sortKey) {
       list = [...list].sort((a, b) => {
+        // `fecha` es solo el día: para ordenar por hora (ventas del mismo día)
+        // se desempata con `creado_en`, el momento real de la venta.
+        if (sortKey === "fecha") {
+          let diff =
+            (Date.parse(String(a.fecha ?? "")) || 0) - (Date.parse(String(b.fecha ?? "")) || 0);
+          if (diff === 0) {
+            diff =
+              (Date.parse(String(a.creado_en ?? "")) || 0) -
+              (Date.parse(String(b.creado_en ?? "")) || 0);
+          }
+          return sortOrder === "asc" ? diff : -diff;
+        }
+
         let aVal: any = a[sortKey as keyof Venta];
         let bVal: any = b[sortKey as keyof Venta];
 
@@ -157,10 +171,9 @@ export default function VentasPage() {
     { key: "fecha", label: "Fecha", sortable: true },
     { key: "items_count", label: "Ítems", sortable: true },
     { key: "total", label: "Total", sortable: true },
-    "Moneda",
     { key: "metodo_pago_nombre", label: "Método Pago", sortable: true },
-    { key: "caja_nombre", label: "Caja", sortable: true },
     { key: "estado", label: "Estado", sortable: true },
+    "Retorno",
     "Acciones",
   ];
 
@@ -178,8 +191,7 @@ export default function VentasPage() {
       Total: parseFloat(String(v.total)),
       Moneda: v.moneda_codigo,
       "Método de Pago": v.metodo_pago_nombre || "N/A",
-      Caja: v.caja_nombre || "N/A",
-      Estado: v.estado,
+      Estado: v.tipo_pago === "Credito" && parseFloat(String(v.credito_saldo ?? 0)) > 0.009 ? "Pendiente" : v.estado,
     }));
 
     const worksheet = XLSX.utils.json_to_sheet(rows);
@@ -192,6 +204,11 @@ export default function VentasPage() {
   const openDetail = (venta: Venta) => {
     setSelectedVenta(venta);
     setDetailOpen(true);
+  };
+
+  const openPago = (venta: Venta) => {
+    setPagoVenta(venta);
+    setPagoOpen(true);
   };
 
   const handleDelete = async (id: string) => {
@@ -280,66 +297,55 @@ export default function VentasPage() {
                 <span className="font-medium">{v.cliente_nombre || v.cliente || "Consumidor Final"}</span>
               </Td>
               <Td>
-                <StatusBadge status={v.tipo_pago === "Credito" ? "Crédito" : "Contado"} />
+                <StatusBadge status={v.tipo_pago === "Credito" ? "Crédito" : "Contado"} size="pill" />
               </Td>
-              <Td>{fmtDate(v.fecha)}</Td>
+              <Td>
+                <div className="leading-tight">
+                  <div className="whitespace-nowrap">{fmtDate(v.fecha)}</div>
+                  <div className="text-[11px] text-muted-foreground">{fmtHora(v.creado_en)}</div>
+                </div>
+              </Td>
               <Td>
                 <span className="font-mono">{v.items_count}</span>
               </Td>
               <Td>
                 <span className="font-mono font-semibold">{fmt(v.total, v.moneda_codigo)}</span>
               </Td>
-              <Td>
-                <Badge label={`${v.moneda_simbolo} ${v.moneda_codigo}`} variant="info" />
-              </Td>
               <Td>{v.metodo_pago_nombre || "—"}</Td>
-              <Td>{v.caja_nombre || "—"}</Td>
               <Td>
-                <StatusBadge status={v.estado} />
+                {v.estado === "Anulada" ? (
+                  <StatusBadge status={v.estado} size="pill" />
+                ) : v.tipo_pago === "Credito" && parseFloat(String(v.credito_saldo ?? 0)) > 0.009 ? (
+                  <button
+                    type="button"
+                    onClick={() => openPago(v)}
+                    className="inline-flex items-center gap-1.5 rounded-full bg-red-600 hover:bg-red-700 active:scale-95 text-white text-xs font-bold px-3.5 py-1.5 shadow-sm transition-all cursor-pointer"
+                    title={`Abonar a la venta (Saldo: ${fmt(parseFloat(String(v.credito_saldo ?? 0)), v.moneda_codigo)})`}
+                  >
+                    <DollarSign size={13} />
+                    Pagar
+                  </button>
+                ) : (
+                  <StatusBadge status="Pagada" size="pill" icon={<Check size={13} />} />
+                )}
+              </Td>
+              <Td>
+                <button
+                  type="button"
+                  onClick={() => openRetorno(v)}
+                  className="inline-flex items-center gap-1.5 rounded-full border border-border bg-card px-3.5 py-1.5 text-xs font-bold text-muted-foreground shadow-sm transition-all hover:bg-accent hover:text-foreground active:scale-95 cursor-pointer"
+                  title="Retornar productos"
+                  aria-label="Retornar productos"
+                >
+                  <RotateCcw size={13} />
+                  Retornar
+                </button>
               </Td>
               <Td>
                 <div className="flex items-center gap-1">
                   <Button variant="ghost" size="icon" onClick={() => openDetail(v)} aria-label="Ver">
                     <Eye size={14} />
                   </Button>
-                  <Button
-                    variant="ghost"
-                    size="icon"
-                    onClick={() => openRetorno(v)}
-                    aria-label="Retornar"
-                    title="Retornar productos"
-                  >
-                    <RotateCcw size={14} />
-                  </Button>
-                  {v.credito_id && parseFloat(String(v.credito_saldo ?? 0)) > 0 && (
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      className="text-emerald-500 hover:text-emerald-600 hover:bg-emerald-50 dark:hover:bg-emerald-950/30"
-                      onClick={() => {
-                        setAbonoCredito({
-                          id: v.credito_id,
-                          numero: v.credito_numero || "",
-                          cliente_id: v.cliente_id || 0,
-                          cliente_nombre: v.cliente_nombre || v.cliente || "",
-                          venta_numero: v.numero,
-                          fecha: v.fecha,
-                          monto_total: v.credito_monto_total || v.total,
-                          saldo: v.credito_saldo || 0,
-                          abonado: parseFloat(String(v.credito_monto_total || v.total)) - parseFloat(String(v.credito_saldo || 0)),
-                          estado: v.credito_estado || "Pendiente",
-                          moneda_id: v.moneda_id,
-                          moneda_codigo: v.moneda_codigo,
-                          moneda_simbolo: v.moneda_simbolo,
-                        });
-                        setAbonoOpen(true);
-                      }}
-                      aria-label="Abonar"
-                      title="Registrar Abono"
-                    >
-                      <DollarSign size={14} />
-                    </Button>
-                  )}
                   <Button
                     variant="destructive"
                     size="icon"
@@ -395,18 +401,15 @@ export default function VentasPage() {
         }}
       />
 
-      <AbonoModal
-        open={abonoOpen}
-        credito={abonoCredito}
+      <VentaPagoModal
+        open={pagoOpen}
+        venta={pagoVenta}
         onClose={() => {
-          setAbonoOpen(false);
-          setAbonoCredito(null);
+          setPagoOpen(false);
+          setPagoVenta(null);
         }}
-        onSuccess={(msg) => {
-          setAbonoOpen(false);
-          setAbonoCredito(null);
+        onSuccess={() => {
           fetchData();
-          toast(msg, "success");
         }}
       />
     </div>

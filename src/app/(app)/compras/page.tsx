@@ -2,13 +2,14 @@
 
 import { useState, useEffect, useCallback, useMemo } from "react";
 import { useRouter } from "next/navigation";
-import { Plus, Eye, Trash2, RotateCcw } from "lucide-react";
+import { Plus, Eye, Trash2, RotateCcw, DollarSign } from "lucide-react";
 import { Badge, StatusBadge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { PageHeader } from "@/components/ui/page-header";
 import { Pagination } from "@/components/ui/pagination";
 import { Table, Td, Tr, HeaderConfig } from "@/components/ui/table";
 import { CompraDetailModal } from "@/components/compra/compra-detail-modal";
+import { CompraPagoModal } from "@/components/compra/compra-pago-modal";
 import { RetornoDirectoModal } from "@/components/retorno/retorno-directo-modal";
 import { useToast } from "@/components/ui/toast";
 import { useConfirm } from "@/components/ui/confirm-dialog";
@@ -20,6 +21,7 @@ interface Compra {
   proveedor_id: string;
   proveedor_nombre: string;
   fecha: string;
+  creado_en: string | null;
   moneda_codigo: string;
   moneda_simbolo: string;
   metodo_pago_nombre: string | null;
@@ -31,6 +33,9 @@ interface Compra {
   observaciones: string | null;
   referencia: string | null;
   items_count: number | string;
+  // Nuevos campos de pago
+  estado_pago?: 'pagado' | 'parcial' | 'pendiente';
+  saldo_pendiente?: number | string;
 }
 
 interface CompraItem {
@@ -58,6 +63,10 @@ export default function ComprasPage() {
   // Detail modal
   const [detailOpen, setDetailOpen] = useState(false);
   const [selectedCompra, setSelectedCompra] = useState<Compra | null>(null);
+
+  // Pago / Abono modal
+  const [pagoOpen, setPagoOpen] = useState(false);
+  const [pagoCompra, setPagoCompra] = useState<Compra | null>(null);
 
   // Retorno modal
   const [retornoOpen, setRetornoOpen] = useState(false);
@@ -116,6 +125,15 @@ export default function ComprasPage() {
       }
 
       const comp = String(aVal).localeCompare(String(bVal), undefined, { numeric: true, sensitivity: "base" });
+
+      // Desempate por fecha de REGISTRO: dentro del mismo día (fecha), lo más
+      // recientemente creado va primero (el id es UUID, no sirve para ordenar).
+      if (comp === 0 && sortKey === "fecha") {
+        const aCre = String(a.creado_en ?? "");
+        const bCre = String(b.creado_en ?? "");
+        return sortOrder === "asc" ? aCre.localeCompare(bCre) : bCre.localeCompare(aCre);
+      }
+
       return sortOrder === "asc" ? comp : -comp;
     });
   }, [compras, sortKey, sortOrder]);
@@ -126,15 +144,20 @@ export default function ComprasPage() {
     { key: "fecha", label: "Fecha", sortable: true },
     { key: "items_count", label: "Ítems", sortable: true },
     { key: "total", label: "Total", sortable: true },
-    "Moneda",
     { key: "metodo_pago_nombre", label: "Método Pago", sortable: true },
     { key: "estado", label: "Estado", sortable: true },
+    "Pago",
     "Acciones",
   ];
 
   const openDetail = (compra: Compra) => {
     setSelectedCompra(compra);
     setDetailOpen(true);
+  };
+
+  const openPago = (compra: Compra) => {
+    setPagoCompra(compra);
+    setPagoOpen(true);
   };
 
   const handleDelete = async (id: string) => {
@@ -216,12 +239,24 @@ export default function ComprasPage() {
               <Td>
                 <span className="font-mono font-semibold">{fmt(c.total, c.moneda_codigo)}</span>
               </Td>
-              <Td>
-                <Badge label={`${c.moneda_simbolo} ${c.moneda_codigo}`} variant="info" />
-              </Td>
               <Td>{c.metodo_pago_nombre || "—"}</Td>
               <Td>
                 <StatusBadge status={c.estado} />
+              </Td>
+              <Td>
+                {Number(c.saldo_pendiente || 0) > 0.001 || c.estado_pago === 'parcial' || c.estado_pago === 'pendiente' ? (
+                  <button
+                    type="button"
+                    onClick={() => openPago(c)}
+                    className="inline-flex items-center gap-1.5 rounded-full bg-red-600 hover:bg-red-700 active:scale-95 text-white text-xs font-bold px-3.5 py-1.5 shadow-sm transition-all cursor-pointer"
+                    title={`Abonar a la compra (Saldo: ${fmt(Number(c.saldo_pendiente || 0), "USD")})`}
+                  >
+                    <DollarSign size={13} />
+                    Pagar
+                  </button>
+                ) : (
+                  <StatusBadge status="Pagada" />
+                )}
               </Td>
               <Td>
                 <div className="flex items-center gap-1">
@@ -269,6 +304,18 @@ export default function ComprasPage() {
           setSelectedCompra(null);
         }}
         onDelete={handleDelete}
+      />
+
+      <CompraPagoModal
+        open={pagoOpen}
+        compra={pagoCompra}
+        onClose={() => {
+          setPagoOpen(false);
+          setPagoCompra(null);
+        }}
+        onSuccess={() => {
+          fetchData();
+        }}
       />
 
       <RetornoDirectoModal

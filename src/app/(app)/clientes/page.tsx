@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect, useCallback, useMemo } from "react";
+import { useRouter } from "next/navigation";
 import { Plus } from "lucide-react";
 import { ActionButtons } from "@/components/ui/action-buttons";
 import { StatusBadge } from "@/components/ui/badge";
@@ -50,6 +51,7 @@ type ModalMode = "create" | "edit" | "view" | "delete";
 const PAGE_SIZE = 20;
 
 export default function ClientesPage() {
+  const router = useRouter();
   const [clientes, setClientes] = useState<Cliente[]>([]);
   const [pagination, setPagination] = useState<PaginationInfo>({ page: 1, limit: PAGE_SIZE, total: 0, totalPages: 0 });
   const [loading, setLoading] = useState(true);
@@ -191,7 +193,11 @@ export default function ClientesPage() {
         ) : (
           filteredClientes.map((c: Cliente) => {
             return (
-              <Tr key={c.id}>
+              <Tr
+                key={c.id}
+                onClick={() => router.push(`/clientes/${c.id}`)}
+                className="cursor-pointer"
+              >
                 <Td>
                   <span className="font-semibold">{c.nombre}</span>
                 </Td>
@@ -215,9 +221,9 @@ export default function ClientesPage() {
                 <Td>
                   <StatusBadge status={c.activo ? "Activo" : "Inactivo"} />
                 </Td>
-                <Td>
+                <Td onClick={(e) => e.stopPropagation()}>
                   <ActionButtons
-                    onView={() => openModal("view", c)}
+                    onView={() => router.push(`/clientes/${c.id}`)}
                     onEdit={() => openModal("edit", c)}
                     onDelete={() => openModal("delete", c)}
                   />

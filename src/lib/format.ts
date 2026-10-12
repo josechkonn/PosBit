@@ -12,6 +12,32 @@ export const fmt = (n: number | string, currency = "USD") => {
   }
 };
 
+/**
+ * Formatea un número según los decimales de la moneda (sin símbolo de moneda,
+ * solo el número). Úsalo en inputs, tablas y badges donde el contexto ya
+ * indique la moneda (ej. "Costo (USD)").
+ */
+export const fmtMoneda = (n: number | string, decimales = 2) => {
+  const num = typeof n === "string" ? parseFloat(n) : n;
+  if (isNaN(num)) return "0";
+  return new Intl.NumberFormat("es-BO", {
+    minimumFractionDigits: decimales,
+    maximumFractionDigits: decimales,
+  }).format(num);
+};
+
+/**
+ * Formatea con símbolo y decimales de la moneda. Úsalo en vistas/resúmenes.
+ */
+export const fmtMonedaConSimbolo = (n: number | string, simbolo: string, decimales = 2) => {
+  const num = typeof n === "string" ? parseFloat(n) : n;
+  if (isNaN(num)) return `${simbolo} 0`;
+  return `${simbolo} ${new Intl.NumberFormat("es-BO", {
+    minimumFractionDigits: decimales,
+    maximumFractionDigits: decimales,
+  }).format(num)}`;
+};
+
 export const fmtDate = (d: string | Date) => {
   const date = typeof d === "string" ? new Date(d) : d;
   return date.toLocaleDateString("es-BO", {
@@ -30,6 +56,14 @@ export const fmtDateTime = (d: string | Date) => {
     hour: "2-digit",
     minute: "2-digit",
   });
+};
+
+/** Solo la hora (HH:MM) de un timestamp; útil para ventas registradas el mismo día. */
+export const fmtHora = (d: string | Date | null | undefined) => {
+  if (!d) return "";
+  const date = typeof d === "string" ? new Date(d) : d;
+  if (isNaN(date.getTime())) return "";
+  return date.toLocaleTimeString("es-BO", { hour: "2-digit", minute: "2-digit" });
 };
 
 export const fmtNumber = (n: number | string) => {

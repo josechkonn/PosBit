@@ -56,8 +56,8 @@ export async function ensureSchemaAndMigrate(customPool?: Pool | PoolClient): Pr
 
       let sqlContent = "";
       for (const p of possiblePaths) {
-        if (p && fs.existsSync(p)) {
-          sqlContent = fs.readFileSync(p, "utf-8");
+        if (p && fs.existsSync(/*turbopackIgnore: true*/ p)) {
+          sqlContent = fs.readFileSync(/*turbopackIgnore: true*/ p, "utf-8");
           break;
         }
       }

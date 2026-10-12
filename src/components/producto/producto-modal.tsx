@@ -1,21 +1,25 @@
 "use client";
 
-import { useState, useEffect, useMemo } from "react";
+import { useState, useEffect, useMemo, useCallback } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { Check, ChevronLeft, ChevronRight, Loader2, Plus } from "lucide-react";
+import { Check, ChevronLeft, ChevronRight, Loader2, Plus, Trash2 } from "lucide-react";
 import { Modal } from "@/components/ui/modal";
 import { CategoriaModal } from "@/components/categoria/categoria-modal";
 import { MarcaModal } from "@/components/marca/marca-modal";
 import { ProveedorModal } from "@/components/proveedor/proveedor-modal";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
+import { Label, Field } from "@/components/ui/label";
 import { Combobox } from "@/components/ui/combobox";
+import { ComboboxMulti } from "@/components/ui/combobox-multi";
+import { ComboboxCreatable } from "@/components/ui/combobox-creatable";
+import { Table, Tr, Td } from "@/components/ui/table";
 import { Switch } from "@/components/ui/switch";
 import { StatusBadge } from "@/components/ui/badge";
 import { Alert } from "@/components/ui/alert";
 import { fmt, fmtDateTime } from "@/lib/format";
-import { convertir, redondear } from "@/lib/money";
+import { redondear, precioUnidadDesdePresentacion, margenSobreCosto, precioPresentacionSegunModo, type ModoVentaPresentacion } from "@/lib/money";
+import { useReglasConversion } from "@/lib/use-reglas-conversion";
 
 interface Moneda {
   id: string;
@@ -44,6 +48,7 @@ interface Producto {
   iva_incluido: boolean;
   precio_base: number;
   costo_base: number;
+  margen_ganancia?: number;
   categoria_nombre: string | null;
   marca_nombre: string | null;
   precios: Array<{
@@ -54,6 +59,42 @@ interface Producto {
     costo: number;
     es_base: boolean;
   }>;
+  presentaciones?: Array<{
+    id: string;
+    nombre: string;
+    unidades: number;
+    activo: boolean;
+    precio: number;
+    costo: number;
+    modo_venta?: ModoVentaPresentacion;
+    precio_override?: number | null;
+    margen_override?: number | null;
+  }>;
+  /** CPP por unidad en la moneda de COMPRA del producto (0 si aún no hay compras). */
+  costo_promedio?: number | null;
+  /** Proveedores asociados (relación N:M). */
+  proveedores?: Array<{ id: string | number; nombre: string }>;
+}
+
+/** Fila de presentación en el formulario (unidades como string para el input). */
+/**
+ * Fila del editor de presentaciones.
+ *
+ * El COSTO nunca se guarda por presentación: se deriva del CPP. Solo el PRECIO
+ * puede ser propio, según `modo_venta`:
+ *   derivado → precio = precio_unidad × unidades (sigue el comportamiento actual)
+ *   fijo     → precio = precio_override (mayorista a precio acordado)
+ *   margen   → precio = CPP × unidades × (1 + margen_override/100)
+ */
+interface PresentacionForm {
+  key: string;
+  id?: string;
+  nombre: string;
+  unidades: string;
+  activo: boolean;
+  modo_venta: ModoVentaPresentacion;
+  precio_override: string;
+  margen_override: string;
 }
 
 interface Categoria {
@@ -85,9 +126,166 @@ interface ProductoModalProps {
 
 const STEPS = [
   { id: 1, label: "Información" },
-  { id: 2, label: "Precios" },
+  { id: 2, label: "Precios y presentaciones" },
   { id: 3, label: "Existencias" },
 ];
+
+/** Nombres comunes de presentaciones sugeridos en el buscador (se puede teclear cualquiera). */
+const PRESENTACIONES_SUGERIDAS = [
+  "Caja",
+  "Bolsa",
+  "Paquete",
+  "Docena",
+  "Media docena",
+  "Fardo",
+  "Blíster",
+  "Bulto",
+  "Saco",
+  "Kilo",
+  "Litro",
+  "Galón",
+];
+
+interface PresentacionPriceInputProps {
+  value: number;
+  onChange: (val: string) => void;
+  decimales: number;
+  disabled?: boolean;
+  placeholder?: string;
+  className?: string;
+}
+
+function PresentacionPriceInput({
+  value,
+  onChange,
+  decimales,
+  disabled,
+  placeholder = "Calculado...",
+  className,
+}: PresentacionPriceInputProps) {
+  const [isFocused, setIsFocused] = useState(false);
+  const [localVal, setLocalVal] = useState("");
+
+  useEffect(() => {
+    if (!isFocused) {
+      setLocalVal(value > 0 ? String(value) : "");
+    }
+  }, [value, isFocused]);
+
+  return (
+    <Input
+      type="number"
+      min="0"
+      step={1 / Math.pow(10, decimales)}
+      disabled={disabled}
+      value={isFocused ? localVal : value > 0 ? String(value) : ""}
+      onFocus={() => {
+        setIsFocused(true);
+        setLocalVal(value > 0 ? String(value) : "");
+      }}
+      onBlur={() => {
+        setIsFocused(false);
+        setLocalVal(value > 0 ? String(value) : "");
+      }}
+      onChange={(e) => {
+        const v = e.target.value;
+        setLocalVal(v);
+        onChange(v);
+      }}
+      placeholder={placeholder}
+      className={className}
+    />
+  );
+}
+
+/**
+ * Campo de existencias que acepta UNIDADES o cualquier presentación.
+ *
+ * El inventario siempre vive en unidades, así que el selector no cambia lo que
+ * se guarda: solo cambia cómo se teclea. Escribir `2` en "Caja ×20" guarda 40
+ * unidades, y el texto auxiliar muestra siempre el equivalente para que no
+ * haya que hacer la cuenta mental.
+ */
+function StockConPresentaciones({
+  valor,
+  total,
+  unidadActual,
+  presentaciones,
+  factor,
+  onValor,
+  onUnidad,
+  label,
+  placeholder = "0",
+}: {
+  valor: string;
+  /** Total en UNIDADES (lo que se guarda). */
+  total: number;
+  unidadActual: string;
+  presentaciones: PresentacionForm[];
+  factor: (key: string) => number;
+  onValor: (texto: string) => void;
+  onUnidad: (key: string) => void;
+  label: string;
+  placeholder?: string;
+}) {
+  // Solo se ofrecen las presentaciones con unidades válidas (las que el
+  // servidor exigiría); el resto no serviría para convertir nada.
+  const opciones = [
+    { key: "", nombre: "Unidades", u: 1 },
+    ...presentaciones.map((p) => ({
+      key: p.key,
+      nombre: p.nombre.trim() || "—",
+      u: factor(p.key),
+    })),
+  ].filter((o, i, arr) => o.u > 0 && arr.findIndex((x) => x.key === o.key) === i);
+
+  const factorActual = factor(unidadActual);
+  const esCaja = factorActual > 1;
+  // El redondeo a entero puede "perder" fracciones (0.03 cajas × 20 = 0.6 → 1).
+  const exacto = (parseFloat(valor) || 0) * factorActual;
+  const seRedondeo = esCaja && Math.abs(exacto - Math.round(exacto)) > 1e-9;
+
+  return (
+    <div className="space-y-1">
+      <Label>{label}</Label>
+      <div className="flex gap-2">
+        <Input
+          type="number"
+          min="0"
+          step="any"
+          value={valor}
+          onChange={(e) => onValor(e.target.value)}
+          placeholder={placeholder}
+          className="flex-1 font-mono"
+        />
+        <select
+          value={unidadActual}
+          onChange={(e) => onUnidad(e.target.value)}
+          aria-label="Unidad de las existencias"
+          className="h-9 w-[9.5rem] shrink-0 rounded-md border border-border bg-background px-2 text-xs text-foreground focus:border-primary focus:outline-none"
+        >
+          {opciones.map((o) => (
+            <option key={o.key} value={o.key}>
+              {o.nombre}
+              {o.u > 1 ? ` (×${o.u})` : ""}
+            </option>
+          ))}
+        </select>
+      </div>
+      <p className="text-xs text-muted-foreground">
+        {esCaja ? (
+          <>
+            ={" "}
+            <span className="font-mono font-medium text-foreground">{total}</span> unidades
+            {seRedondeo && " (se redondea a entero)"}
+          </>
+        ) : (
+          "El inventario siempre se guarda en unidades."
+        )}
+      </p>
+    </div>
+  );
+}
 
 export function ProductoModal({ open, mode, producto, monedas: monedasProp, defaultProveedorId, onClose, onSuccess }: ProductoModalProps) {
   const [step, setStep] = useState(1);
@@ -108,6 +306,11 @@ export function ProductoModal({ open, mode, producto, monedas: monedasProp, defa
     return internalMonedas;
   }, [monedasProp, internalMonedas]);
 
+  // Reglas del motor Set & Forget: el COSTO de compra se convierte con el
+  // método de compras y el PRECIO de venta con el de ventas (directa o
+  // triangulación), igual que calculan las APIs y las compras.
+  const { convertirProducto } = useReglasConversion(effectiveMonedas);
+
   // Form fields
   const [codigo, setCodigo] = useState("");
   const [nombre, setNombre] = useState("");
@@ -115,12 +318,66 @@ export function ProductoModal({ open, mode, producto, monedas: monedasProp, defa
   const [imagen, setImagen] = useState<string | null>(null);
   const [categoriaId, setCategoriaId] = useState("");
   const [marcaId, setMarcaId] = useState("");
-  const [proveedorId, setProveedorId] = useState("");
-  const [stock, setStock] = useState(0);
+  const [proveedorIds, setProveedorIds] = useState<string[]>([]);
   const [stockMinimo, setStockMinimo] = useState(5);
   const [activo, setActivo] = useState(true);
   const [ivaIncluido, setIvaIncluido] = useState(true);
   const [pendingImageFile, setPendingImageFile] = useState<File | null>(null);
+
+  // ── Existencias: se captura en unidades O en una presentación ──────────────
+  // El inventario SIEMPRE vive en unidades. `stock` es ese total (lo que se
+  // guarda) y `stockTexto` es lo que se teclea, en la unidad que marque
+  // `stockUnidadId`. Se separan para que escribir "0.03" no se reescriba a
+  // "0.05" al redondear, y para que borrar la presentación seleccionada no
+  // cambie el total en silencio.
+  const [stock, setStock] = useState(0);
+  const [stockTexto, setStockTexto] = useState("0");
+  const [stockUnidadId, setStockUnidadId] = useState<string>("");
+
+  // Presentaciones (Caja, Bolsa...). La unidad base es implícita (factor 1).
+  const [presentaciones, setPresentaciones] = useState<PresentacionForm[]>([]);
+
+  /** Unidades que representa una presentación del formulario (1 si no hay). */
+  const factorDe = useCallback(
+    (key: string): number => {
+      const p = presentaciones.find((x) => x.key === key);
+      const u = p ? parseInt(p.unidades, 10) : NaN;
+      return Number.isInteger(u) && u > 1 ? u : 1;
+    },
+    [presentaciones]
+  );
+
+  const factorStock = factorDe(stockUnidadId);
+
+  /** Teclear en la unidad vigente recalcula el total en unidades. */
+  const teclearStock = (texto: string) => {
+    setStockTexto(texto);
+    setStock(Math.max(0, Math.round((parseFloat(texto) || 0) * factorDe(stockUnidadId))));
+  };
+
+  /**
+   * Cambia la unidad de captura CONSERVANDO el total. Si hay 40 unidades y se
+   * pasa a "Caja ×20" el campo pasa a 2, no a 40 (que serían 800 unidades).
+   */
+  const cambiarUnidadStock = (key: string) => {
+    const totalActual = stock;
+    const factor = factorDe(key);
+    setStockUnidadId(key);
+    setStockTexto(factor > 1 ? String(redondear(totalActual / factor, 3)) : String(totalActual));
+  };
+
+  // Si se borra la presentación con la que se está capturando, la captura vuelve
+  // a unidades conservando el total. `stock` NO va en las dependencias a
+  // propósito: en este render sigue siendo el total correcto.
+  useEffect(() => {
+    if (stockUnidadId && !presentaciones.some((p) => p.key === stockUnidadId)) {
+      setStockUnidadId("");
+      setStockTexto(String(stock));
+    }
+  }, [presentaciones, stockUnidadId]);
+  // Estado del buscador para agregar presentaciones nuevas
+  const [nuevaPresNombre, setNuevaPresNombre] = useState("");
+  const [nuevaPresUnidades, setNuevaPresUnidades] = useState("2");
 
   // Pricing: cada moneda tiene su precio de venta y su precio de compra. La
   // moneda de VENTA y la de COMPRA se eligen por separado (p. ej. costo en USD
@@ -132,6 +389,9 @@ export function ProductoModal({ open, mode, producto, monedas: monedasProp, defa
   const [preciosPorMoneda, setPreciosPorMoneda] = useState<Record<string, PrecioEntry>>({});
   const [ventaMonedaId, setVentaMonedaId] = useState<string | null>(null);
   const [costoMonedaId, setCostoMonedaId] = useState<string | null>(null);
+  // Margen de ganancia % (regla global de precios): define → autocalcula el
+  // precio de venta; editar el precio a mano → recalcula el margen mostrado.
+  const [margenGanancia, setMargenGanancia] = useState("");
 
   const ventaMoneda = useMemo(
     () => effectiveMonedas.find((m) => m.id === ventaMonedaId),
@@ -144,8 +404,10 @@ export function ProductoModal({ open, mode, producto, monedas: monedasProp, defa
 
   /**
    * Re-calcula `field` en TODAS las monedas a partir de la moneda de referencia
-   * indicada. Los precios se derivan con `convertir` (respeta la arista directa
-   * de referencia, p. ej. COP ↔ BS = 3.2, en modo directo).
+   * indicada. La conversión respeta el método del motor (`convertirProducto`):
+   * el COSTO de compra usa la regla de compras (directa o triangulación) y el
+   * PRECIO de venta la de ventas. En modo directo es la arista directa
+   * (p. ej. COP ↔ BS = 3.2), igual que antes.
    * `limpiar`: si el valor de la referencia está vacío, ¿poner "" en las demás?
    */
   const derivarCampo = (
@@ -166,7 +428,13 @@ export function ProductoModal({ open, mode, producto, monedas: monedasProp, defa
         const current = prev[m.id] || { precioVenta: "", precioCompra: "" };
         const nuevo =
           valor > 0
-            ? convertir(valor, refMoneda, m, effectiveMonedas, dec).toFixed(dec)
+            ? convertirProducto(
+                valor,
+                refMoneda,
+                m,
+                field === "precioCompra" ? "compra" : "venta",
+                dec
+              ).toFixed(dec)
             : limpiar
               ? ""
               : current[field];
@@ -194,11 +462,11 @@ export function ProductoModal({ open, mode, producto, monedas: monedasProp, defa
   /**
    * El precio de compra y el de venta pueden estar en monedas distintas: para
    * compararlos (regla "compra ≤ venta") se convierte el costo a la moneda de
-   * venta con las tasas actuales.
+   * venta con la regla de COMPRAS del motor (directa o triangulación).
    */
   const compraEnVentaMoneda = (compra: number): number => {
     if (!costoMoneda || !ventaMoneda) return compra;
-    return convertir(compra, costoMoneda, ventaMoneda, effectiveMonedas, Number(ventaMoneda.decimales ?? 2));
+    return convertirProducto(compra, costoMoneda, ventaMoneda, "compra", Number(ventaMoneda.decimales ?? 2));
   };
 
   const actualizarPrecio = (monedaId: string, field: "precioVenta" | "precioCompra", value: string) => {
@@ -214,6 +482,201 @@ export function ProductoModal({ open, mode, producto, monedas: monedasProp, defa
     if (!esReferencia) return;
 
     derivarCampo(field, monedaId, parseFloat(value) || 0, true);
+
+    // Sincronía con el margen %: si cambia el COSTO y el usuario ya definió un
+    // margen, se re-aplica automáticamente al precio de venta; si cambia el
+    // PRECIO DE VENTA a mano, el margen mostrado se recalcula del cociente.
+    const valorNum = parseFloat(value) || 0;
+    if (field === "precioCompra" && valorNum > 0) {
+      if (margenGanancia !== "") {
+        const margen = parseFloat(margenGanancia);
+        if (Number.isFinite(margen) && margen >= 0 && ventaMonedaId) {
+          const costoEnVenta = compraEnVentaMoneda(valorNum);
+          const precioNuevo = redondear(
+            costoEnVenta * (1 + margen / 100),
+            Number(ventaMoneda?.decimales ?? 2)
+          );
+          setPreciosPorMoneda((prev) => ({
+            ...prev,
+            [ventaMonedaId]: { ...prev[ventaMonedaId], precioVenta: String(precioNuevo) },
+          }));
+          derivarCampo("precioVenta", ventaMonedaId, precioNuevo, false);
+        }
+      }
+    } else if (field === "precioVenta" && valorNum > 0) {
+      const costoCompra = costoMonedaId
+        ? parseFloat(preciosPorMoneda[costoMonedaId]?.precioCompra || "") || 0
+        : 0;
+      const costoEnVenta = compraEnVentaMoneda(costoCompra);
+      if (costoEnVenta > 0) {
+        const margenCalc = (valorNum / costoEnVenta - 1) * 100;
+        setMargenGanancia(String(redondear(Math.max(0, margenCalc), 2)));
+      }
+    } else if (valorNum === 0 && field === "precioVenta") {
+      setMargenGanancia("");
+    }
+  };
+
+  /**
+   * Regla global de precios: margen % → precio de venta autocalculado desde el
+   * costo en la moneda de COMPRA, convertido a la moneda de VENTA.
+   */
+  const aplicarMargen = (margen: number) => {
+    if (!ventaMonedaId || !costoMonedaId) return;
+    const costoCompra = parseFloat(preciosPorMoneda[costoMonedaId]?.precioCompra || "") || 0;
+    if (costoCompra <= 0) return;
+    const costoEnVenta = compraEnVentaMoneda(costoCompra);
+    const precioNuevo = redondear(
+      costoEnVenta * (1 + margen / 100),
+      Number(ventaMoneda?.decimales ?? 2)
+    );
+    setPreciosPorMoneda((prev) => ({
+      ...prev,
+      [ventaMonedaId]: { ...prev[ventaMonedaId], precioVenta: String(precioNuevo) },
+    }));
+    derivarCampo("precioVenta", ventaMonedaId, precioNuevo, false);
+  };
+
+  const handleMargenChange = (v: string) => {
+    setMargenGanancia(v);
+    const margen = parseFloat(v);
+    if (Number.isFinite(margen) && margen >= 0) aplicarMargen(margen);
+  };
+
+  // Margen REAL (informativo): rentabilidad efectiva del precio de venta sobre
+  // el costo de compra, ambos en la moneda de VENTA. A diferencia del margen de
+  // arriba (la regla que autocalcula el precio), este refleja lo que quedó tras
+  // una edición manual o el redondeo global. Convierte el costo con el método
+  // configurado (regla de compras), igual que el resto del sistema.
+  const precioVentaRef = parseFloat(preciosPorMoneda[ventaMonedaId ?? ""]?.precioVenta || "") || 0;
+  const costoCompraRef = parseFloat(preciosPorMoneda[costoMonedaId ?? ""]?.precioCompra || "") || 0;
+  const costoEnVentaRef = costoCompraRef > 0 ? compraEnVentaMoneda(costoCompraRef) : 0;
+  const margenReal = margenSobreCosto(precioVentaRef, costoEnVentaRef);
+
+  // Margen real del producto tal como está GUARDADO (modo vista): usa la fila
+  // de la moneda de VENTA (`es_base`) que ya deriva la API con el método global.
+  const filaVentaVista = producto?.precios?.find((p) => p.es_base);
+  const margenRealVista = filaVentaVista
+    ? margenSobreCosto(filaVentaVista.precio, filaVentaVista.costo)
+    : null;
+
+  // ── Presentaciones (Caja, Bolsa...) ──────────────────────────────────────
+  // La unidad es la fuente de verdad: el precio de la presentación se deriva
+  // del precio unitario de la moneda de VENTA. En el formulario ambos son
+  // editables (bidireccional): escribir el precio de la caja reescribe el
+  // unitario y re-deriva las demás monedas.
+  const decVenta = Number(ventaMoneda?.decimales ?? 2);
+  const precioUnidadVenta = () => parseFloat(preciosPorMoneda[ventaMonedaId || ""]?.precioVenta || "") || 0;
+
+  /** Al escribir el precio de una presentación → despeja el precio unitario. */
+  const cambiarPrecioPresentacion = (valor: string, unidades: number) => {
+    if (!ventaMonedaId) return;
+    const trimmed = valor.trim();
+    if (!trimmed || parseFloat(trimmed) <= 0) {
+      actualizarPrecio(ventaMonedaId, "precioVenta", "");
+      return;
+    }
+    const n = parseFloat(trimmed);
+    if (!Number.isFinite(n) || n <= 0 || !Number.isFinite(unidades) || unidades <= 1) return;
+    const unit = precioUnidadDesdePresentacion(n, unidades, decVenta);
+    actualizarPrecio(ventaMonedaId, "precioVenta", unit > 0 ? String(unit) : "");
+  };
+
+  // Costo de presentación (moneda de COMPRA): escribir el costo de la caja
+  // (p. ej. 480) despeja el costo unitario (480 ÷ 24 = 20). El CPP real que
+  // sale del inventario se muestra aparte, como referencia.
+  const decCosto = Number(costoMoneda?.decimales ?? 2);
+  const precioUnidadCosto = () => parseFloat(preciosPorMoneda[costoMonedaId || ""]?.precioCompra || "") || 0;
+
+  /** CPP real del producto por unidad, en la moneda de COMPRA. */
+  const cppReal = () => Number(producto?.costo_promedio) || 0;
+
+  /** Costo de la caja según el CPP (referencia, no editable). */
+  const costoCppDe = (unidades: number) =>
+    unidadesValidas(unidades) ? redondear(cppReal() * unidades, decCosto) : 0;
+
+  /**
+ * Costo por unidad de la presentación, SIEMPRE en la moneda de VENTA (que es
+ * donde vive el precio) para que el margen compare dos números comparables.
+ *
+ * La fuente es el costo de compra que se está editando en el formulario, y se
+ * convierte con `compraEnVentaMoneda` (la misma regla que ya usa el "margen
+ * real" y la validación "compra ≤ venta"). Antes se comparaba contra
+ * `costo_promedio` crudo, que vive en la moneda de COMPRA real del producto:
+ * si el formulario mostraba otra moneda, el margen salía inventado.
+ *
+ * Si no hay costo escrito, se usa el que YA vino convertido desde la API
+ * (`presentacion.costo`, que la API calcula con la moneda real del producto).
+ */
+const costoUnitarioEnVenta = (p: PresentacionForm): number => {
+  const escrito = precioUnidadCosto();
+  if (escrito > 0) return compraEnVentaMoneda(escrito);
+  const deApi = Number(producto?.presentaciones?.find((pr) => pr.id === p.id)?.costo);
+  const u = parseInt(p.unidades, 10);
+  return Number.isFinite(deApi) && deApi > 0 && u > 1 ? deApi / u : 0;
+};
+
+/** Precio de la presentación según su modo, para la vista previa de la tabla. */
+const precioSegunModo = (p: PresentacionForm, unidades: number) =>
+  precioPresentacionSegunModo({
+    unidades,
+    precioUnidad: precioUnidadVenta(),
+    costoUnitario: costoUnitarioEnVenta(p),
+    modo: p.modo_venta,
+    precioOverride: p.precio_override,
+    margenOverride: p.margen_override,
+    decimales: decVenta,
+  });
+
+/** Al escribir el costo de una presentación → despeja el costo unitario. */
+const cambiarPrecioPresentacionCosto = (valor: string, unidades: number) => {
+  if (!costoMonedaId) return;
+  const trimmed = valor.trim();
+  if (!trimmed || parseFloat(trimmed) <= 0) {
+    actualizarPrecio(costoMonedaId, "precioCompra", "");
+    return;
+  }
+  const n = parseFloat(trimmed);
+  if (!Number.isFinite(n) || n <= 0 || !Number.isFinite(unidades) || unidades <= 1) return;
+  const unit = precioUnidadDesdePresentacion(n, unidades, decCosto);
+  actualizarPrecio(costoMonedaId, "precioCompra", unit > 0 ? String(unit) : "");
+};
+
+/** Agrega una presentación desde el buscador (nombre + unidades). */
+  const unidadesValidas = (u: number) => Number.isInteger(u) && u > 1;
+
+const agregarPresentacionDesdePicker = () => {
+    const nombrePres = nuevaPresNombre.trim();
+    const unidadesNum = parseInt(nuevaPresUnidades, 10);
+    if (!nombrePres) {
+      setError("Escribe o elige el nombre de la presentación");
+      return;
+    }
+    if (!Number.isInteger(unidadesNum) || unidadesNum < 2) {
+      setError("Las unidades de la presentación deben ser enteras y mayores a 1");
+      return;
+    }
+    setPresentaciones((prev) => [
+      ...prev,
+      {
+        key: `pres-nueva-${Date.now()}-${Math.random()}`,
+        nombre: nombrePres,
+        unidades: String(unidadesNum),
+        activo: true,
+        modo_venta: "derivado",
+        precio_override: "",
+        margen_override: "",
+      },
+    ]);
+    setNuevaPresNombre("");
+  };
+
+  const actualizarPresentacion = (key: string, cambios: Partial<PresentacionForm>) => {
+    setPresentaciones((prev) => prev.map((p) => (p.key === key ? { ...p, ...cambios } : p)));
+  };
+
+  const eliminarPresentacion = (key: string) => {
+    setPresentaciones((prev) => prev.filter((p) => p.key !== key));
   };
 
   // Load categories, brands, and fallback currencies
@@ -266,7 +729,11 @@ export function ProductoModal({ open, mode, producto, monedas: monedasProp, defa
     } else {
       const previos = proveedores.map((p) => p.id);
       const nueva = (await cargarProveedores()).find((p) => !previos.includes(p.id));
-      if (nueva && !defaultProveedorId) setProveedorId(String(nueva.id));
+      if (nueva) {
+        setProveedorIds((prev) =>
+          prev.includes(String(nueva.id)) ? prev : [...prev, String(nueva.id)]
+        );
+      }
     }
     onSuccess(mensaje);
   };
@@ -298,6 +765,8 @@ export function ProductoModal({ open, mode, producto, monedas: monedasProp, defa
     setError("");
     setStep(1);
     setModalAnidado(null);
+    setNuevaPresNombre("");
+    setNuevaPresUnidades("2");
 
     if (producto && (mode === "edit" || mode === "view")) {
       setCodigo(producto.codigo);
@@ -306,9 +775,10 @@ export function ProductoModal({ open, mode, producto, monedas: monedasProp, defa
       setImagen(producto.imagen || null);
       setCategoriaId(producto.categoria_id?.toString() || "");
       setMarcaId(producto.marca_id?.toString() || "");
-      // @ts-ignore: `proveedor_id` might not be in the Producto interface yet
-      setProveedorId(producto.proveedor_id?.toString() || "");
-      setStock(producto.stock);
+      setProveedorIds((producto.proveedores || []).map((p) => String(p.id)));
+      setStockUnidadId(""); // siempre se abre en unidades
+      setStock(producto.stock ?? 0);
+      setStockTexto(String(producto.stock ?? 0));
       setStockMinimo(producto.stock_minimo);
       setActivo(producto.activo);
       setIvaIncluido(producto.iva_incluido ?? true);
@@ -334,6 +804,20 @@ export function ProductoModal({ open, mode, producto, monedas: monedasProp, defa
           : null);
       setVentaMonedaId(monedaVentaInicial);
       setCostoMonedaId(producto.moneda_costo_id || monedaVentaInicial);
+
+      setPresentaciones(
+        (producto.presentaciones || []).map((pr) => ({
+          key: `pres-${pr.id}`,
+          id: pr.id,
+          nombre: pr.nombre,
+          unidades: String(pr.unidades),
+          activo: pr.activo,
+          modo_venta: pr.modo_venta ?? "derivado",
+          precio_override: pr.precio_override != null ? String(pr.precio_override) : "",
+          margen_override: pr.margen_override != null ? String(pr.margen_override) : "",
+        }))
+      );
+      setMargenGanancia(producto.margen_ganancia != null ? String(producto.margen_ganancia) : "");
     } else if (mode === "create") {
       setCodigo("");
       setNombre("");
@@ -342,8 +826,10 @@ export function ProductoModal({ open, mode, producto, monedas: monedasProp, defa
       setPendingImageFile(null);
       setCategoriaId("");
       setMarcaId("");
-      setProveedorId(defaultProveedorId?.toString() || "");
+      setProveedorIds(defaultProveedorId ? [defaultProveedorId.toString()] : []);
+      setStockUnidadId("");
       setStock(0);
+      setStockTexto("0");
       setStockMinimo(5);
       setActivo(true);
       setIvaIncluido(true);
@@ -359,6 +845,8 @@ export function ProductoModal({ open, mode, producto, monedas: monedasProp, defa
         setVentaMonedaId(defaultBase.id);
         setCostoMonedaId(defaultBase.id);
       }
+      setPresentaciones([]);
+      setMargenGanancia("");
     }
   }, [producto, mode, open]);
 
@@ -460,6 +948,36 @@ export function ProductoModal({ open, mode, producto, monedas: monedasProp, defa
         setError("El precio de compra no puede ser mayor al precio de venta");
         return false;
       }
+
+      // Presentaciones (misma pestaña): cada fila requiere nombre y unidades
+      // enteras > 1, y el modo de precio elegido debe tener su valor.
+      for (const p of presentaciones) {
+        const nombreP = p.nombre.trim();
+        if (!nombreP) {
+          setError("Toda presentación necesita un nombre");
+          return false;
+        }
+        const unidades = parseInt(p.unidades, 10);
+        if (!Number.isInteger(unidades) || unidades <= 1) {
+          setError(`Presentación "${nombreP}": las unidades deben ser un número entero mayor a 1`);
+          return false;
+        }
+        const modo: ModoVentaPresentacion = p.modo_venta ?? "derivado";
+        if (modo === "fijo") {
+          const po = parseFloat(p.precio_override);
+          if (!Number.isFinite(po) || po < 0) {
+            setError(`Presentación "${nombreP}": pusiste modo "precio fijo" pero no escribiste el precio de la caja`);
+            return false;
+          }
+        }
+        if (modo === "margen") {
+          const mo = parseFloat(p.margen_override);
+          if (!Number.isFinite(mo) || mo < 0) {
+            setError(`Presentación "${nombreP}": pusiste modo "por margen" pero no escribiste el margen %`);
+            return false;
+          }
+        }
+      }
       return true;
     }
     return true;
@@ -468,7 +986,7 @@ export function ProductoModal({ open, mode, producto, monedas: monedasProp, defa
   const nextStep = () => {
     setError("");
     if (validateStep(step)) {
-      setStep((s) => Math.min(s + 1, 3));
+      setStep((s) => Math.min(s + 1, STEPS.length));
     }
   };
 
@@ -488,7 +1006,10 @@ export function ProductoModal({ open, mode, producto, monedas: monedasProp, defa
         descripcion: descripcion || null,
         categoria_id: categoriaId || null,
         marca_id: marcaId || null,
-        proveedor_id: proveedorId || null,
+        proveedor_ids: proveedorIds
+          .map((id) => parseInt(id, 10))
+          .filter((n) => Number.isInteger(n) && n > 0),
+        proveedor_id: proveedorIds[0] ? parseInt(proveedorIds[0], 10) : null,
         stock,
         stock_minimo: stockMinimo,
         activo,
@@ -508,6 +1029,30 @@ export function ProductoModal({ open, mode, producto, monedas: monedasProp, defa
         }
       }
       body.precios = preciosMap;
+
+      // Presentaciones: el COSTO nunca se envía (se deriva del CPP). El precio sí
+      // puede ser propio según el modo; solo se manda el override del modo
+      // activo. `validateStep` ya garantiza que el override exista, así que
+      // aquí nunca se degrada una fila a 'derivado' a espaldas del usuario.
+      body.presentaciones = presentaciones
+        .map((p) => {
+          const modo: ModoVentaPresentacion = p.modo_venta ?? "derivado";
+          const po = modo === "fijo" ? parseFloat(p.precio_override) : NaN;
+          const mo = modo === "margen" ? parseFloat(p.margen_override) : NaN;
+          return {
+            ...(p.id ? { id: p.id } : {}),
+            nombre: p.nombre.trim(),
+            unidades: parseInt(p.unidades, 10),
+            activo: p.activo,
+            modo_venta: modo,
+            precio_override: modo === "fijo" && Number.isFinite(po) && po >= 0 ? po : null,
+            margen_override: modo === "margen" && Number.isFinite(mo) && mo >= 0 ? mo : null,
+          };
+        })
+        .filter((p) => p.nombre && Number.isInteger(p.unidades) && p.unidades > 1);
+
+      // Margen de ganancia %: regla global; define el precio de venta en cascada.
+      body.margen_ganancia = margenGanancia !== "" ? Math.max(0, parseFloat(margenGanancia) || 0) : 0;
 
       const ventaEntry = ventaMonedaId ? preciosPorMoneda[ventaMonedaId] : null;
       const costoEntry = costoMonedaId ? preciosPorMoneda[costoMonedaId] : null;
@@ -597,7 +1142,11 @@ export function ProductoModal({ open, mode, producto, monedas: monedasProp, defa
     delete: "Eliminar Producto",
   };
 
-  const stepWidth = isFormMode ? "max-w-4xl w-[92vw]" : "max-w-xl w-[90vw]";
+  // En los modos con formulario (crear/editar) se fija una ALTURA MÍNIMA
+  // relativa al viewport (78% de la pantalla): así el modal no "salta" al
+  // cambiar de pestaña/paso con distinto contenido (entre 78vh y 90vh), y el
+  // pie (Cancelar/Guardar/Siguiente) queda siempre anclado a la parte baja.
+  const stepWidth = isFormMode ? "max-w-4xl w-[92vw] min-h-[78vh]" : "max-w-xl w-[90vw]";
 
   /**
    * Tarjeta de una moneda en el paso de precios: permite marcarla como moneda
@@ -704,6 +1253,226 @@ export function ProductoModal({ open, mode, producto, monedas: monedasProp, defa
     );
   };
 
+  /**
+   * Sección reutilizable de PRESENTACIONES (Caja, Bolsa...). La unidad es la
+   * base: el costo y el precio de la presentación se derivan del unitario y
+   * ambos son editables (bidireccional). Se muestra como TABLA, con un
+   * buscador (selector con texto libre) para agregar presentaciones al mayor.
+   */
+  const renderPresentaciones = () => (
+    <div className="space-y-3">
+      {/* Buscador/selector para agregar presentaciones */}
+      <div className="flex items-end gap-2">
+        <div className="flex-1">
+          <Label className="text-xs">Presentación</Label>
+          <ComboboxCreatable
+            options={PRESENTACIONES_SUGERIDAS.map((n) => ({ value: n.toLowerCase(), label: n }))}
+            value={nuevaPresNombre}
+            onChange={setNuevaPresNombre}
+            placeholder="Caja, Bolsa, Paquete..."
+            emptyLabel="Escribe el nombre de la presentación"
+          />
+        </div>
+        <div className="w-24">
+          <Label className="text-xs">Unidades</Label>
+          <Input
+            type="number"
+            min={2}
+            step={1}
+            value={nuevaPresUnidades}
+            onChange={(e) => setNuevaPresUnidades(e.target.value)}
+            placeholder="24"
+          />
+        </div>
+        <Button
+          type="button"
+          variant="outline"
+          onClick={agregarPresentacionDesdePicker}
+          className="h-10"
+        >
+          <Plus size={14} /> Agregar
+        </Button>
+      </div>
+
+      {presentaciones.length === 0 ? (
+        <div className="rounded-lg border border-dashed border-border py-8 text-center text-sm text-muted-foreground">
+          Sin presentaciones. El producto se vende y compra por Unidad.
+        </div>
+      ) : (
+        <Table
+          headers={[
+            "Presentación",
+            "Unid.",
+            "Modo precio",
+            `Costo compra (${costoMoneda?.codigo ?? "—"})`,
+            `Precio venta (${ventaMoneda?.codigo ?? "—"})`,
+            "Activo",
+            "Acciones",
+          ]}
+        >
+          {presentaciones.map((p) => {
+            const unidadesNum = parseInt(p.unidades, 10);
+            const ok = unidadesValidas(unidadesNum);
+            const modo: ModoVentaPresentacion = p.modo_venta ?? "derivado";
+            const r = ok
+              ? precioSegunModo(p, unidadesNum)
+              : { precio: 0, precioUnitario: 0, costo: 0, margen: null, bajoCosto: false, masBarataQueDetalle: false };
+            const costoCaja = ok ? redondear(precioUnidadCosto() * unidadesNum, decCosto) : 0;
+            const cppCaja = ok ? costoCppDe(unidadesNum) : 0;
+            // El CPP guardado vive en la moneda de COMPRA real del producto; si el usuario
+// está viendo otra moneda en el formulario, la comparación no sería válida.
+            const cppMismaMoneda = costoMonedaId === (producto?.moneda_costo_id || producto?.moneda_base_id || null);
+            const difiereDelCpp =
+              cppMismaMoneda && cppCaja > 0 && Math.abs(cppCaja - costoCaja) > Math.pow(10, -decCosto) / 2;
+            const num = (n: number) =>
+              n.toLocaleString("es-BO", { minimumFractionDigits: decVenta, maximumFractionDigits: decVenta });
+            return (
+              <Tr key={p.key}>
+                <Td>
+                  <Input
+                    value={p.nombre}
+                    onChange={(e) => actualizarPresentacion(p.key, { nombre: e.target.value })}
+                    placeholder="Caja, Bolsa..."
+                    maxLength={100}
+                    className="h-8"
+                  />
+                </Td>
+                <Td>
+                  <Input
+                    type="number"
+                    min="2"
+                    step="1"
+                    value={p.unidades}
+                    onChange={(e) => actualizarPresentacion(p.key, { unidades: e.target.value })}
+                    placeholder="24"
+                    className="h-8 w-20"
+                  />
+                </Td>
+                <Td>
+                  <select
+                    value={modo}
+                    onChange={(e) =>
+                      actualizarPresentacion(p.key, { modo_venta: e.target.value as ModoVentaPresentacion })
+                    }
+                    className="h-8 w-[7.5rem] rounded-md border border-border bg-background px-2 text-xs text-foreground focus:border-primary focus:outline-none"
+                  >
+                    <option value="derivado">Derivado</option>
+                    <option value="fijo">Precio fijo</option>
+                    <option value="margen">Por margen</option>
+                  </select>
+                </Td>
+                <Td>
+                  <div className="flex flex-col gap-0.5">
+                    <PresentacionPriceInput
+                      decimales={decCosto}
+                      disabled={!costoMoneda}
+                      value={ok ? costoCaja : 0}
+                      onChange={(val) => cambiarPrecioPresentacionCosto(val, unidadesNum)}
+                      placeholder="Calculado..."
+                      className="h-8 w-28 text-right font-mono disabled:bg-muted/90 disabled:text-muted-foreground"
+                    />
+                    {ok && costoMoneda && precioUnidadCosto() > 0 && (
+                      <span className="text-xs font-medium text-foreground/80">
+                        = {costoMoneda.simbolo}
+                        {precioUnidadCosto().toLocaleString("es-BO", {
+                          minimumFractionDigits: decCosto,
+                          maximumFractionDigits: decCosto,
+                        })}{" "}
+                        / unid.
+                      </span>
+                    )}
+                    {difiereDelCpp && (
+                      <span
+                        className="text-[11px] leading-tight text-muted-foreground"
+                        title="Costo promedio ponderado real, según las compras registradas. Es el costo que usa el inventario."
+                      >
+                        CPP real: {costoMoneda?.simbolo}
+                        {cppCaja.toLocaleString("es-BO", {
+                          minimumFractionDigits: decCosto,
+                          maximumFractionDigits: decCosto,
+                        })}
+                      </span>
+                    )}
+                  </div>
+                </Td>
+                <Td>
+                  <div className="flex flex-col gap-0.5">
+                    {modo === "margen" ? (
+                      <>
+                        <div className="flex items-center gap-1">
+                          <Input
+                            type="number"
+                            min="0"
+                            step="0.1"
+                            value={p.margen_override}
+                            onChange={(e) => actualizarPresentacion(p.key, { margen_override: e.target.value })}
+                            placeholder="15"
+                            className="h-8 w-20 text-right font-mono"
+                          />
+                          <span className="text-xs text-muted-foreground">%</span>
+                        </div>
+                        {ok && r.precio > 0 && (
+                          <span className="text-xs font-medium text-foreground/80">
+                            = {ventaMoneda?.simbolo ?? ""}
+                            {num(r.precio)}
+                          </span>
+                        )}
+                      </>
+                    ) : modo === "fijo" ? (
+                      <PresentacionPriceInput
+                        decimales={decVenta}
+                        value={p.precio_override === "" ? 0 : Number(p.precio_override)}
+                        onChange={(val) => actualizarPresentacion(p.key, { precio_override: Number(val) === 0 ? "" : String(val) })}
+                        placeholder="0.00"
+                        className="h-8 w-28 text-right font-mono"
+                      />
+                    ) : (
+                      <PresentacionPriceInput
+                        decimales={decVenta}
+                        value={ok ? r.precio : 0}
+                        onChange={(val) => cambiarPrecioPresentacion(val, unidadesNum)}
+                        placeholder="Calculado..."
+                        className="h-8 w-28 text-right font-mono"
+                      />
+                    )}
+                    {ok && r.precio > 0 && ventaMoneda && (
+                      <span className="text-xs font-medium text-foreground/80">
+                        = {ventaMoneda.simbolo}
+                        {num(r.precioUnitario)} / unid.
+                        {r.margen !== null && ` · ${r.margen}%`}
+                      </span>
+                    )}
+                    {ok && r.bajoCosto && (
+                      <span className="text-xs font-medium text-red-500">Por debajo del costo</span>
+                    )}
+                  </div>
+                </Td>
+                <Td>
+                  <Switch
+                    checked={p.activo}
+                    onCheckedChange={(v) => actualizarPresentacion(p.key, { activo: v })}
+                  />
+                </Td>
+                <Td>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon"
+                    onClick={() => eliminarPresentacion(p.key)}
+                    aria-label="Eliminar presentación"
+                    className="h-8 w-8"
+                  >
+                    <Trash2 size={14} />
+                  </Button>
+                </Td>
+              </Tr>
+            );
+          })}
+        </Table>
+      )}
+    </div>
+  );
+
   return (
     <Modal
       open={open}
@@ -725,12 +1494,12 @@ export function ProductoModal({ open, mode, producto, monedas: monedasProp, defa
               Cancelar
             </Button>
           )}
-          {isFormMode && mode === "create" && step < 3 && (
+          {isFormMode && mode === "create" && step < STEPS.length && (
             <Button onClick={nextStep} className="flex-1">
               Siguiente <ChevronRight size={14} />
             </Button>
           )}
-          {isFormMode && mode === "create" && step === 3 && (
+          {isFormMode && mode === "create" && step === STEPS.length && (
             <Button onClick={handleSubmit} disabled={loading} className="flex-1">
               {loading ? <Loader2 size={14} className="animate-spin" /> : "Crear Producto"}
             </Button>
@@ -786,6 +1555,29 @@ export function ProductoModal({ open, mode, producto, monedas: monedasProp, defa
               </div>
             );
           })}
+        </div>
+      )}
+
+      {/* Tabs para el modo EDICIÓN: cada sección en su propia pestaña */}
+      {mode === "edit" && (
+        <div className="mb-6 grid grid-cols-2 gap-2 sm:grid-cols-4">
+          {STEPS.map((s) => (
+            <button
+              key={s.id}
+              type="button"
+              onClick={() => {
+                setError("");
+                setStep(s.id);
+              }}
+              className={`rounded-lg border px-3 py-2.5 text-xs font-semibold transition-colors ${
+                s.id === step
+                  ? "border-primary bg-primary/10 text-primary"
+                  : "border-border bg-card text-muted-foreground hover:bg-muted hover:text-foreground"
+              }`}
+            >
+              {s.label}
+            </button>
+          ))}
         </div>
       )}
 
@@ -912,34 +1704,26 @@ export function ProductoModal({ open, mode, producto, monedas: monedasProp, defa
               </div>
             </div>
             
-            <div className="grid grid-cols-2 gap-4">
-              <div>
-                <Label>Proveedor</Label>
-                <div className="flex items-center gap-1.5">
-                  <Combobox
-                    className="flex-1"
-                    options={[{ value: "", label: "Sin proveedor" }, ...proveedores.map((p) => ({ value: p.id.toString(), label: p.nombre }))]}
-                    value={proveedorId}
-                    onChange={setProveedorId}
-                    placeholder="Seleccionar proveedor"
-                    emptyLabel="Sin proveedores"
-                    disabled={!!defaultProveedorId}
-                  />
-                  {!defaultProveedorId && (
-                    <button
-                      type="button"
-                      onClick={() => setModalAnidado("proveedor")}
-                      title="Nuevo proveedor"
-                      aria-label="Nuevo proveedor"
-                      className="flex h-10 w-10 shrink-0 items-center justify-center rounded border border-border bg-background text-muted-foreground transition-colors hover:border-primary hover:bg-primary/10 hover:text-primary"
-                    >
-                      <Plus size={16} />
-                    </button>
-                  )}
-                </div>
-                {!!defaultProveedorId && (
-                  <p className="text-xs text-muted-foreground mt-1">Proveedor bloqueado porque estás creando desde una compra.</p>
-                )}
+            <div>
+              <Label>Proveedores</Label>
+              <div className="flex items-start gap-1.5">
+                <ComboboxMulti
+                  className="flex-1"
+                  options={proveedores.map((p) => ({ value: p.id.toString(), label: p.nombre }))}
+                  value={proveedorIds}
+                  onChange={setProveedorIds}
+                  placeholder="Buscar y seleccionar proveedores..."
+                  emptyLabel="Sin proveedores"
+                />
+                <button
+                  type="button"
+                  onClick={() => setModalAnidado("proveedor")}
+                  title="Nuevo proveedor"
+                  aria-label="Nuevo proveedor"
+                  className="flex h-10 w-10 shrink-0 items-center justify-center rounded border border-border bg-background text-muted-foreground transition-colors hover:border-primary hover:bg-primary/10 hover:text-primary"
+                >
+                  <Plus size={16} />
+                </button>
               </div>
             </div>
 
@@ -970,7 +1754,8 @@ export function ProductoModal({ open, mode, producto, monedas: monedasProp, defa
           </motion.div>
         )}
 
-        {/* STEP 2: Pricing */}
+        {/* STEP 2: Precios y presentaciones (combinados: primero el al mayor,
+           debajo los valores unitarios por moneda, todos sincronizados) */}
         {mode === "create" && step === 2 && (
           <motion.div
             key="step2"
@@ -978,12 +1763,50 @@ export function ProductoModal({ open, mode, producto, monedas: monedasProp, defa
             animate={{ opacity: 1, x: 0 }}
             exit={{ opacity: 0, x: -20 }}
             transition={{ duration: 0.2 }}
-            className="space-y-4"
+            className="space-y-5"
           >
             <p className="text-xs text-muted-foreground">
-              Define el precio de compra y el de venta de cada producto. Puedes usar una
-              moneda distinta para cada uno (p. ej. costo en USD y precio de venta en COP).
+              Escribe el costo y precio por presentación (Caja, Bolsa...); la unidad se calcula sola.
             </p>
+
+            {renderPresentaciones()}
+
+            <div className="rounded-lg border border-border/60 bg-muted/15 px-4 py-3">
+              <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                <div>
+                  <Label className="text-sm font-medium">Margen de ganancia (%)</Label>
+                  <p className="mb-1.5 text-[11px] text-muted-foreground">
+                    Con él se autocalcula el precio de venta desde el costo.
+                  </p>
+                  <Input
+                    type="number"
+                    min="0"
+                    step="0.1"
+                    value={margenGanancia}
+                    onChange={(e) => handleMargenChange(e.target.value)}
+                    placeholder="0"
+                  />
+                </div>
+                <div>
+                  <Label className="text-sm font-medium text-warning-strong">Margen real</Label>
+                  <p className="mb-1.5 text-[11px] text-muted-foreground">
+                    Precio de venta vs. costo de compra (en la moneda de venta).
+                  </p>
+                  <div className="flex items-center rounded border border-warning-border bg-warning/10 px-3 py-2">
+                    <span className="font-mono text-sm font-semibold text-warning-strong">
+                      {margenReal == null ? "—" : `${margenReal.toFixed(2)} %`}
+                    </span>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div className="flex items-center gap-3 pt-1">
+              <span className="whitespace-nowrap text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                Precios unitarios por moneda
+              </span>
+              <span className="h-px flex-1 bg-border/60" />
+            </div>
 
             {loadingMonedas ? (
               <div className="flex flex-col items-center justify-center py-8 gap-2 text-muted-foreground">
@@ -1000,10 +1823,10 @@ export function ProductoModal({ open, mode, producto, monedas: monedasProp, defa
           </motion.div>
         )}
 
-        {/* STEP 3: Stock */}
+        {/* STEP 3: Existencias */}
         {mode === "create" && step === 3 && (
           <motion.div
-            key="step3"
+            key="step4"
             initial={{ opacity: 0, x: 20 }}
             animate={{ opacity: 1, x: 0 }}
             exit={{ opacity: 0, x: -20 }}
@@ -1011,15 +1834,16 @@ export function ProductoModal({ open, mode, producto, monedas: monedasProp, defa
             className="space-y-4"
           >
             <div className="grid grid-cols-2 gap-4">
-              <div>
-                <Label>Existencias iniciales</Label>
-                <Input
-                  type="number"
-                  min="0"
-                  value={stock}
-                  onChange={(e) => setStock(parseInt(e.target.value) || 0)}
-                />
-              </div>
+              <StockConPresentaciones
+                label="Existencias iniciales"
+                valor={stockTexto}
+                total={stock}
+                unidadActual={stockUnidadId}
+                presentaciones={presentaciones}
+                factor={factorDe}
+                onValor={teclearStock}
+                onUnidad={cambiarUnidadStock}
+              />
               <div>
                 <Label>Existencias mínimas</Label>
                 <Input
@@ -1066,19 +1890,36 @@ export function ProductoModal({ open, mode, producto, monedas: monedasProp, defa
                     ? `${ventaMoneda.simbolo} ${parseFloat(preciosPorMoneda[ventaMoneda.id].precioVenta).toLocaleString("es-BO", { minimumFractionDigits: ventaMoneda.decimales ?? 2, maximumFractionDigits: ventaMoneda.decimales ?? 2 })}`
                     : "—"}
                 </span>
+                <span className="text-muted-foreground">Presentaciones:</span>
+                <span className="font-medium">
+                  {presentaciones.length > 0
+                    ? presentaciones
+                        .map((p) => `${p.nombre.trim() || "—"} ×${p.unidades || "?"}`)
+                        .join(", ")
+                    : "— (se vende por Unidad)"}
+                </span>
                 <span className="text-muted-foreground">Existencias:</span>
-                <span className="font-mono font-medium">{stock} uds.</span>
+                <span className="font-mono font-medium">
+                  {stock} uds.
+                  {factorStock > 1 && (
+                    <span className="ml-1 text-muted-foreground">
+                      ({stockTexto} ×
+                      {presentaciones.find((p) => p.key === stockUnidadId)?.nombre.trim() || "?"})
+                    </span>
+                  )}
+                </span>
               </div>
             </div>
           </motion.div>
         )}
 
-        {/* Edit mode: normal form */}
-        {mode === "edit" && (
+        {/* Edit STEP 1: Información */}
+        {mode === "edit" && step === 1 && (
           <motion.div
-            key="edit"
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
+            key="edit-paso1"
+            initial={{ opacity: 0, x: 20 }}
+            animate={{ opacity: 1, x: 0 }}
+            exit={{ opacity: 0, x: -20 }}
             transition={{ duration: 0.2 }}
             className="space-y-4"
           >
@@ -1194,23 +2035,109 @@ export function ProductoModal({ open, mode, producto, monedas: monedasProp, defa
               </div>
             </div>
 
+            <div>
+              <Label>Proveedores</Label>
+              <div className="flex items-start gap-1.5">
+                <ComboboxMulti
+                  className="flex-1"
+                  options={proveedores.map((p) => ({ value: p.id.toString(), label: p.nombre }))}
+                  value={proveedorIds}
+                  onChange={setProveedorIds}
+                  placeholder="Buscar y seleccionar proveedores..."
+                  emptyLabel="Sin proveedores"
+                />
+                <button
+                  type="button"
+                  onClick={() => setModalAnidado("proveedor")}
+                  title="Nuevo proveedor"
+                  aria-label="Nuevo proveedor"
+                  className="flex h-10 w-10 shrink-0 items-center justify-center rounded border border-border bg-background text-muted-foreground transition-colors hover:border-primary hover:bg-primary/10 hover:text-primary"
+                >
+                  <Plus size={16} />
+                </button>
+              </div>
+            </div>
+          </motion.div>
+        )}
+
+        {/* Edit STEP 2: Precios y presentaciones (combinados) */}
+        {mode === "edit" && step === 2 && (
+          <motion.div
+            key="edit-paso2"
+            initial={{ opacity: 0, x: 20 }}
+            animate={{ opacity: 1, x: 0 }}
+            exit={{ opacity: 0, x: -20 }}
+            transition={{ duration: 0.2 }}
+            className="space-y-5"
+          >
             <p className="text-xs text-muted-foreground">
-              Precios por moneda. Elige por separado la moneda de compra y la de venta;
-              pueden ser distintas (p. ej. costo en USD y precio de venta en COP).
+              Escribe el costo y precio por presentación (Caja, Bolsa...); la unidad se calcula sola.
             </p>
 
-            {effectiveMonedas.map((m) => renderMonedaCard(m, "edit"))}
+            {renderPresentaciones()}
 
-            <div className="grid grid-cols-2 gap-4">
-              <div>
-                <Label>Existencias</Label>
-                <Input
-                  type="number"
-                  min="0"
-                  value={stock}
-                  onChange={(e) => setStock(parseInt(e.target.value) || 0)}
-                />
+            <div className="rounded-lg border border-border/60 bg-muted/15 px-4 py-3">
+              <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                <div>
+                  <Label className="text-sm font-medium">Margen de ganancia (%)</Label>
+                  <p className="mb-1.5 text-[11px] text-muted-foreground">
+                    Con él se autocalcula el precio de venta desde el costo.
+                  </p>
+                  <Input
+                    type="number"
+                    min="0"
+                    step="0.1"
+                    value={margenGanancia}
+                    onChange={(e) => handleMargenChange(e.target.value)}
+                    placeholder="0"
+                  />
+                </div>
+                <div>
+                  <Label className="text-sm font-medium text-warning-strong">Margen real</Label>
+                  <p className="mb-1.5 text-[11px] text-muted-foreground">
+                    Precio de venta vs. costo de compra (en la moneda de venta).
+                  </p>
+                  <div className="flex items-center rounded border border-warning-border bg-warning/10 px-3 py-2">
+                    <span className="font-mono text-sm font-semibold text-warning-strong">
+                      {margenReal == null ? "—" : `${margenReal.toFixed(2)} %`}
+                    </span>
+                  </div>
+                </div>
               </div>
+            </div>
+
+            <div className="flex items-center gap-3 pt-1">
+              <span className="whitespace-nowrap text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                Precios unitarios por moneda
+              </span>
+              <span className="h-px flex-1 bg-border/60" />
+            </div>
+
+            {effectiveMonedas.map((m) => renderMonedaCard(m, "edit"))}
+          </motion.div>
+        )}
+
+        {/* Edit STEP 3: Existencias */}
+        {mode === "edit" && step === 3 && (
+          <motion.div
+            key="edit-paso3"
+            initial={{ opacity: 0, x: 20 }}
+            animate={{ opacity: 1, x: 0 }}
+            exit={{ opacity: 0, x: -20 }}
+            transition={{ duration: 0.2 }}
+            className="space-y-4"
+          >
+            <div className="grid grid-cols-2 gap-4">
+              <StockConPresentaciones
+                label="Existencias"
+                valor={stockTexto}
+                total={stock}
+                unidadActual={stockUnidadId}
+                presentaciones={presentaciones}
+                factor={factorDe}
+                onValor={teclearStock}
+                onUnidad={cambiarUnidadStock}
+              />
               <div>
                 <Label>Existencias mínimas</Label>
                 <Input
@@ -1287,6 +2214,53 @@ export function ProductoModal({ open, mode, producto, monedas: monedasProp, defa
                   </div>
                 ))}
               </div>
+            </div>
+
+            {margenRealVista != null && (
+              <div className="flex items-center justify-between rounded border border-warning-border bg-warning/10 px-3 py-2">
+                <span className="text-xs font-semibold uppercase tracking-wide text-warning-strong">
+                  Margen real
+                </span>
+                <span className="font-mono text-sm font-semibold text-warning-strong">
+                  {margenRealVista.toFixed(2)} %
+                </span>
+              </div>
+            )}
+
+            <div>
+              <Label>Presentaciones</Label>
+              {(!producto.presentaciones || producto.presentaciones.length === 0) ? (
+                <p className="mt-1 text-sm text-muted-foreground">
+                  Sin presentaciones (solo Unidad)
+                </p>
+              ) : (
+                <div className="mt-2 space-y-1.5">
+                  {producto.presentaciones.map((pr) => (
+                    <div key={pr.id} className="flex items-center justify-between text-sm gap-2">
+                      <span className="text-muted-foreground">
+                        {pr.nombre} · 1 = {pr.unidades} unid.
+                        {!pr.activo && " (inactiva)"}
+                        {pr.modo_venta && pr.modo_venta !== "derivado" && (
+                          <span className="ml-1.5 rounded bg-muted px-1 py-px text-[10px] font-medium uppercase text-muted-foreground/80">
+                            {pr.modo_venta === "fijo" ? "precio fijo" : `margen ${pr.margen_override}%`}
+                          </span>
+                        )}
+                      </span>
+                      <span className="font-mono text-xs text-foreground font-medium shrink-0">
+                        {/* El precio de la presentación vive en la MONEDA DE VENTA
+                            del producto (`moneda_base_id`), no en la base del
+                            sistema: formatearlo con `es_base` lo rotulaba mal. */}
+                        {(() => {
+                          const mc = producto.moneda_base_id
+                            ? effectiveMonedas.find((m) => m.id === producto.moneda_base_id)?.codigo
+                            : undefined;
+                          return fmt(pr.precio, mc || "USD");
+                        })()}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
             <div className="grid grid-cols-2 gap-4 text-sm">
               <div>

@@ -21,6 +21,16 @@ DECLARE
     fk_rec record;
     uq_rec record;
 BEGIN
+    -- Si la tabla 'ventas' ya tiene id UUID, la base de datos ya está migrada
+    IF EXISTS (
+        SELECT 1 FROM information_schema.columns 
+        WHERE table_schema = 'public' AND table_name = 'ventas' 
+          AND column_name = 'id' AND udt_name = 'uuid'
+    ) THEN
+        RAISE NOTICE 'Base de datos ya migrada a UUID, omitiendo.';
+        RETURN;
+    END IF;
+
     -- Filtrar solo tablas que existan
     FOREACH t IN ARRAY all_tbls LOOP
         IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema='public' AND table_name=t) THEN

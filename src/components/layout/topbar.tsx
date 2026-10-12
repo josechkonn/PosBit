@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect, useRef, useCallback } from "react";
+import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { motion, AnimatePresence } from "framer-motion";
 import {
@@ -11,6 +12,7 @@ import {
   AlertCircle,
   TrendingUp,
   ShoppingCart,
+  Store,
 } from "lucide-react";
 import { pathLabel } from "./nav";
 import type { AppUser } from "./app-shell";
@@ -124,6 +126,17 @@ export function Topbar({
       </div>
 
       <div className="flex-1" />
+
+      {/* Acceso directo y destacado al Punto de Venta */}
+      <Link
+        href="/pos"
+        title="Ir al Punto de Venta"
+        aria-label="Ir al Punto de Venta"
+        className="group flex h-9 items-center gap-2 rounded-lg bg-primary px-3 text-sm font-semibold text-primary-foreground shadow-sm transition-all hover:bg-primary/90 hover:shadow-md active:scale-[0.98]"
+      >
+        <Store size={16} className="transition-transform group-hover:scale-110" />
+        <span className="hidden sm:inline">Punto de Venta</span>
+      </Link>
 
       {/* Notificaciones */}
       <div ref={notifRef} className="relative">

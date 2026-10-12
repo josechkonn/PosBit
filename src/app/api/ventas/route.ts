@@ -3,7 +3,7 @@ export const dynamic = 'force-dynamic';
 import { NextResponse } from "next/server";
 import { requireSession } from "@/lib/auth-server";
 import { query, queryOne, execute, transaction } from "@/lib/db";
-import { aBase, convertir, redondear, tasaUsd, tasaUsdDocumento, monedaDeProducto, monedaCostoDeProducto, tasaMostrada, tasaPar } from "@/lib/money";
+import { aBase, convertir, redondear, tasaUsd, tasaUsdDocumento, monedaDeProducto, monedaCostoDeProducto, tasaMostrada, tasaPar, desdeBase } from "@/lib/money";
 
 function generarNumero() {
   const year = new Date().getFullYear();
@@ -17,9 +17,21 @@ function generarNumeroCredito() {
   return `CRE-${year}-${random}`;
 }
 
-export async function GET() {
+export async function GET(request: Request) {
   try {
     await requireSession();
+    const { searchParams } = new URL(request.url);
+    // Filtro opcional para el perfil del cliente: ?cliente_id=X
+    const clienteId = searchParams.get("cliente_id");
+    const params: any[] = clienteId ? [clienteId] : [];
+    const where = clienteId ? "WHERE v.cliente_id = $1" : "";
+    const whereItems = clienteId
+      ? "WHERE vi.venta_id IN (SELECT id FROM ventas WHERE cliente_id = $1)"
+      : "";
+    const wherePagos = clienteId
+      ? "WHERE vp.venta_id IN (SELECT id FROM ventas WHERE cliente_id = $1)"
+      : "";
+
     const ventas = await query(`
       SELECT 
         v.*,
@@ -40,15 +52,19 @@ export async function GET() {
       LEFT JOIN metodos_pago mp ON v.metodo_pago_id = mp.id
       LEFT JOIN cajas ca ON v.caja_id = ca.id
       LEFT JOIN creditos cr ON cr.venta_id = v.id
-      ORDER BY v.fecha DESC, v.id DESC
-    `);
+      ${where}
+      -- fecha es solo el dia; creado_en guarda la hora real para que las
+      -- ventas del mismo dia queden de la mas reciente a la mas antigua.
+      ORDER BY v.fecha DESC, v.creado_en DESC, v.id DESC
+    `, params);
 
     const items = await query(`
       SELECT vi.*, pr.nombre as producto_nombre, pr.codigo as producto_codigo
       FROM venta_items vi
       JOIN productos pr ON vi.producto_id = pr.id
+      ${whereItems}
       ORDER BY vi.venta_id, vi.id
-    `);
+    `, params);
 
     // Líneas de pago por venta (pago mixto en varias monedas)
     const pagos = await query(`
@@ -56,8 +72,9 @@ export async function GET() {
       FROM venta_pagos vp
       LEFT JOIN metodos_pago mp ON vp.metodo_pago_id = mp.id
       JOIN monedas mo ON vp.moneda_id = mo.id
+      ${wherePagos}
       ORDER BY vp.venta_id, vp.id
-    `);
+    `, params);
     const pagosPorVenta = new Map<number, typeof pagos>();
     for (const p of pagos) {
       const lista = pagosPorVenta.get(p.venta_id) || [];
@@ -136,38 +153,94 @@ export async function POST(request: Request) {
 
       let subtotalTotal = 0;
       let impuestoTotal = 0;
+      // Suma de los descuentos por línea (en la moneda de la venta). El descuento
+      // final de la venta = `descuento` (global del documento) + esto.
+      let descuentoItemsTotal = 0;
+      const decVenta = Number(monedaVenta.decimales ?? 2);
 
       for (const item of items) {
         const producto = await client.query(`SELECT * FROM productos WHERE id = $1`, [item.producto_id]);
         if (producto.rows.length === 0) {
           throw new Error(`Producto ${item.producto_id} no encontrado`);
         }
+        // `cantidad` SIEMPRE llega en unidades (el POS ya multiplica cajas ×
+        // unidades), así que la validación de stock y el kardex no cambian.
         if (producto.rows[0].stock < item.cantidad) {
           throw new Error(`Existencias insuficientes para ${producto.rows[0].nombre}`);
         }
-        // Sin precio enviado, se toma el precio_base del producto (en SU moneda)
-        // y se convierte a la moneda de la venta
-        if (item.precio_unit === null || item.precio_unit === undefined) {
-          const monedaProducto = monedaDeProducto(producto.rows[0], monedaVenta, monedasCatalogo);
-          item.precio_unit = convertir(
-            Number(producto.rows[0].precio_base),
-            monedaProducto,
-            monedaVenta,
-            monedasCatalogo,
-            Number(monedaVenta.decimales ?? 2)
-          );
+
+        // ── Normalización de la línea ──
+        // Con presentación, `precio_unit` trae el precio de la CAJA completa, así
+        // que el total se calcula con cajas × precio_caja y `precio_unit` se
+        // re-expresa por unidad (para que los reportes por unidad sigan valiendo).
+        const unidadesPres = Number(item.presentacion_unidades) || 0;
+        const cantPres = Number(item.cantidad_presentaciones) || 0;
+        let lineTotal: number;
+
+        if (unidadesPres > 0 && cantPres > 0 && item.precio_presentacion != null) {
+          // El snapshot viene del cliente, así que se valida contra la BD: la
+          // presentación debe existir y tener las mismas unidades que las que
+          // envió el cliente. Si algo no cuadra se cae a la línea por unidad
+          // en vez de aceptar un total manipulado.
+          let presRow: any = null;
+          if (item.presentacion_id) {
+            const presRes = await client.query(
+              `SELECT id, nombre, unidades FROM producto_presentaciones WHERE id = $1`,
+              [item.presentacion_id]
+            );
+            presRow = presRes.rows[0] ?? null;
+          }
+          if (presRow && Number(presRow.unidades) !== unidadesPres) {
+            throw new Error(`La presentación indicada no corresponde a ${producto.rows[0].nombre}`);
+          }
+
+          const precioPres = Number(item.precio_presentacion);
+          lineTotal = redondear(precioPres * cantPres, decVenta);
+          // Snapshot defensivo: el nombre/unidades reales salen de la BD, no del cliente.
+          item.presentacion_nombre = presRow ? presRow.nombre : item.presentacion_nombre ?? null;
+          item.presentacion_unidades = unidadesPres;
+          item.cantidad_presentaciones = cantPres;
+          item.precio_presentacion = redondear(precioPres, decVenta);
+          item.precio_unit = redondear(precioPres / unidadesPres, decVenta);
+        } else {
+          // Sin presentación, o sin precio enviado: se toma el precio_base del
+          // producto (en SU moneda) y se convierte a la moneda de la venta.
+          if (item.precio_unit === null || item.precio_unit === undefined) {
+            const monedaProducto = monedaDeProducto(producto.rows[0], monedaVenta, monedasCatalogo);
+            item.precio_unit = convertir(
+              Number(producto.rows[0].precio_base),
+              monedaProducto,
+              monedaVenta,
+              monedasCatalogo,
+              decVenta
+            );
+          }
+          lineTotal = redondear(Number(item.cantidad) * Number(item.precio_unit), decVenta);
         }
-        const lineTotal = item.cantidad * item.precio_unit;
+
+        // Se guarda el total EXACTO de la línea: recalcularlo como
+        // cantidad × precio_unit después aplicaría un redondeo distinto al de
+        // `lineTotal` (precio_caja ÷ unidades) y descuadraría el recibo.
+        (item as any).total_linea = lineTotal;
+
+        // Descuento de la línea (monto plano, en la moneda de la venta). Se acota
+        // a [0, lineTotal] para que el cliente no pueda dejar importes negativos.
+        const descItem = Math.min(lineTotal, Math.max(0, redondear(Number(item.descuento) || 0, decVenta)));
+        (item as any).descuento_linea = descItem;
+        descuentoItemsTotal = redondear(descuentoItemsTotal + descItem, decVenta);
+
         subtotalTotal += lineTotal;
         if (!producto.rows[0].iva_incluido) {
           impuestoTotal += Math.round(lineTotal * 0.16 * 100) / 100;
         }
       }
 
-      const total = Math.max(0, subtotalTotal - descuento + impuestoTotal);
+      // Descuento total del documento = global + descuentos de línea.
+      const descuentoVenta = redondear(Number(descuento) + descuentoItemsTotal, decVenta);
+      const total = Math.max(0, subtotalTotal - descuentoVenta + impuestoTotal);
       // `*_base` siempre en USD, usando la tasa efectiva del documento
       const totalBase = aBase(total, tasaUsdVenta);
-      const descuentoBase = aBase(descuento, tasaUsdVenta);
+      const descuentoBase = aBase(descuentoVenta, tasaUsdVenta);
 
       // ── Pago: cuánto aplica a esta venta y cuánto queda como deuda ──
       // Con `pagos` (pago mixto) cada línea se convierte a la moneda de la
@@ -322,7 +395,7 @@ export async function POST(request: Request) {
         `INSERT INTO ventas (numero, cliente, cliente_id, tipo_pago, fecha, moneda_id, metodo_pago_id, caja_id, subtotal, descuento, impuesto, total, total_base, descuento_base, tasa, estado, observaciones) 
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17) 
          RETURNING *`,
-         [generarNumero(), clienteNombre, cliente_id || null, esCredito ? "Credito" : "Contado", fecha || new Date().toISOString().split("T")[0], moneda_id, metodoVentaId, cajaVentaId, subtotalTotal, descuento, impuestoTotal, total, totalBase, descuentoBase, tasaAplicada, estadoVenta, observaciones || null]
+         [generarNumero(), clienteNombre, cliente_id || null, esCredito ? "Credito" : "Contado", fecha || new Date().toISOString().split("T")[0], moneda_id, metodoVentaId, cajaVentaId, subtotalTotal, descuentoVenta, impuestoTotal, total, totalBase, descuentoBase, tasaAplicada, estadoVenta, observaciones || null]
       );
 
       const venta = ventaRes.rows[0];
@@ -342,13 +415,31 @@ export async function POST(request: Request) {
         const monedaProducto = monedaDeProducto(producto.rows[0], monedaVenta, monedasCatalogo);
         const monedaCosto = monedaCostoDeProducto(producto.rows[0], monedaVenta, monedasCatalogo);
         const precioUnitBase = aBase(item.precio_unit, tasaUsdVenta);
-        const subtotalItem = item.cantidad * item.precio_unit;
+        const subtotalItem = redondear((item as any).total_linea, decVenta);
         const subtotalBase = aBase(subtotalItem, tasaUsdVenta);
+        const descItem = redondear((item as any).descuento_linea || 0, decVenta);
 
         await client.query(
-          `INSERT INTO venta_items (venta_id, producto_id, cantidad, precio_unit, precio_unit_base, subtotal, subtotal_base) 
-           VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-          [venta.id, item.producto_id, item.cantidad, item.precio_unit, precioUnitBase, subtotalItem, subtotalBase]
+          `INSERT INTO venta_items (venta_id, producto_id, cantidad, precio_unit, precio_unit_base, subtotal, subtotal_base,
+                                    descuento, descuento_base,
+                                    presentacion_id, presentacion_nombre, presentacion_unidades, cantidad_presentaciones, precio_presentacion)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)`,
+          [
+            venta.id,
+            item.producto_id,
+            item.cantidad,
+            item.precio_unit,
+            precioUnitBase,
+            subtotalItem,
+            subtotalBase,
+            descItem,
+            aBase(descItem, tasaUsdVenta),
+            item.presentacion_id ?? null,
+            item.presentacion_nombre ?? null,
+            item.presentacion_unidades ?? null,
+            item.cantidad_presentaciones ?? null,
+            item.precio_presentacion ?? null,
+          ]
         );
 
         // Stock atómico: decrementa solo si hay suficiente.
@@ -370,9 +461,15 @@ export async function POST(request: Request) {
         const nuevoStock = stockRes.rows[0].actual;
 
         // El kardex guarda el costo en la moneda de COMPRA del producto y su
-        // equivalente USD
-        const costoProducto = Number(producto.rows[0].costo_base) || 0;
-        const costoUsd = aBase(costoProducto, tasaUsd(monedaCosto, monedasCatalogo));
+        // equivalente USD. Costo de salida = CPP vigente (promedio ponderado);
+        // fallback legacy al costo_base estático si aún no hay CPP.
+        const cppBase = Number(producto.rows[0].costo_promedio_base) || 0;
+        const costoEstatico = Number(producto.rows[0].costo_base) || 0;
+        const costoUsd = cppBase > 0 ? redondear(cppBase, 6) : aBase(costoEstatico, tasaUsd(monedaCosto, monedasCatalogo));
+        const decCostoV = Number(monedaCosto.decimales ?? 2);
+        const costoProducto = cppBase > 0
+          ? redondear(desdeBase(cppBase, tasaUsd(monedaCosto, monedasCatalogo), 6), decCostoV)
+          : costoEstatico;
         await client.query(
           `INSERT INTO kardex (producto_id, fecha, tipo, motivo, referencia_tipo, referencia_id, cantidad, costo_unit, costo_unit_base, saldo_anterior, saldo_actual) 
            VALUES ($1, NOW(), 'Salida', $2, 'venta', $3, $4, $5, $6, $7, $8)`,
@@ -526,10 +623,16 @@ export async function DELETE(request: Request) {
 
         await client.query(`UPDATE productos SET stock = $1 WHERE id = $2`, [nuevoStock, item.producto_id]);
 
-        // La devolución vuelve al costo del producto (en SU moneda de compra) y su equivalente USD
+        // La devolución vuelve al costo vigente (CPP promedio ponderado) en la moneda
+        // de COMPRA del producto y su equivalente USD; fallback legacy.
         const monedaCosto = monedaCostoDeProducto(productoActual.rows[0], monedaVenta, monedasCatalogo);
-        const costoProducto = Number(productoActual.rows[0]?.costo_base) || 0;
-        const costoUsd = aBase(costoProducto, tasaUsd(monedaCosto, monedasCatalogo));
+        const cppBase = Number(productoActual.rows[0]?.costo_promedio_base) || 0;
+        const costoEstatico = Number(productoActual.rows[0]?.costo_base) || 0;
+        const costoUsd = cppBase > 0 ? redondear(cppBase, 6) : aBase(costoEstatico, tasaUsd(monedaCosto, monedasCatalogo));
+        const decCostoV = Number(monedaCosto.decimales ?? 2);
+        const costoProducto = cppBase > 0
+          ? redondear(desdeBase(cppBase, tasaUsd(monedaCosto, monedasCatalogo), 6), decCostoV)
+          : costoEstatico;
         await client.query(
           `INSERT INTO kardex (producto_id, fecha, tipo, motivo, referencia_tipo, referencia_id, cantidad, costo_unit, costo_unit_base, saldo_anterior, saldo_actual) 
            VALUES ($1, NOW(), 'Entrada', $2, 'venta_anulada', $3, $4, $5, $6, $7, $8)`,

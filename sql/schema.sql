@@ -222,6 +222,71 @@ BEGIN
     END IF;
 END $$;
 
+ALTER TABLE productos ADD COLUMN IF NOT EXISTS costo_promedio DECIMAL(18, 6) NOT NULL DEFAULT 0.000000;
+ALTER TABLE productos ADD COLUMN IF NOT EXISTS costo_promedio_base DECIMAL(18, 6) NOT NULL DEFAULT 0.000000;
+ALTER TABLE productos ADD COLUMN IF NOT EXISTS margen_ganancia DECIMAL(5, 2) NOT NULL DEFAULT 0.00;
+ALTER TABLE productos ADD COLUMN IF NOT EXISTS precio_auto BOOLEAN NOT NULL DEFAULT false;
+ALTER TABLE productos ADD COLUMN IF NOT EXISTS precio_actualizado_en TIMESTAMP;
+
+-- ============================================================================
+-- 5.1 PRESENTACIONES DE PRODUCTO (Caja, Bolsa, Paquete...)
+-- ----------------------------------------------------------------------------
+-- La unidad base del sistema SIEMPRE es la "Unidad": el stock, el kardex y
+-- todos los cálculos internos pivotan sobre ella. Una presentación solo aporta
+-- un factor de conversión (ej. 1 Caja = 24 unidades) que se traduce a unidades
+-- en el borde (formularios/APIs). "Unidad" NO se guarda: es implícita (factor 1).
+--
+-- El precio de la presentación se DERIVA del precio unitario del producto
+-- (precio_unitario × unidades) y se calcula en lectura (ver src/lib/money.ts),
+-- igual que los precios por moneda.
+--
+-- id UUID: el resto de entidades de la app ya migró a UUID; `productos.id`
+-- se mantiene INTEGER (decisión del proyecto), por eso la FK es INTEGER.
+-- ============================================================================
+CREATE TABLE IF NOT EXISTS producto_presentaciones (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    producto_id INTEGER NOT NULL REFERENCES productos(id) ON DELETE CASCADE,
+    nombre VARCHAR(100) NOT NULL,
+    unidades INTEGER NOT NULL CHECK (unidades > 1),
+    activo BOOLEAN NOT NULL DEFAULT true,
+    -- Modo de precio de la presentación (3 modos). El COSTO nunca se guarda:
+    -- se deriva del CPP × unidades para que inventario y kardex sigan cuadrando.
+    --   derivado → precio = precio_unidad × unidades (comportamiento original)
+    --   fijo     → precio = precio_override (mayorista a precio acordado)
+    --   margen   → precio = CPP × unidades × (1 + margen_override/100)
+    modo_venta VARCHAR(10) NOT NULL DEFAULT 'derivado',
+    precio_override NUMERIC(18, 6) NULL,
+    margen_override NUMERIC(6, 3) NULL,
+    creado_en TIMESTAMP NOT NULL DEFAULT NOW(),
+    actualizado_en TIMESTAMP NOT NULL DEFAULT NOW(),
+    UNIQUE (producto_id, nombre),
+    CONSTRAINT chk_presentacion_modo_venta CHECK (modo_venta IN ('derivado', 'fijo', 'margen')),
+    CONSTRAINT chk_presentacion_precio_override CHECK (
+      (modo_venta <> 'fijo'  OR (precio_override IS NOT NULL AND precio_override >= 0)) AND
+      (modo_venta <> 'margen' OR (margen_override IS NOT NULL AND margen_override >= 0))
+    )
+);
+
+-- Migración: si la tabla se creó antes con SERIAL (int4) se deja como está;
+-- para BD nuevas/nuevas versiones el id es UUID. El tipo real manda.
+ALTER TABLE producto_presentaciones ADD COLUMN IF NOT EXISTS activo BOOLEAN NOT NULL DEFAULT true;
+ALTER TABLE producto_presentaciones ADD COLUMN IF NOT EXISTS actualizado_en TIMESTAMP NOT NULL DEFAULT NOW();
+-- Las 3 columnas de precio llegan con DEFAULT 'derivado', así que las filas
+-- previas conservan exactamente el comportamiento que tenían antes.
+ALTER TABLE producto_presentaciones ADD COLUMN IF NOT EXISTS modo_venta VARCHAR(10) NOT NULL DEFAULT 'derivado';
+ALTER TABLE producto_presentaciones ADD COLUMN IF NOT EXISTS precio_override NUMERIC(18, 6) NULL;
+ALTER TABLE producto_presentaciones ADD COLUMN IF NOT EXISTS margen_override NUMERIC(6, 3) NULL;
+-- Si la tabla ya existía, los CHECK se agregan aparte (puede haber duplicados).
+ALTER TABLE producto_presentaciones DROP CONSTRAINT IF EXISTS chk_presentacion_modo_venta;
+ALTER TABLE producto_presentaciones ADD CONSTRAINT chk_presentacion_modo_venta
+  CHECK (modo_venta IN ('derivado', 'fijo', 'margen'));
+ALTER TABLE producto_presentaciones DROP CONSTRAINT IF EXISTS chk_presentacion_precio_override;
+ALTER TABLE producto_presentaciones ADD CONSTRAINT chk_presentacion_precio_override
+  CHECK (
+    (modo_venta <> 'fijo'  OR (precio_override IS NOT NULL AND precio_override >= 0)) AND
+    (modo_venta <> 'margen' OR (margen_override IS NOT NULL AND margen_override >= 0))
+  );
+
 -- ============================================================================
 -- 6. PRODUCTO PRECIOS (precios calculados por moneda)
 -- ============================================================================
@@ -290,6 +355,24 @@ ALTER TABLE compras ADD COLUMN IF NOT EXISTS referencia VARCHAR(100);
 
 -- Migración: tasa aplicada en la compra (NULL = tasa por defecto de la moneda)
 ALTER TABLE compras ADD COLUMN IF NOT EXISTS tasa DECIMAL(18, 6);
+ALTER TABLE compras ADD COLUMN IF NOT EXISTS creado_en TIMESTAMP NOT NULL DEFAULT NOW();
+ALTER TABLE compras ADD COLUMN IF NOT EXISTS actualizado_en TIMESTAMP NOT NULL DEFAULT NOW();
+
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'estado_pago_compra') THEN
+    CREATE TYPE estado_pago_compra AS ENUM ('pagado', 'parcial', 'pendiente');
+  END IF;
+END $$;
+ALTER TABLE compras ADD COLUMN IF NOT EXISTS estado_pago estado_pago_compra NOT NULL DEFAULT 'pagado';
+ALTER TABLE compras ADD COLUMN IF NOT EXISTS saldo_pendiente NUMERIC(18, 6) NOT NULL DEFAULT 0;
+ALTER TABLE compras ADD COLUMN IF NOT EXISTS descuento_pct NUMERIC(6, 3) NOT NULL DEFAULT 0;
+ALTER TABLE compras ADD COLUMN IF NOT EXISTS descuento_monto NUMERIC(18, 6) NOT NULL DEFAULT 0;
+
+ALTER TABLE compra_items ADD COLUMN IF NOT EXISTS descuento1_pct NUMERIC(6, 3) NOT NULL DEFAULT 0;
+ALTER TABLE compra_items ADD COLUMN IF NOT EXISTS descuento2_pct NUMERIC(6, 3) NOT NULL DEFAULT 0;
+ALTER TABLE compra_items ADD COLUMN IF NOT EXISTS subtotal_bruto NUMERIC(18, 6) NOT NULL DEFAULT 0;
+ALTER TABLE compra_items ADD COLUMN IF NOT EXISTS descuento_monto NUMERIC(18, 6) NOT NULL DEFAULT 0;
 
 -- Migración: eliminar proveedores duplicados conservando el de menor id
 -- y reasignando las compras al proveedor conservado (requiere tabla compras).
@@ -347,6 +430,18 @@ CREATE TABLE IF NOT EXISTS compra_items (
     subtotal_base DECIMAL(18, 2) NOT NULL
 );
 
+-- Migración: SNAPSHOT de la presentación comprada (ej. "1 Caja de 24 unidades").
+-- `cantidad` sigue SIENDO unidades (pivota el stock/kardex/retornos); estas
+-- columnas solo documentan CÓMO se compró, congelando nombre y factor por si la
+-- presentación cambia o se borra después. `costo_presentacion` guarda el costo
+-- negociado de una presentación (exacto para la factura); `costo_unit` es la
+-- derivación por unidad que alimenta el kardex.
+ALTER TABLE compra_items ADD COLUMN IF NOT EXISTS presentacion_id UUID REFERENCES producto_presentaciones(id) ON DELETE SET NULL;
+ALTER TABLE compra_items ADD COLUMN IF NOT EXISTS presentacion_nombre VARCHAR(100);
+ALTER TABLE compra_items ADD COLUMN IF NOT EXISTS presentacion_unidades INTEGER;
+ALTER TABLE compra_items ADD COLUMN IF NOT EXISTS cantidad_presentaciones INTEGER;
+ALTER TABLE compra_items ADD COLUMN IF NOT EXISTS costo_presentacion DECIMAL(18, 2);
+
 -- ============================================================================
 -- 11. VENTAS
 -- ============================================================================
@@ -382,6 +477,10 @@ ALTER TABLE ventas ADD COLUMN IF NOT EXISTS tipo_pago VARCHAR(20) NOT NULL DEFAU
 ALTER TABLE ventas ADD COLUMN IF NOT EXISTS descuento DECIMAL(18, 2) NOT NULL DEFAULT 0.00;
 ALTER TABLE ventas ADD COLUMN IF NOT EXISTS descuento_base DECIMAL(18, 2) NOT NULL DEFAULT 0.00;
 
+-- Migración: momento real de la venta (para ordenar por hora dentro del mismo
+-- día, ya que `fecha` es solo DATE).
+ALTER TABLE ventas ADD COLUMN IF NOT EXISTS creado_en TIMESTAMP NOT NULL DEFAULT NOW();
+
 -- ============================================================================
 -- 12. VENTA ITEMS
 -- ============================================================================
@@ -389,12 +488,37 @@ CREATE TABLE IF NOT EXISTS venta_items (
     id SERIAL PRIMARY KEY,
     venta_id INTEGER NOT NULL REFERENCES ventas(id) ON DELETE CASCADE,
     producto_id INTEGER NOT NULL REFERENCES productos(id) ON DELETE RESTRICT,
+    -- SIEMPRE en UNIDADES, tenga o no presentación la línea (cajas × unidades).
+    -- Kardex, stock y CPP dependen de este significado: no cambiarlo.
     cantidad INTEGER NOT NULL,
+    -- Precio unitario EFECTIVO cobrado = precio_presentacion ÷ presentacion_unidades
+    -- cuando hay presentación, para que los reportes por unidad sigan valiendo.
     precio_unit DECIMAL(18, 2) NOT NULL,
     precio_unit_base DECIMAL(18, 2) NOT NULL,
     subtotal DECIMAL(18, 2) NOT NULL,
-    subtotal_base DECIMAL(18, 2) NOT NULL
+    subtotal_base DECIMAL(18, 2) NOT NULL,
+    -- Snapshot de la presentación en el momento de la venta: permite mostrar
+    -- "Caja x20 ×2" aunque luego se renombre o se dé de baja la presentación.
+    presentacion_id UUID NULL REFERENCES producto_presentaciones(id) ON DELETE SET NULL,
+    presentacion_nombre VARCHAR NULL,
+    presentacion_unidades INTEGER NULL,
+    cantidad_presentaciones DECIMAL(18, 6) NULL,
+    precio_presentacion DECIMAL(18, 6) NULL
 );
+
+ALTER TABLE venta_items ADD COLUMN IF NOT EXISTS presentacion_id UUID NULL REFERENCES producto_presentaciones(id) ON DELETE SET NULL;
+ALTER TABLE venta_items ADD COLUMN IF NOT EXISTS presentacion_nombre VARCHAR NULL;
+ALTER TABLE venta_items ADD COLUMN IF NOT EXISTS presentacion_unidades INTEGER NULL;
+ALTER TABLE venta_items ADD COLUMN IF NOT EXISTS cantidad_presentaciones DECIMAL(18, 6) NULL;
+ALTER TABLE venta_items ADD COLUMN IF NOT EXISTS precio_presentacion DECIMAL(18, 6) NULL;
+
+-- Migración: descuento por LÍNEA de venta (monto plano en la moneda de la
+-- venta, aplicado antes del impuesto). El descuento total de la venta es
+-- ventas.descuento + SUM(venta_items.descuento). `subtotal` de la línea sigue
+-- siendo el BRUTO (sin descontar) para no romper reportes ni retornos.
+ALTER TABLE venta_items ADD COLUMN IF NOT EXISTS descuento DECIMAL(18, 2) NOT NULL DEFAULT 0.00;
+ALTER TABLE venta_items ADD COLUMN IF NOT EXISTS descuento_base DECIMAL(18, 2) NOT NULL DEFAULT 0.00;
+CREATE INDEX IF NOT EXISTS idx_venta_items_presentacion ON venta_items(presentacion_id);
 
 -- ============================================================================
 -- 12.5 CREDITOS (cuentas por cobrar a clientes)
@@ -594,6 +718,8 @@ CREATE INDEX IF NOT EXISTS idx_productos_marca ON productos(marca_id);
 CREATE INDEX IF NOT EXISTS idx_productos_codigo ON productos(codigo);
 CREATE INDEX IF NOT EXISTS idx_productos_activo ON productos(activo);
 
+CREATE INDEX IF NOT EXISTS idx_producto_presentaciones_producto ON producto_presentaciones(producto_id);
+
 CREATE INDEX IF NOT EXISTS idx_producto_precios_producto ON producto_precios(producto_id);
 CREATE INDEX IF NOT EXISTS idx_producto_precios_moneda ON producto_precios(moneda_id);
 
@@ -692,6 +818,9 @@ CREATE TRIGGER trg_creditos_actualizado BEFORE UPDATE ON creditos
     FOR EACH ROW EXECUTE FUNCTION actualizar_actualizado_en();
 DROP TRIGGER IF EXISTS trg_retornos_actualizado ON retornos;
 CREATE TRIGGER trg_retornos_actualizado BEFORE UPDATE ON retornos
+    FOR EACH ROW EXECUTE FUNCTION actualizar_actualizado_en();
+DROP TRIGGER IF EXISTS trg_producto_presentaciones_actualizado ON producto_presentaciones;
+CREATE TRIGGER trg_producto_presentaciones_actualizado BEFORE UPDATE ON producto_presentaciones
     FOR EACH ROW EXECUTE FUNCTION actualizar_actualizado_en();
 
 -- ============================================================================

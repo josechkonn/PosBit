@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback, useMemo } from "react";
+import { useState, useEffect, useCallback } from "react";
 import Link from "next/link";
 import { ArrowDown, ArrowUp, RefreshCw, Download, Plus } from "lucide-react";
 import { PageHeader } from "@/components/ui/page-header";
@@ -9,6 +9,7 @@ import { Button } from "@/components/ui/button";
 import { Select } from "@/components/ui/select";
 import { StatCard } from "@/components/ui/stat-card";
 import { Table, Td, Tr, HeaderConfig } from "@/components/ui/table";
+import { Pagination } from "@/components/ui/pagination";
 import { useToast } from "@/components/ui/toast";
 import { fmt, fmtDateTime } from "@/lib/format";
 import { cn } from "@/lib/utils";
@@ -34,6 +35,21 @@ interface KardexItem {
   producto_moneda_simbolo?: string | null;
 }
 
+interface PaginationInfo {
+  page: number;
+  limit: number;
+  total: number;
+  totalPages: number;
+}
+
+interface Stats {
+  entradas: number;
+  salidas: number;
+  ajustes: number;
+}
+
+const PAGE_SIZE = 20;
+
 export default function KardexPage() {
   const { toast } = useToast();
 
@@ -41,6 +57,9 @@ export default function KardexPage() {
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState("");
   const [tipoFilter, setTipoFilter] = useState<string>("todos");
+  const [pagination, setPagination] = useState<PaginationInfo>({ page: 1, limit: PAGE_SIZE, total: 0, totalPages: 0 });
+  const [currentPage, setCurrentPage] = useState(1);
+  const [stats, setStats] = useState<Stats>({ entradas: 0, salidas: 0, ajustes: 0 });
 
   // Sorting
   const [sortKey, setSortKey] = useState<string>("fecha");
@@ -49,17 +68,27 @@ export default function KardexPage() {
   const fetchData = useCallback(async () => {
     setLoading(true);
     try {
-      const res = await fetch("/api/kardex");
+      const params = new URLSearchParams({
+        page: String(currentPage),
+        limit: String(PAGE_SIZE),
+        search,
+        tipo: tipoFilter,
+        sortKey,
+        sortOrder,
+      });
+      const res = await fetch(`/api/kardex?${params.toString()}`);
       if (res.ok) {
         const data = await res.json();
         setMovimientos(Array.isArray(data) ? data : data.movimientos || []);
+        setPagination(data.pagination || { page: 1, limit: PAGE_SIZE, total: 0, totalPages: 0 });
+        if (data.stats) setStats(data.stats);
       }
     } catch (error) {
       console.error("Error fetching kardex:", error);
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [currentPage, search, tipoFilter, sortKey, sortOrder]);
 
   useEffect(() => {
     fetchData();
@@ -72,58 +101,8 @@ export default function KardexPage() {
       setSortKey(key);
       setSortOrder("asc");
     }
+    setCurrentPage(1);
   };
-
-  const filtered = useMemo(() => {
-    let list = movimientos;
-
-    if (tipoFilter !== "todos") {
-      list = list.filter((k) => k.tipo === tipoFilter);
-    }
-
-    if (search.trim()) {
-      const q = search.toLowerCase();
-      list = list.filter(
-        (k) =>
-          k.producto_nombre.toLowerCase().includes(q) ||
-          k.producto_codigo.toLowerCase().includes(q) ||
-          (k.motivo && k.motivo.toLowerCase().includes(q))
-      );
-    }
-
-    if (sortKey) {
-      list = [...list].sort((a, b) => {
-        let aVal: any = a[sortKey as keyof KardexItem];
-        let bVal: any = b[sortKey as keyof KardexItem];
-
-        if (["cantidad", "costo_unit", "saldo_anterior", "saldo_actual"].includes(sortKey)) {
-          aVal = parseFloat(String(aVal));
-          bVal = parseFloat(String(bVal));
-        }
-
-        if (aVal === null || aVal === undefined) aVal = "";
-        if (bVal === null || bVal === undefined) bVal = "";
-
-        if (typeof aVal === "number" && typeof bVal === "number") {
-          return sortOrder === "asc" ? aVal - bVal : bVal - aVal;
-        }
-
-        const comp = String(aVal).localeCompare(String(bVal), undefined, { numeric: true, sensitivity: "base" });
-        return sortOrder === "asc" ? comp : -comp;
-      });
-    }
-
-    return list;
-  }, [movimientos, search, tipoFilter, sortKey, sortOrder]);
-
-  // Statistics
-  const stats = useMemo(() => {
-    const entradas = movimientos.filter((m) => m.tipo === "Entrada").reduce((acc, m) => acc + Math.abs(m.cantidad), 0);
-    const salidas = movimientos.filter((m) => m.tipo === "Salida").reduce((acc, m) => acc + Math.abs(m.cantidad), 0);
-    const ajustes = movimientos.filter((m) => m.tipo === "Ajuste").length;
-
-    return { entradas, salidas, ajustes };
-  }, [movimientos]);
 
   const headers: HeaderConfig[] = [
     { key: "fecha", label: "Fecha/Hora", sortable: true },
@@ -137,29 +116,52 @@ export default function KardexPage() {
     { key: "saldo_actual", label: "Saldo Act.", sortable: true },
   ];
 
-  const handleExportExcel = () => {
-    if (filtered.length === 0) {
-      toast("No hay movimientos para exportar", "warning");
-      return;
+  const handleExportExcel = async () => {
+    try {
+      const params = new URLSearchParams({
+        page: "1",
+        limit: "1000",
+        search,
+        tipo: tipoFilter,
+        sortKey,
+        sortOrder,
+      });
+      const res = await fetch(`/api/kardex?${params.toString()}`);
+      if (!res.ok) throw new Error();
+      const data = await res.json();
+      const exportadas: KardexItem[] = data.movimientos || [];
+
+      if (exportadas.length === 0) {
+        toast("No hay movimientos para exportar", "warning");
+        return;
+      }
+
+      const rows = exportadas.map((k) => ({
+        Fecha: fmtDateTime(k.fecha),
+        Código: k.producto_codigo,
+        Producto: k.producto_nombre,
+        Tipo: k.tipo,
+        Motivo: k.motivo || "N/A",
+        Cantidad: k.cantidad,
+        "Costo Unit.": parseFloat(String(k.costo_unit)),
+        "Saldo Anterior": k.saldo_anterior,
+        "Saldo Actual": k.saldo_actual,
+      }));
+
+      const worksheet = XLSX.utils.json_to_sheet(rows);
+      const workbook = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(workbook, worksheet, "Kardex");
+      XLSX.writeFile(workbook, `kardex_${new Date().toISOString().slice(0, 10)}.xlsx`);
+
+      const total = data.pagination?.total ?? exportadas.length;
+      if (total > exportadas.length) {
+        toast(`Exportados ${exportadas.length} de ${total} movimientos`, "warning");
+      } else {
+        toast("Archivo Excel descargado", "success");
+      }
+    } catch {
+      toast("Error al exportar el kardex", "error");
     }
-
-    const rows = filtered.map((k) => ({
-      Fecha: fmtDateTime(k.fecha),
-      Código: k.producto_codigo,
-      Producto: k.producto_nombre,
-      Tipo: k.tipo,
-      Motivo: k.motivo || "N/A",
-      Cantidad: k.cantidad,
-      "Costo Unit.": parseFloat(String(k.costo_unit)),
-      "Saldo Anterior": k.saldo_anterior,
-      "Saldo Actual": k.saldo_actual,
-    }));
-
-    const worksheet = XLSX.utils.json_to_sheet(rows);
-    const workbook = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(workbook, worksheet, "Kardex");
-    XLSX.writeFile(workbook, `kardex_${new Date().toISOString().slice(0, 10)}.xlsx`);
-    toast("Archivo Excel descargado", "success");
   };
 
   return (
@@ -202,11 +204,17 @@ export default function KardexPage() {
         <SearchBar
           placeholder="Buscar producto, código o motivo..."
           value={search}
-          onChange={(e) => setSearch(e.target.value)}
+          onChange={(e) => {
+            setSearch(e.target.value);
+            setCurrentPage(1);
+          }}
         />
         <Select
           value={tipoFilter}
-          onChange={(e) => setTipoFilter(e.target.value)}
+          onChange={(e) => {
+            setTipoFilter(e.target.value);
+            setCurrentPage(1);
+          }}
           className="w-44 bg-card"
           aria-label="Tipo de movimiento"
         >
@@ -227,14 +235,21 @@ export default function KardexPage() {
         <div className="flex items-center justify-center py-12 text-sm text-muted-foreground">
           Cargando movimientos del Kardex...
         </div>
-      ) : filtered.length === 0 ? (
+      ) : movimientos.length === 0 ? (
         <div className="flex flex-col items-center justify-center rounded-xl border border-dashed border-border py-16 text-center">
-          <p className="text-lg font-medium text-foreground">No hay movimientos registrados</p>
-          <p className="mt-1 text-sm text-muted-foreground">Los movimientos se registrarán al comprar, vender o ajustar inventario</p>
+          <p className="text-lg font-medium text-foreground">
+            {search || tipoFilter !== "todos" ? "No se encontraron movimientos" : "No hay movimientos registrados"}
+          </p>
+          <p className="mt-1 text-sm text-muted-foreground">
+            {search || tipoFilter !== "todos"
+              ? "Prueba con otro filtro o búsqueda"
+              : "Los movimientos se registrarán al comprar, vender o ajustar inventario"}
+          </p>
         </div>
       ) : (
+        <>
         <Table headers={headers} sortKey={sortKey} sortOrder={sortOrder} onSort={handleSort}>
-          {filtered.map((k) => (
+          {movimientos.map((k) => (
             <Tr key={k.id}>
               <Td mono>{fmtDateTime(k.fecha)}</Td>
               <Td mono>{k.producto_codigo}</Td>
@@ -281,6 +296,16 @@ export default function KardexPage() {
             </Tr>
           ))}
         </Table>
+
+        <Pagination
+          currentPage={pagination.page}
+          totalPages={pagination.totalPages}
+          totalItems={pagination.total}
+          pageSize={pagination.limit}
+          noun="movimientos"
+          onPageChange={setCurrentPage}
+        />
+        </>
       )}
     </div>
   );

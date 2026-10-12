@@ -21,7 +21,7 @@ export async function GET() {
         FROM ventas v
         JOIN monedas mo ON v.moneda_id = mo.id
         WHERE v.estado = 'Pagada'
-        ORDER BY v.fecha DESC, v.id DESC
+        ORDER BY v.fecha DESC, v.creado_en DESC, v.id DESC
         LIMIT 5
       `),
       query(`

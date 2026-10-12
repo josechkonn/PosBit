@@ -225,7 +225,7 @@ export async function PATCH(request: Request) {
   try {
     await requireSession();
     const body = await request.json();
-    const { id, moneda_id, limite } = body;
+    const { id, moneda_id, limite, recibe_credito } = body;
 
     if (!id || !moneda_id || limite === undefined || limite === null) {
       return NextResponse.json({ error: "Campos requeridos: id, moneda_id, limite" }, { status: 400 });
@@ -237,6 +237,12 @@ export async function PATCH(request: Request) {
       const existe = await client.query(`SELECT id FROM clientes WHERE id = $1`, [id]);
       if (existe.rows.length === 0) {
         throw new Error("Cliente no encontrado");
+      }
+
+      // Opcional: habilitar el crédito del cliente (necesario para que un
+      // límite > 0 sea usable en el POS). Se envía desde el perfil al añadir crédito.
+      if (recibe_credito === true) {
+        await client.query(`UPDATE clientes SET recibe_credito = true WHERE id = $1`, [id]);
       }
 
       await client.query(

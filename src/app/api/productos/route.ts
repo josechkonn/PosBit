@@ -3,72 +3,269 @@ export const dynamic = 'force-dynamic';
 import { NextResponse } from "next/server";
 import { requireSession } from "@/lib/auth-server";
 import { query, queryOne, execute, transaction } from "@/lib/db";
-import { aBase, convertir, tasaUsd, monedaDeProducto, monedaCostoDeProducto, preciosDeProducto } from "@/lib/money";
+import { redondear, monedaDeProducto, monedaCostoDeProducto, preciosDeProducto, presentacionesDeProducto, convertirConMetodo, reglasConversion } from "@/lib/money";
+import { getConfiguracionGlobal } from "@/lib/global-config";
+import { leerFiltros, SIN_FILTROS, construirWhere, calcularFacetas } from "@/lib/filtros-productos";
+
+/** Error de validación de datos enviados por el cliente → HTTP 400. */
+class ValidationError extends Error {}
+
+/** Modo de venta de una presentación (patrón NULL = derivar, retrocompatible). */
+type ModoVentaPres = "derivado" | "fijo" | "margen";
+
+interface PresentacionNormalizada {
+  id: string | null;
+  nombre: string;
+  unidades: number;
+  activo: boolean;
+  modo_venta: ModoVentaPres;
+  precio_override: number | null;
+  margen_override: number | null;
+}
+
+/**
+ * Valida y normaliza la lista de presentaciones enviada por el cliente.
+ * Unidad es implícita (factor 1) y no se persiste; cada presentación debe
+ * tener nombre y unidades enteras > 1. Devuelve lista deduplicada por nombre.
+ * Devuelve `null` si el campo `presentaciones` NO vino en el body: en PUT eso
+ * significa "no tocar las presentaciones" (compatibilidad con clientes viejos).
+ *
+ * El PRECIO de la presentación es opcional según su modo:
+ *   derivado → no usa ningún campo (precio = unidad × unidades)
+ *   fijo     → exige `precio_override` ≥ 0
+ *   margen   → exige `margen_override` ≥ 0
+ * El COSTO nunca se guarda: se deriva del CPP.
+ */
+function normalizarPresentaciones(
+  body: Record<string, unknown> | null
+): PresentacionNormalizada[] | null {
+  if (body?.presentaciones === undefined) return null;
+  const raw = Array.isArray(body.presentaciones) ? (body.presentaciones as any[]) : [];
+  const vistos = new Set<string>();
+  const out: PresentacionNormalizada[] = [];
+
+  const num = (v: unknown): number | null => {
+    if (v === null || v === undefined || v === "") return null;
+    const n = Number(v);
+    return Number.isFinite(n) ? n : null;
+  };
+
+  for (const p of raw) {
+    if (!p || typeof p !== "object") continue;
+    const nombre = String(p?.nombre ?? "").trim();
+    if (!nombre) continue;
+    const clave = nombre.toLowerCase();
+    if (vistos.has(clave)) continue; // nombres duplicados (insensible a mayúsculas)
+    vistos.add(clave);
+
+    const unidades = parseInt(String(p?.unidades), 10);
+    if (!Number.isInteger(unidades) || unidades <= 1) {
+      throw new ValidationError(`Presentación "${nombre}": las unidades deben ser enteras y mayores a 1`);
+    }
+
+    const modoCrudo = String(p?.modo_venta ?? "derivado");
+    const modo_venta: ModoVentaPres =
+      modoCrudo === "fijo" || modoCrudo === "margen" ? (modoCrudo as ModoVentaPres) : "derivado";
+
+    const precio_override = num(p?.precio_override);
+    const margen_override = num(p?.margen_override);
+
+    if (modo_venta === "fijo") {
+      if (precio_override === null || precio_override < 0) {
+        throw new ValidationError(`Presentación "${nombre}": el modo "precio fijo" necesita un precio ≥ 0`);
+      }
+    }
+    if (modo_venta === "margen") {
+      if (margen_override === null || margen_override < 0) {
+        throw new ValidationError(`Presentación "${nombre}": el modo "por margen" necesita un margen ≥ 0`);
+      }
+    }
+
+    out.push({
+      id: p?.id ? String(p.id) : null,
+      nombre,
+      unidades,
+      activo: p?.activo !== false,
+      modo_venta,
+      // Solo se guarda el override del modo activo; el otro se limpia para que
+      // un cambio de modo no deje datos viejos que puedan reactivarse.
+      precio_override: modo_venta === "fijo" ? precio_override : null,
+      margen_override: modo_venta === "margen" ? margen_override : null,
+    });
+  }
+
+  return out;
+}
+
+/**
+ * Normaliza la lista de proveedores de un producto (N:M). Acepta un array de
+ * ids o un único id (compatibilidad con clientes viejos). Devuelve ids únicos
+ * y válidos; `[]` si no viene nada o viene vacío.
+ */
+function normalizarProveedorIds(raw: unknown): number[] {
+  if (Array.isArray(raw)) {
+    return Array.from(
+      new Set(
+        raw
+          .map((x) => parseInt(String(x), 10))
+          .filter((n) => Number.isInteger(n) && n > 0)
+      )
+    );
+  }
+  if (raw != null && raw !== "") {
+    const n = parseInt(String(raw), 10);
+    return Number.isInteger(n) && n > 0 ? [n] : [];
+  }
+  return [];
+}
 
 export async function GET(request: Request) {
   try {
     await requireSession();
     const { searchParams } = new URL(request.url);
     const page = Math.max(1, parseInt(searchParams.get("page") || "1", 10));
-    const searchParam = (searchParams.get("search") || searchParams.get("q") || "").trim();
-    const hasSearch = searchParam.length > 0;
 
     const limitParam = searchParams.get("limit");
     const limit = limitParam ? Math.min(1000, Math.max(1, parseInt(limitParam, 10))) : 20;
     const offset = (page - 1) * limit;
 
-    let whereClause = "WHERE p.activo = true";
-    let params: any[] = [limit, offset];
+    const filtros = leerFiltros(searchParams);
+    // Compatibilidad: sin filtros, el comportamiento por defecto es el de
+    // siempre (solo productos activos). Con filtros, manda lo que se pida —
+    // así `estado_prod=inactivo` sí puede devolver productos inactivos, que
+    // antes eran invisibles hasta para el filtro que existía para buscarlos.
+    if (SIN_FILTROS(filtros)) filtros.estadoProd = "activo";
 
-    if (hasSearch) {
-      whereClause += ` AND (p.nombre ILIKE $3 OR p.codigo ILIKE $3 OR c.nombre ILIKE $3 OR m.nombre ILIKE $3 OR p.descripcion ILIKE $3)`;
-      params.push(`%${searchParam}%`);
-    }
+    const { where, params } = construirWhere(filtros);
+    // LIMIT/OFFSET van al final de la lista de parámetros.
+    const limitPh = `$${params.length + 1}`;
+    const offsetPh = `$${params.length + 2}`;
 
-    const totalRow = await queryOne<{ count: string }>(
-      hasSearch
-        ? `SELECT COUNT(*) as count FROM productos p LEFT JOIN categorias c ON p.categoria_id = c.id LEFT JOIN marcas m ON p.marca_id = m.id WHERE p.activo = true AND (p.nombre ILIKE $1 OR p.codigo ILIKE $1 OR c.nombre ILIKE $1 OR m.nombre ILIKE $1 OR p.descripcion ILIKE $1)`
-        : `SELECT COUNT(*) as count FROM productos WHERE activo = true`,
-      hasSearch ? [`%${searchParam}%`] : []
-    );
-    const total = Number(totalRow?.count || 0);
-
-    const productos = await query(`
-      SELECT 
+    const filas = await query(`
+      SELECT
         p.id, p.codigo, p.nombre, p.descripcion, p.imagen,
         p.stock, p.stock_minimo, p.activo, p.iva_incluido, p.moneda_base_id,
         p.precio_base, p.costo_base, p.moneda_costo_id,
+        p.margen_ganancia, p.costo_promedio, p.costo_promedio_base, p.precio_auto, p.precio_actualizado_en,
         p.categoria_id, p.marca_id, p.proveedor_id,
         c.nombre as categoria_nombre,
         m.nombre as marca_nombre,
-        pr.nombre as proveedor_nombre
+        pr.nombre as proveedor_nombre,
+        COUNT(*) OVER() AS total_filtrado
       FROM productos p
       LEFT JOIN categorias c ON p.categoria_id = c.id
       LEFT JOIN marcas m ON p.marca_id = m.id
       LEFT JOIN proveedores pr ON p.proveedor_id = pr.id
-      ${whereClause}
+      ${where}
       ORDER BY p.codigo ASC, p.id ASC
-      LIMIT $1 OFFSET $2
-    `, params);
+      LIMIT ${limitPh} OFFSET ${offsetPh}
+    `, [...params, limit, offset]);
+
+    // `COUNT(*) OVER()` se evalúa antes del LIMIT, así que da el total del
+    // conjunto filtrado sin una segunda consulta que pueda desincronizarse.
+    const total = Number((filas[0] as any)?.total_filtrado ?? 0);
+    const productos = (filas as any[]).map(({ total_filtrado, ...resto }) => resto);
+
+    // Las facetas solo se piden si hay filtros: el POS y los modales llaman a
+    // esta API sin parámetros y no tienen por qué pagar cuatro GROUP BY.
+    const hayFiltros = !SIN_FILTROS(filtros);
+    const facetas = hayFiltros ? await calcularFacetas(filtros, query) : null;
 
     // Catálogo completo (incluso monedas inactivas) para derivar los precios.
     // Es el mismo criterio que usan POST/PUT y el resto del sistema.
     const catalogo = await query(`SELECT id, codigo, simbolo, tasa, tasa_ref_moneda_id, decimales, es_base, activo, usa_tasa_usd_directa, tasa_usd_directa FROM monedas ORDER BY es_base DESC, codigo ASC, id ASC`);
+
+    // Reglas del motor: el COSTO se deriva con el método de compras y el PRECIO
+    // con el de ventas (directa o triangulación), igual que en el resto del
+    // sistema — así la lista no muestra valores que difieran de los que la
+    // compra/el modal calculan.
+    const cfgGlobal = await getConfiguracionGlobal();
+    const reglas = reglasConversion(cfgGlobal, catalogo);
 
     // Solo el precio en la moneda base del producto está guardado
     // (`precio_base`/`costo_base`). Las monedas restantes se DERIVAN en
     // lectura con las tasas actuales, así un cambio de conversión se refleja
     // en todos los productos sin reescribir `producto_precios`.
     const baseSistema = catalogo.find((m: any) => m.es_base) || catalogo[0];
-    const productosConPrecios = (productos as any[]).map((p) => ({
-      ...p,
-      precios: preciosDeProducto(p, catalogo, baseSistema),
-    }));
+
+    // Presentaciones de los productos de la página (una sola consulta).
+    // `presentacionesDeProducto` deriva precio/costo de presentación en lectura.
+    const productoIds = (productos as any[]).map((p) => p.id);
+    const presentacionesRows = productoIds.length
+      ? await query(
+          `SELECT id, producto_id, nombre, unidades, activo,
+                  modo_venta, precio_override, margen_override
+           FROM producto_presentaciones
+           WHERE producto_id = ANY($1::int[])
+           ORDER BY nombre ASC, unidades ASC`,
+          [productoIds]
+        )
+      : [];
+    const presPorProducto = new Map<number, any[]>();
+    for (const pr of presentacionesRows as any[]) {
+      const lista = presPorProducto.get(pr.producto_id) || [];
+      lista.push(pr);
+      presPorProducto.set(pr.producto_id, lista);
+    }
+
+    // Relación N:M proveedores del producto (lista completa, no solo el principal).
+    const proveedoresRows = productoIds.length
+      ? await query(
+          `SELECT pp.producto_id, pr.id, pr.nombre
+           FROM producto_proveedores pp
+           JOIN proveedores pr ON pr.id = pp.proveedor_id
+           WHERE pp.producto_id = ANY($1::int[])
+           ORDER BY pr.nombre ASC, pr.id ASC`,
+          [productoIds]
+        )
+      : [];
+    const provPorProducto = new Map<number, any[]>();
+    for (const pv of proveedoresRows as any[]) {
+      const lista = provPorProducto.get(pv.producto_id) || [];
+      lista.push({ id: pv.id, nombre: pv.nombre });
+      provPorProducto.set(pv.producto_id, lista);
+    }
+
+    const decimalesVenta = (p: any) => {
+      const m = monedaDeProducto(p, baseSistema, catalogo);
+      return Number((m as any)?.decimales ?? 2);
+    };
+
+    const productosConPrecios = (productos as any[]).map((p) => {
+      // El precio de la presentación vive en la MONEDA DE VENTA del producto,
+      // así que el modo 'margen' necesita el CPP convertido a esa moneda (viene
+      // en USD base). Se usa la misma regla que la cascada de compras.
+      const monedaVenta = monedaDeProducto(p, baseSistema, catalogo) as any;
+      const cppBase = Number(p.costo_promedio_base) || 0;
+      const costoUnitarioVenta =
+        cppBase > 0
+          ? convertirConMetodo(cppBase, baseSistema as any, monedaVenta, {
+              metodo: reglas.compras.metodo,
+              monedaTransito: reglas.compras.monedaTransito,
+              catalogo,
+            }, 6)
+          : null;
+
+      return {
+        ...p,
+        precios: preciosDeProducto(p, catalogo, baseSistema, reglas),
+        presentaciones: presentacionesDeProducto(
+          p,
+          presPorProducto.get(p.id) || [],
+          decimalesVenta(p),
+          costoUnitarioVenta
+        ),
+        proveedores: provPorProducto.get(p.id) || [],
+      };
+    });
 
     return NextResponse.json({
       productos: productosConPrecios,
       monedas: (catalogo as any[]).filter((m) => m.activo),
       pagination: { page, limit, total, totalPages: Math.ceil(total / limit) },
+      // Conteos por dimensión para los desplegables. `null` cuando no hay
+      // filtros (ver `hayFiltros`).
+      facetas,
     });
   } catch (error: unknown) {
     console.error("Error al obtener productos:", error);
@@ -81,21 +278,106 @@ export async function POST(request: Request) {
   try {
     await requireSession();
     const body = await request.json();
-    const { codigo, nombre, descripcion, categoria_id, marca_id, proveedor_id, stock, stock_minimo, precio_base, costo_base, activo, iva_incluido, moneda_base_id, moneda_costo_id } = body;
+    const { codigo, nombre, descripcion, categoria_id, marca_id, proveedor_id, stock, stock_minimo, precio_base, costo_base, activo, iva_incluido, moneda_base_id, moneda_costo_id, margen_ganancia } = body;
 
-    if (!codigo || !nombre || precio_base === undefined || costo_base === undefined) {
-      return NextResponse.json({ error: "Campos requeridos: codigo, nombre, precio_base, costo_base" }, { status: 400 });
+    // El precio de venta es opcional: si no se envía pero el producto define un
+    // margen %, se autocalcula (precio = costo × (1 + margen/100)).
+    if (!codigo || !nombre || costo_base === undefined) {
+      return NextResponse.json({ error: "Campos requeridos: codigo, nombre, costo_base" }, { status: 400 });
     }
 
+    // Proveedores N:M: `proveedor_ids` (nuevo) o `proveedor_id` (legacy).
+    const proveedorIds = body.proveedor_ids !== undefined
+      ? normalizarProveedorIds(body.proveedor_ids)
+      : normalizarProveedorIds(proveedor_id);
+    const proveedorPrincipal = proveedorIds[0] ?? null;
+
+    const presentaciones = normalizarPresentaciones(body) ?? [];
+    const margen = Math.max(0, Number(margen_ganancia) || 0);
+
     const result = await transaction(async (client) => {
+      // Catálogo temprano: necesario para autocalcular el precio desde el margen.
+      const monedasPre = await client.query(`SELECT * FROM monedas`);
+      const catalogoPre = monedasPre.rows;
+      const monedaBasePre = catalogoPre.find((m: any) => m.es_base) || catalogoPre[0];
+
+      // Reglas del motor leídas DENTRO de la transacción: la cascada de precios
+      // (costo → moneda de venta) y las derivaciones por moneda respetan el
+      // método configurado (directa o triangulación), igual que las compras.
+      const cfgGlobal = await getConfiguracionGlobal({
+        query: (text: string, params?: any[]) => client.query(text, params),
+      });
+      const reglas = reglasConversion(cfgGlobal, catalogoPre);
+
+      const monedaVentaPre = monedaDeProducto({ moneda_base_id: moneda_base_id || null }, monedaBasePre, catalogoPre);
+      const monedaCostoPre = monedaCostoDeProducto(
+        { moneda_base_id: moneda_base_id || null, moneda_costo_id: moneda_costo_id || null },
+        monedaBasePre,
+        catalogoPre
+      );
+      const decVentaPre = Number(monedaVentaPre.decimales ?? 2);
+
+      // Precio de venta final: el enviado, o costo→moneda de venta × (1 + margen%).
+      // La conversión del costo usa la regla de COMPRAS (la cascada es efecto de
+      // la compra): en triangulación pasa por la moneda de tránsito configurada.
+      const costoN = Number(costo_base) || 0;
+      let precioFinal = Number(precio_base);
+      if (!Number.isFinite(precioFinal)) {
+        const costoEnVenta = convertirConMetodo(costoN, monedaCostoPre, monedaVentaPre, {
+          ...reglas.compras,
+          catalogo: catalogoPre,
+        }, decVentaPre);
+        precioFinal = margen > 0
+          ? redondear(costoEnVenta * (1 + margen / 100), decVentaPre)
+          : redondear(costoEnVenta, decVentaPre);
+      }
+
+      // CPP inicial: el costo estático de alta (sirve de base para el margen y
+      // para la primera fusión en compras; con stock 0 no diluye nada). Se lleva
+      // a la moneda base con la MISMA regla de compras (método configurado).
+      const costoPromedioInicial = costoN;
+      const costoPromedioBaseInicial = redondear(
+        convertirConMetodo(costoN, monedaCostoPre, monedaBasePre, {
+          ...reglas.compras,
+          catalogo: catalogoPre,
+        }, 6),
+        6
+      );
+
       const res = await client.query(
-        `INSERT INTO productos (codigo, nombre, descripcion, categoria_id, marca_id, proveedor_id, stock, stock_minimo, precio_base, costo_base, activo, iva_incluido, moneda_base_id, moneda_costo_id) 
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14) 
+        `INSERT INTO productos (codigo, nombre, descripcion, categoria_id, marca_id, proveedor_id, stock, stock_minimo, precio_base, costo_base, margen_ganancia, costo_promedio, costo_promedio_base, activo, iva_incluido, moneda_base_id, moneda_costo_id) 
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17) 
          RETURNING *`,
-        [codigo, nombre, descripcion || null, categoria_id || null, marca_id || null, proveedor_id || null, stock || 0, stock_minimo ?? 5, precio_base, costo_base, activo !== false, iva_incluido !== false, moneda_base_id || null, moneda_costo_id || null]
+        [codigo, nombre, descripcion || null, categoria_id || null, marca_id || null, proveedorPrincipal, stock || 0, stock_minimo ?? 5, precioFinal, costo_base, margen, costoPromedioInicial, costoPromedioBaseInicial, activo !== false, iva_incluido !== false, moneda_base_id || null, moneda_costo_id || null]
       );
 
       const producto = res.rows[0];
+
+      // Relación N:M producto ⇄ proveedor (la fuente de verdad de la lista).
+      for (const pid of proveedorIds) {
+        await client.query(
+          `INSERT INTO producto_proveedores (producto_id, proveedor_id)
+           VALUES ($1, $2) ON CONFLICT DO NOTHING`,
+          [producto.id, pid]
+        );
+      }
+
+      // Presentaciones: se insertan tal cual (validación/limpieza ya hechas)
+      for (const pres of presentaciones) {
+        await client.query(
+          `INSERT INTO producto_presentaciones (producto_id, nombre, unidades, activo, modo_venta, precio_override, margen_override)
+           VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+          [
+            producto.id,
+            pres.nombre,
+            pres.unidades,
+            pres.activo,
+            pres.modo_venta,
+            pres.precio_override,
+            pres.margen_override,
+          ]
+        );
+      }
 
       // `precio_base` está en la moneda de VENTA (moneda_base_id) y `costo_base`
       // en la de COMPRA (moneda_costo_id, NULL = misma); los precios por moneda
@@ -116,9 +398,17 @@ export async function POST(request: Request) {
           precio = body.precios[moneda.id].precio;
           costo = body.precios[moneda.id].costo;
         } else {
+          // Derivación respetando el motor: precio con la regla de ventas y
+          // costo con la de compras (mismo criterio que el GET y las compras).
           const decimales = Number(moneda.decimales ?? 2);
-          precio = convertir(Number(precio_base), monedaProducto, moneda, catalogo, decimales);
-          costo = convertir(Number(costo_base), monedaCosto, moneda, catalogo, decimales);
+          precio = convertirConMetodo(Number(precio_base), monedaProducto, moneda, {
+            ...reglas.ventas,
+            catalogo,
+          }, decimales);
+          costo = convertirConMetodo(Number(costo_base), monedaCosto, moneda, {
+            ...reglas.compras,
+            catalogo,
+          }, decimales);
         }
 
         await client.query(
@@ -130,8 +420,12 @@ export async function POST(request: Request) {
 
       if (stock > 0) {
         // El kardex guarda el costo en la moneda de COMPRA del producto y su
-        // equivalente USD
-        const costoUsd = aBase(Number(costo_base), tasaUsd(monedaCosto, catalogo));
+        // equivalente USD, con la MISMA regla de compras del motor (método
+        // configurado), para que el CPP inicial sea consistente.
+        const costoUsd = convertirConMetodo(Number(costo_base), monedaCosto, monedaBase, {
+          ...reglas.compras,
+          catalogo,
+        }, 2);
         await client.query(
           `INSERT INTO kardex (producto_id, fecha, tipo, motivo, cantidad, costo_unit, costo_unit_base, saldo_anterior, saldo_actual) 
            VALUES ($1, NOW(), 'Entrada', 'Existencias iniciales', $2, $3, $4, 0, $2)`,
@@ -146,9 +440,15 @@ export async function POST(request: Request) {
   } catch (error: unknown) {
     console.error("Error al crear producto:", error);
     const err = error as { code?: string; constraint?: string; message?: string };
+    if (error instanceof ValidationError) {
+      return NextResponse.json({ error: error.message }, { status: 400 });
+    }
     if (err.code === "23505") {
       if (err.constraint?.includes("codigo")) {
         return NextResponse.json({ error: "Ya existe un producto con ese código" }, { status: 400 });
+      }
+      if (err.constraint?.includes("producto_presentaciones")) {
+        return NextResponse.json({ error: "Ya existe una presentación con ese nombre para el producto" }, { status: 400 });
       }
       return NextResponse.json({ error: "Registro duplicado" }, { status: 400 });
     }
@@ -160,11 +460,18 @@ export async function PUT(request: Request) {
   try {
     await requireSession();
     const body = await request.json();
-    const { id, codigo, nombre, descripcion, categoria_id, marca_id, proveedor_id, stock, stock_minimo, precio_base, costo_base, activo, iva_incluido, moneda_base_id, moneda_costo_id } = body;
+    const { id, codigo, nombre, descripcion, categoria_id, marca_id, proveedor_id, stock, stock_minimo, precio_base, costo_base, activo, iva_incluido, moneda_base_id, moneda_costo_id, margen_ganancia } = body;
 
     if (!id) {
       return NextResponse.json({ error: "ID requerido" }, { status: 400 });
     }
+
+    // Lista N:M de proveedores enviada por el cliente (null = no tocarla).
+    const proveedorIdsEnviados =
+      body.proveedor_ids !== undefined ? normalizarProveedorIds(body.proveedor_ids) : null;
+
+    const presentaciones = normalizarPresentaciones(body);
+    const margenEnviado = Object.prototype.hasOwnProperty.call(body, "margen_ganancia");
 
     const result = await transaction(async (client) => {
       const productoActual = await client.query(`SELECT * FROM productos WHERE id = $1`, [id]);
@@ -173,6 +480,41 @@ export async function PUT(request: Request) {
       }
 
       const productoAnterior = productoActual.rows[0];
+      const enviado2 = (campo: string) => Object.prototype.hasOwnProperty.call(body, campo);
+
+      // Reglas del motor leídas DENTRO de la transacción (idénticas a POST y
+      // compras): la cascada de margen y las derivaciones por moneda respetan
+      // el método configurado (directa o triangulación).
+      const cfgGlobal = await getConfiguracionGlobal({
+        query: (text: string, params?: any[]) => client.query(text, params),
+      });
+      const monedasMotor = await client.query(`SELECT * FROM monedas`);
+      const reglas = reglasConversion(cfgGlobal, monedasMotor.rows);
+
+      // Margen efectivo: el enviado o el vigente del producto.
+      const margen = margenEnviado
+        ? Math.max(0, Number(margen_ganancia) || 0)
+        : Math.max(0, Number(productoAnterior.margen_ganancia) || 0);
+
+      // Si SOLO cambió el margen (sin precio manual), autocalcular el precio de
+      // venta: costo → moneda de venta × (1 + margen/100). La conversión del
+      // costo usa la regla de COMPRAS (la cascada es efecto de la compra).
+      let precioParam = precio_base;
+      if (margenEnviado && !enviado2("precio_base")) {
+        const catalogoCalc = monedasMotor.rows;
+        const monedaBaseCalc = catalogoCalc.find((m: any) => m.es_base) || catalogoCalc[0];
+        const mVen = monedaDeProducto(productoAnterior, monedaBaseCalc, catalogoCalc);
+        const mCos = monedaCostoDeProducto(productoAnterior, monedaBaseCalc, catalogoCalc);
+        const decVen = Number(mVen.decimales ?? 2);
+        const costoN = Number(costo_base ?? productoAnterior.costo_base) || 0;
+        const costoEnVenta = convertirConMetodo(costoN, mCos, mVen, {
+          ...reglas.compras,
+          catalogo: catalogoCalc,
+        }, decVen);
+        precioParam = margen > 0
+          ? redondear(costoEnVenta * (1 + margen / 100), decVen)
+          : redondear(costoEnVenta, decVen);
+      }
 
       // Las columnas de moneda se VACÍAN si vienen explícitamente en `null`
       // (volver a la moneda del sistema, o a la de venta para el costo); un
@@ -186,7 +528,7 @@ export async function PUT(request: Request) {
 
       const params: any[] = [
         id, codigo, nombre, descripcion, categoria_id, marca_id, proveedor_id || null, stock, stock_minimo,
-        precio_base, costo_base, activo, iva_incluido,
+        precioParam, costo_base, activo, iva_incluido,
       ];
       // Los parámetros se anexan solo si su columna los usa, para que el número
       // de `$n` del SQL coincida con el de los valores enviados.
@@ -214,15 +556,15 @@ export async function PUT(request: Request) {
         params
       );
 
-      const nuevoPrecio = precio_base ?? productoAnterior.precio_base;
+      const nuevoPrecio = precioParam ?? productoAnterior.precio_base;
       const nuevoCosto = costo_base ?? productoAnterior.costo_base;
 
       // Igual que en el POST: `precio_base` se deriva desde la moneda de venta y
       // `costo_base` desde la de compra (independientes) hacia cada moneda
       // Catálogo completo (incluso monedas inactivas): los precios históricos
-      // deben poder convertirse aunque la moneda esté desactivada
-      const monedas = await client.query(`SELECT * FROM monedas`);
-      const catalogo = monedas.rows;
+      // deben poder convertirse aunque la moneda esté desactivada. Reutiliza el
+      // catálogo ya leído para las reglas del motor.
+      const catalogo = monedasMotor.rows;
       const monedaBase = catalogo.find((m: any) => m.es_base) || catalogo[0];
       const monedaProducto = monedaDeProducto(res.rows[0], monedaBase, catalogo);
       const monedaCosto = monedaCostoDeProducto(res.rows[0], monedaBase, catalogo);
@@ -235,9 +577,17 @@ export async function PUT(request: Request) {
           precio = body.precios[moneda.id].precio;
           costo = body.precios[moneda.id].costo;
         } else {
+          // Derivación respetando el motor: precio con la regla de ventas y
+          // costo con la de compras (mismo criterio que el GET y las compras).
           const decimales = Number(moneda.decimales ?? 2);
-          precio = convertir(Number(nuevoPrecio), monedaProducto, moneda, catalogo, decimales);
-          costo = convertir(Number(nuevoCosto), monedaCosto, moneda, catalogo, decimales);
+          precio = convertirConMetodo(Number(nuevoPrecio), monedaProducto, moneda, {
+            ...reglas.ventas,
+            catalogo,
+          }, decimales);
+          costo = convertirConMetodo(Number(nuevoCosto), monedaCosto, moneda, {
+            ...reglas.compras,
+            catalogo,
+          }, decimales);
         }
 
         await client.query(
@@ -249,6 +599,99 @@ export async function PUT(request: Request) {
         );
       }
 
+      // ── Presentaciones: reconciliar la lista enviada contra la guardada ──
+      // Las que ya no vienen se ELIMINAN: sus referencias en compra_items ya
+      // guardan un snapshot (presentacion_nombre/unidades) y la FK es SET NULL,
+      // así que la factura histórica no pierde la presentación comprada.
+      // Si el body no trajo `presentaciones` (cliente viejo) no se tocan.
+      if (presentaciones !== null) {
+        const existentes = await client.query(
+          `SELECT id FROM producto_presentaciones WHERE producto_id = $1`,
+          [id]
+        );
+        const idsGuardados = new Set<string>(existentes.rows.map((r: any) => String(r.id)));
+        const idsEnviados = new Set<string>(presentaciones.filter((p) => p.id !== null).map((p) => String(p.id)));
+
+        for (const guard of idsGuardados) {
+          if (!idsEnviados.has(guard)) {
+            await client.query(`DELETE FROM producto_presentaciones WHERE id = $1`, [guard]);
+          }
+        }
+        for (const pres of presentaciones) {
+          if (pres.id && idsGuardados.has(pres.id)) {
+            await client.query(
+              `UPDATE producto_presentaciones
+               SET nombre = $2, unidades = $3, activo = $4,
+                   modo_venta = $5, precio_override = $6, margen_override = $7
+               WHERE id = $1`,
+              [
+                pres.id,
+                pres.nombre,
+                pres.unidades,
+                pres.activo,
+                pres.modo_venta,
+                pres.precio_override,
+                pres.margen_override,
+              ]
+            );
+          } else {
+            await client.query(
+              `INSERT INTO producto_presentaciones (producto_id, nombre, unidades, activo, modo_venta, precio_override, margen_override)
+               VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+              [
+                id,
+                pres.nombre,
+                pres.unidades,
+                pres.activo,
+                pres.modo_venta,
+                pres.precio_override,
+                pres.margen_override,
+              ]
+            );
+          }
+        }
+      }
+
+      // Margen de ganancia: se persiste aparte (el UPDATE principal mantiene su
+      // numeración dinámica de parámetros de monedas). Solo si el margen o el
+      // precio realmente cambiaron se marca el precio como manual; una edición
+      // de solo nombre/categoría NO apaga el precio automático.
+      if (margenEnviado) {
+        const margenCambio = Math.abs(Number(margen) - Number(productoAnterior.margen_ganancia)) > 1e-9;
+        const precioCambio =
+          enviado2("precio_base") &&
+          Math.abs(Number(precioParam ?? 0) - Number(productoAnterior.precio_base)) > 1e-9;
+        if (margenCambio || precioCambio) {
+          await client.query(
+            `UPDATE productos SET margen_ganancia = $2, precio_auto = false WHERE id = $1`,
+            [id, margen]
+          );
+        }
+      } else if (
+        enviado2("precio_base") &&
+        Math.abs(Number(precio_base) - Number(productoAnterior.precio_base)) > 1e-9
+      ) {
+        await client.query(`UPDATE productos SET precio_auto = false WHERE id = $1`, [id]);
+      }
+
+      // Relación N:M de proveedores: reemplazo completo (la lista es la fuente
+      // de verdad). Se sincroniza `proveedor_id` con el PRIMER proveedor (o NULL
+      // si la lista quedó vacía), sobrescribiendo el COALESCE del UPDATE principal.
+      if (proveedorIdsEnviados !== null) {
+        await client.query(`DELETE FROM producto_proveedores WHERE producto_id = $1`, [id]);
+        for (const pid of proveedorIdsEnviados) {
+          await client.query(
+            `INSERT INTO producto_proveedores (producto_id, proveedor_id)
+             VALUES ($1, $2) ON CONFLICT DO NOTHING`,
+            [id, pid]
+          );
+        }
+        await client.query(`UPDATE productos SET proveedor_id = $2 WHERE id = $1`, [
+          id,
+          proveedorIdsEnviados[0] ?? null,
+        ]);
+      }
+
       return res.rows[0];
     });
 
@@ -258,7 +701,14 @@ export async function PUT(request: Request) {
 
     return NextResponse.json(result);
   } catch (error) {
-    return NextResponse.json({ error: "Error al actualizar producto" }, { status: 500 });
+    if (error instanceof ValidationError) {
+      return NextResponse.json({ error: error.message }, { status: 400 });
+    }
+    const err = error as { code?: string; constraint?: string; message?: string };
+    if (err?.code === "23505" && err?.constraint?.includes("producto_presentaciones")) {
+      return NextResponse.json({ error: "Ya existe una presentación con ese nombre para el producto" }, { status: 400 });
+    }
+    return NextResponse.json({ error: err?.message || "Error al actualizar producto" }, { status: 500 });
   }
 }
 

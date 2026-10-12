@@ -17,6 +17,25 @@ import { redondear, tasaUsd, tasaUsdDocumento, tasaMostrada, esConversionDirecta
 import { ReceiptPrinter } from "@/components/pos/receipt-printer";
 import { ClienteModal } from "@/components/cliente/cliente-modal";
 
+/**
+ * Presentación (caja, bolsa) tal como la resuelve `presentacionesDeProducto`:
+ * ya viene con el precio según su modo (derivado / fijo / margen) y el costo
+ * derivado del CPP. La del PRODUCTO sigue siendo la unidad.
+ */
+interface PresentacionPOS {
+  id: string;
+  nombre: string;
+  unidades: number;
+  activo: boolean;
+  precio: number;
+  precioUnitario: number;
+  costo: number;
+  modo_venta: "derivado" | "fijo" | "margen";
+  margen: number | null;
+  bajoCosto: boolean;
+  masBarataQueDetalle: boolean;
+}
+
 interface Producto {
   id: number;
   codigo: string;
@@ -37,6 +56,7 @@ interface Producto {
     costo: number;
     es_base: boolean;
   }>;
+  presentaciones?: PresentacionPOS[] | null;
 }
 
 interface Moneda {
@@ -70,7 +90,20 @@ interface Caja {
 
 interface CartItem {
   product: Producto;
+  /**
+   * Cantidad en la UNIDAD DE VENTA de la línea:
+   *   · sin presentación → unidades
+   *   · con presentación → cajas (PresentacionPOS.unidades define cuántas
+   *     unidades representa cada una)
+   */
   qty: number;
+  /** Presentación vendida en esta línea (null = por unidad). */
+  presentacion?: PresentacionPOS | null;
+  /**
+   * Descuento de la línea tal como lo escribió el usuario: "10" = monto plano
+   * (en la moneda de la venta) o "10%" = porcentaje sobre el bruto de la línea.
+   */
+  descuentoStr?: string;
 }
 
 // Línea de pago mixto: una o varias, cada una en la moneda de SU método
@@ -485,6 +518,61 @@ export default function PuntoDeVentaPage() {
 
   const getPrecio = (producto: Producto): number => getPrecioEnMoneda(producto, monedaSeleccionada);
 
+  const decMoneda = (codMoneda: string): number =>
+    Number(monedas.find((m) => m.codigo === codMoneda)?.decimales ?? 2);
+
+  /** Código de la moneda en la que el producto define sus precios. */
+  const codMonedaProducto = (producto: Producto): string =>
+    monedas.find((m) => m.id === producto.moneda_base_id)?.codigo ?? monedaSeleccionada;
+
+  /**
+   * Precio de UNA línea del carrito, ya en la moneda del documento.
+   *
+   * La presentación trae su precio en la moneda de venta del PRODUCTO (ya
+   * resuelto por su modo). Para llevarlo a la moneda del documento aplicamos el
+   * MISMO factor que usa el precio unitario, de modo que la caja nunca se
+   * desvía del producto por un redondeo distinto.
+   */
+  const getPrecioLinea = (item: CartItem, codMoneda: string = monedaSeleccionada): number => {
+    const pres = item.presentacion;
+    if (!pres) return getPrecioEnMoneda(item.product, codMoneda);
+
+    const precioUnitDoc = getPrecioEnMoneda(item.product, codMoneda);
+    const precioUnitProd = getPrecioEnMoneda(item.product, codMonedaProducto(item.product));
+    if (precioUnitProd <= 0) return redondear(precioUnitDoc * pres.unidades, decMoneda(codMoneda));
+    return redondear((precioUnitDoc / precioUnitProd) * pres.precio, decMoneda(codMoneda));
+  };
+
+  /** UNIDADES que representa esta línea (el inventario siempre es en unidades). */
+  const unidadesDeLinea = (item: CartItem): number => item.qty * (item.presentacion?.unidades ?? 1);
+
+  /** Subtotal BRUTO de la línea (sin descontar) en la moneda dada. */
+  const totalLineaEnMoneda = (item: CartItem, codMoneda: string): number =>
+    getPrecioLinea(item, codMoneda) * item.qty;
+
+  /** Subtotal de la línea = precio de venta × cantidad de su unidad de venta. */
+  const totalLinea = (item: CartItem): number => totalLineaEnMoneda(item, monedaSeleccionada);
+
+  /**
+   * Descuento de la línea en la moneda dada. El valor se escribe libre: si
+   * termina en "%" es un porcentaje sobre el bruto de la línea; si no, es un
+   * monto plano. Se acota para que el total nunca quede negativo (100% / monto
+   * ≤ bruto de la línea).
+   */
+  const descuentoDeLinea = (item: CartItem, codMoneda: string = monedaSeleccionada): number => {
+    const raw = (item.descuentoStr ?? "").trim();
+    if (!raw) return 0;
+    const num = parseFloat(raw.replace("%", "").replace(",", "."));
+    if (!Number.isFinite(num) || num <= 0) return 0;
+    const bruto = totalLineaEnMoneda(item, codMoneda);
+    const dec = decMoneda(codMoneda);
+    if (raw.includes("%")) return redondear(bruto * (Math.min(100, num) / 100), dec);
+    return redondear(Math.min(bruto, num), dec);
+  };
+
+  /** Subtotal de la línea ya descontado: lo que realmente se cobra. */
+  const totalLineaNeto = (item: CartItem): number => totalLinea(item) - descuentoDeLinea(item);
+
   // Tasa efectiva de la venta en "unidades de la moneda por su referencia"
   const tasaEfectiva = useMemo(() => {
     const targetMoneda = monedas.find((m) => m.codigo === monedaSeleccionada);
@@ -505,72 +593,158 @@ export default function PuntoDeVentaPage() {
     return esConversionDirectaUsd(targetMoneda);
   }, [monedas, monedaSeleccionada]);
 
-  const addToCart = (p: Producto) => {
-    const targetId = String(p.id);
+  /**
+   * Clave de línea del carrito. Incluye la PRESENTACIÓN porque una unidad y una
+   * caja del mismo producto son dos líneas distintas: comparten producto pero
+   * no precio, no cantidad ni unidades de stock.
+   */
+  const claveLinea = (productoId: number | string, presentacionId?: string | null) =>
+    `${String(productoId)}:${presentacionId ?? "unidad"}`;
+
+  const claveDe = (c: CartItem) => claveLinea(c.product.id, c.presentacion?.id);
+
+  /** Máxima cantidad de la UNIDAD DE VENTA que cabe en el stock disponible. */
+  const maxQtyDeLinea = (c: CartItem) =>
+    Math.max(1, Math.floor(c.product.stock / (c.presentacion?.unidades ?? 1)));
+
+  /**
+   * Avisos del carrito.
+   *
+   * NO se puede llamar `toast()` dentro del actualizador de `setCart`: React
+   * ejecuta esa función durante el render, y `toast()` hace `setState` sobre el
+   * ToastProvider desde el render de ESTA página, lo que revienta con
+   * "Cannot update a component (ToastProvider) while rendering a different
+   * component (PuntoDeVentaPage)".
+   *
+   * Solución: el actualizador deja el mensaje en un ref (los refs no son estado
+   * de React, no disparan render ni pueden provocar el error) y un efecto lo
+   * emite después del render. Así el actualizador sigue siendo puro y las
+   * actualizaciones rápidas (escáner de códigos) siguen componiendo bien.
+   */
+  const avisoRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (avisoRef.current) {
+      const msg = avisoRef.current;
+      avisoRef.current = null;
+      toast(msg, "warning");
+    }
+  });
+
+  /** Agrega 1 unidad de venta (1 caja si la línea es por presentación). */
+  const addToCart = (p: Producto, pres?: PresentacionPOS | null) => {
+    const targetId = claveLinea(p.id, pres?.id);
     setCart((prev) => {
-      const existing = prev.find((c) => String(c.product.id) === targetId);
-      if (existing) {
-        if (existing.qty + 1 > p.stock) {
-          toast(`Las existencias máximas para ${p.nombre} son ${p.stock}`, "warning");
-          return prev;
+      const existente = prev.find((c) => claveDe(c) === targetId);
+      if (existente) {
+        const maxQty = maxQtyDeLinea(existente);
+        if (existente.qty + 1 > maxQty) {
+          avisoRef.current = `Solo hay ${p.stock} unidades de ${p.nombre}`;
         }
+        // `Math.min` acota también cuando ya se dépasse: no deja que la cantidad
+        // de la línea supere el stock real del producto.
         return prev.map((c) =>
-          String(c.product.id) === targetId ? { ...c, qty: c.qty + 1 } : c
+          claveDe(c) === targetId ? { ...c, qty: Math.min(maxQty, c.qty + 1) } : c
         );
       }
-      return [...prev, { product: p, qty: 1 }];
+      const nueva: CartItem = { product: p, qty: 1, presentacion: pres ?? null };
+      if (maxQtyDeLinea(nueva) < 1) {
+        avisoRef.current = `Solo hay ${p.stock} unidades de ${p.nombre}`;
+        return [...prev]; // array nuevo ⇒ el efecto se dispara igual
+      }
+      return [...prev, nueva];
     });
   };
 
-  const removeFromCart = (id: number | string) =>
-    setCart((prev) => prev.filter((c) => String(c.product.id) !== String(id)));
+  const removeFromCart = (clave: string) =>
+    setCart((prev) => prev.filter((c) => claveDe(c) !== clave));
 
-  const updateQty = (id: number | string, delta: number) => {
-    const targetId = String(id);
+  const updateQty = (clave: string, delta: number) => {
     setCart((prev) => {
-      const item = prev.find((c) => String(c.product.id) === targetId);
+      const item = prev.find((c) => claveDe(c) === clave);
       if (!item) return prev;
-      const nextQty = Math.max(1, item.qty + delta);
-      if (nextQty > item.product.stock) {
-        toast(`Las existencias máximas para ${item.product.nombre} son ${item.product.stock}`, "warning");
-        return prev.map((c) =>
-          String(c.product.id) === targetId ? { ...c, qty: item.product.stock } : c
-        );
+      const maxQty = maxQtyDeLinea(item);
+      const nextQty = Math.min(maxQty, Math.max(1, item.qty + delta));
+      // Avisó cuando se intentó subir y no se pudo (delta > 0 y la cantidad no
+      // cambió). Bajar nunca avisa: llegar a 1 es el tope inferior legítimo.
+      if (nextQty === item.qty && delta > 0) {
+        avisoRef.current = `Solo hay ${item.product.stock} unidades de ${item.product.nombre}`;
+      }
+      return prev.map((c) => (claveDe(c) === clave ? { ...c, qty: nextQty } : c));
+    });
+  };
+
+  const setDirectQty = (clave: string, val: number) => {
+    setCart((prev) => {
+      const item = prev.find((c) => claveDe(c) === clave);
+      if (!item) return prev;
+      const maxQty = maxQtyDeLinea(item);
+      const pedido = Math.max(1, isNaN(val) ? 1 : val);
+      if (pedido > maxQty) {
+        avisoRef.current = `Solo hay ${item.product.stock} unidades de ${item.product.nombre}`;
       }
       return prev.map((c) =>
-        String(c.product.id) === targetId ? { ...c, qty: nextQty } : c
+        claveDe(c) === clave ? { ...c, qty: Math.min(maxQty, pedido) } : c
       );
     });
   };
 
-  const setDirectQty = (id: number | string, val: number) => {
-    const targetId = String(id);
-    setCart((prev) => {
-      const item = prev.find((c) => String(c.product.id) === targetId);
-      if (!item) return prev;
-      const parsed = isNaN(val) ? 1 : val;
-      let targetQty = Math.max(1, parsed);
+  /**
+   * Escribe el descuento de una línea. Se permite texto libre pero solo con
+   * dígitos, separadores decimales y "%": así el campo acepta tanto "10" (monto)
+   * como "10%" (porcentaje) sin dejar entrar letras.
+   */
+  const setDescuentoLinea = (clave: string, valor: string) => {
+    const limpio = valor.replace(/[^0-9.,%]/g, "").slice(0, 12);
+    setCart((prev) =>
+      prev.map((c) => (claveDe(c) === clave ? { ...c, descuentoStr: limpio } : c))
+    );
+  };
 
-      if (targetQty > item.product.stock) {
-        toast(`Las existencias máximas para ${item.product.nombre} son ${item.product.stock}`, "warning");
-        targetQty = item.product.stock;
+  /**
+   * Cambia la presentación de una línea. Si ya existe otra línea del mismo
+   * producto con esa presentación, se fusionan las cantidades.
+   */
+  const cambiarPresentacion = (clave: string, pres: PresentacionPOS | null) => {
+    setCart((prev) => {
+      const item = prev.find((c) => claveDe(c) === clave);
+      if (!item) return prev;
+      const nuevaClave = claveLinea(item.product.id, pres?.id);
+      const destino = prev.find((c) => claveDe(c) === nuevaClave);
+      const maxQty = Math.max(1, Math.floor(item.product.stock / (pres?.unidades ?? 1)));
+
+      // Fusionar con una línea gemela que ya existe.
+      if (destino && destino !== item) {
+        const total = Math.min(maxQty, destino.qty + item.qty);
+        return prev.filter((c) => c !== item && c !== destino)
+          .concat([{ ...destino, qty: total }])
+          .sort((a, b) => claveDe(a).localeCompare(claveDe(b)));
       }
 
       return prev.map((c) =>
-        String(c.product.id) === targetId ? { ...c, qty: targetQty } : c
+        c === item ? { ...c, presentacion: pres, qty: Math.min(maxQty, c.qty) } : c
       );
     });
   };
 
-  const subtotal = useMemo(() => cart.reduce((s, c) => s + getPrecio(c.product) * c.qty, 0), [cart, monedaSeleccionada, monedas, tasaCustomStr]);
+  const subtotal = useMemo(() => cart.reduce((s, c) => s + totalLinea(c), 0), [cart, monedaSeleccionada, monedas, tasaCustomStr]);
   const tax = useMemo(() => {
     return cart.reduce((s, c) => {
       if (c.product.iva_incluido) return s;
-      return s + Math.round(getPrecio(c.product) * 0.16 * c.qty * 100) / 100;
+      // El IVA se calcula sobre el PRECIO DE LA LÍNEA (caja o unidad) para que
+      // coincida con lo que ve el cliente en el ticket.
+      return s + Math.round(getPrecioLinea(c) * 0.16 * c.qty * 100) / 100;
     }, 0);
   }, [cart, monedaSeleccionada, monedas, tasaCustomStr]);
-  
-  const total = Math.max(0, subtotal - descuento + tax);
+
+  // Descuentos por línea (en la moneda de la venta). El descuento total del
+  // documento es líneas + el descuento global del modal de checkout.
+  const descuentoLineas = useMemo(
+    () => cart.reduce((s, c) => s + descuentoDeLinea(c), 0),
+    [cart, monedaSeleccionada, monedas, tasaCustomStr]
+  );
+  const descuentoTotal = descuento + descuentoLineas;
+
+  const total = Math.max(0, subtotal - descuentoTotal + tax);
 
   // Total del carrito expresado en una moneda cualquiera, usando la MISMA regla
   // de precios que el POS (precio exacto guardado cuando existe). Así, el total
@@ -582,11 +756,15 @@ export default function PuntoDeVentaPage() {
     let sub = 0;
     let taxMoneda = 0;
     for (const c of cart) {
-      const p = getPrecioEnMoneda(c.product, codMoneda);
+      const p = getPrecioLinea(c, codMoneda);
       sub += p * c.qty;
       if (!c.product.iva_incluido) taxMoneda += Math.round(p * 0.16 * c.qty * 100) / 100;
     }
-    return Math.max(0, sub - descuento + taxMoneda);
+    // El descuento (global + líneas) vive en la moneda de la venta: se escala por
+    // la misma razón que el subtotal en vez de convertirlo con otra tasa.
+    const escala = subtotal > 0 ? sub / subtotal : 0;
+    const descuentoMoneda = redondear(descuentoTotal * escala, decMoneda(codMoneda));
+    return Math.max(0, sub - descuentoMoneda + taxMoneda);
   };
 
   const setPagarCompleto = () => {
@@ -855,13 +1033,31 @@ export default function PuntoDeVentaPage() {
     try {
       const moneda = monedas.find((m) => m.codigo === monedaSeleccionada);
       const tasaCustomNum = parseFloat(tasaCustomStr);
-      const items = cart.map((c) => ({
-        producto_id: c.product.id,
-        producto_nombre: c.product.nombre,
-        cantidad: c.qty,
-        precio_unit: getPrecio(c.product),
-        subtotal: getPrecio(c.product) * c.qty,
-      }));
+      // `cantidad` viaja SIEMPRE en UNIDADES (igual que en compras) para que el
+      // inventario, el kardex y el CPP no cambien de semántica. La presentación
+      // viaja como snapshot para que el reporte muestre "Caja x20" aunque luego
+      // se renombre o se dé de baja.
+      const items = cart.map((c) => {
+        const precio = getPrecioLinea(c);
+        const unidades = unidadesDeLinea(c);
+        return {
+          producto_id: c.product.id,
+          producto_nombre: c.product.nombre,
+          cantidad: unidades, // ← SIEMPRE unidades
+          precio_unit: precio, // ← precio de la línea (caja o unidad)
+          subtotal: precio * c.qty, // ← BRUTO de la línea (sin descuento)
+          descuento: descuentoDeLinea(c), // ← monto plano en la moneda de la venta
+          ...(c.presentacion
+            ? {
+                presentacion_id: c.presentacion.id,
+                presentacion_nombre: c.presentacion.nombre,
+                presentacion_unidades: c.presentacion.unidades,
+                cantidad_presentaciones: c.qty,
+                precio_presentacion: precio,
+              }
+            : {}),
+        };
+      });
 
       let pagosToSend: Array<{ metodo_pago_id: string; monto: number }> = [];
       let montoPagadoFinal = pagadoTotal;
@@ -924,7 +1120,7 @@ export default function PuntoDeVentaPage() {
           items: items,
           subtotal,
           impuesto: tax,
-          descuento,
+          descuento: descuentoTotal,
           total,
           montoPagado: montoPagadoFinal,
           deuda: deudaFinal,
@@ -1103,7 +1299,7 @@ export default function PuntoDeVentaPage() {
             un breakpoint que los apile en ventanas angostas. */}
         <div className="grid flex-1 min-h-0 grid-cols-12 gap-3 sm:gap-4 overflow-hidden">
           {/* ═══════════ PRODUCT CATALOG (8 COLS) ═══════════ */}
-          <div className="flex min-h-0 flex-1 flex-col gap-3 min-w-0 overflow-hidden col-span-8">
+          <div className="flex min-h-0 flex-1 flex-col gap-3 min-w-0 overflow-hidden col-span-7">
             <div className="flex shrink-0 gap-3">
               <SearchBar
                 placeholder="Escanear código de barras o buscar producto..."
@@ -1196,7 +1392,7 @@ export default function PuntoDeVentaPage() {
           </div>
 
           {/* ═══════════ CART PANEL (4 COLS) ═══════════ */}
-          <Card className="flex flex-1 min-h-0 flex-col min-w-0 overflow-hidden col-span-4">
+          <Card className="flex flex-1 min-h-0 flex-col min-w-0 overflow-hidden col-span-5">
             <div className="flex shrink-0 items-center justify-between border-b border-border px-4 py-3">
               <div className="flex items-center gap-2">
                 <h3 className="text-sm font-semibold">Carrito de Venta</h3>
@@ -1278,44 +1474,125 @@ export default function PuntoDeVentaPage() {
               )}
             </div>
 
-            <div className="flex-1 min-h-0 divide-y divide-border overflow-y-auto">
+            <div className="flex-1 min-h-0 overflow-y-auto">
               {cart.length === 0 ? (
                 <EmptyState icon={ShoppingCart} message="Sin productos en el carrito" />
               ) : (
-                cart.map(({ product: p, qty }) => (
-                  <div key={`cart-${p.id}`} className="flex items-center gap-3 px-4 py-2.5">
-                    <div className="min-w-0 flex-1">
-                      <div className="truncate text-sm font-medium text-foreground">
-                        {p.nombre}
-                      </div>
-                      <div className="font-mono text-xs text-muted-foreground">
-                        {fmt(getPrecio(p), monedaSeleccionada)} c/u
-                      </div>
-                    </div>
-                    <div className="flex items-center gap-1">
-                      <Button variant="outline" size="icon" className="h-6 w-6 p-0" onClick={() => updateQty(p.id, -1)}>
-                        <Minus size={11} />
-                      </Button>
-                      <input
-                        type="number"
-                        min="1"
-                        max={p.stock}
-                        className="w-10 text-center font-mono text-sm bg-transparent border border-transparent hover:border-border focus:border-primary focus:bg-background rounded focus:outline-none p-0 h-6 [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
-                        value={qty}
-                        onChange={(e) => setDirectQty(p.id, parseInt(e.target.value, 10))}
-                      />
-                      <Button variant="outline" size="icon" className="h-6 w-6 p-0" onClick={() => updateQty(p.id, 1)}>
-                        <Plus size={11} />
-                      </Button>
-                    </div>
-                    <div className="text-right font-mono text-sm font-semibold shrink-0 min-w-[4rem]">
-                      {fmt(getPrecio(p) * qty, monedaSeleccionada)}
-                    </div>
-                    <Button variant="ghost" size="icon" className="hover:bg-transparent hover:text-red-400" onClick={() => removeFromCart(p.id)}>
-                      <X size={13} />
-                    </Button>
-                  </div>
-                ))
+                <table className="w-full border-collapse text-sm">
+                  <thead className="sticky top-0 z-10 bg-card/95 backdrop-blur">
+                    <tr className="border-b border-border text-[10px] uppercase tracking-wide text-muted-foreground">
+                      <th className="px-4 py-2 text-left font-bold">Producto</th>
+                      <th className="w-[104px] px-1 py-2 text-center font-bold">Cant.</th>
+                      <th className="w-[92px] px-1 py-2 text-center font-bold">Desc.</th>
+                      <th className="w-[92px] px-3 py-2 text-right font-bold">Total</th>
+                      <th className="w-8 py-2" aria-label="Quitar"></th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-border/50">
+                    {cart.map((c) => {
+                      const p = c.product;
+                      const clave = claveDe(c);
+                      const presOpts = p.presentaciones ?? [];
+                      const precioLinea = getPrecioLinea(c);
+                      const descLinea = descuentoDeLinea(c);
+                      return (
+                        <tr key={clave} className="align-top">
+                          {/* Producto (+ presentación) */}
+                          <td className="px-4 py-2.5">
+                            <div className="truncate text-sm font-medium text-foreground">
+                              {p.nombre}
+                            </div>
+                            <div className="font-mono text-xs text-muted-foreground">
+                              {presOpts.length > 0
+                                ? `${c.presentacion ? c.presentacion.nombre : "Unidad"} · ${fmt(precioLinea, monedaSeleccionada)} c/${c.presentacion ? "caja" : "u"}`
+                                : `${fmt(getPrecio(p), monedaSeleccionada)} c/u`}
+                            </div>
+                            {presOpts.length > 0 && (
+                              <select
+                                value={c.presentacion?.id ?? ""}
+                                onChange={(e) =>
+                                  cambiarPresentacion(
+                                    clave,
+                                    presOpts.find((x) => x.id === e.target.value) ?? null
+                                  )
+                                }
+                                className="mt-1.5 w-full rounded-md border border-border/60 bg-muted/40 px-2 py-1 text-xs text-foreground focus:border-primary focus:outline-none"
+                              >
+                                <option value="">Unidad · {p.stock} disp.</option>
+                                {presOpts.map((pr) => (
+                                  <option key={pr.id} value={pr.id}>
+                                    {pr.nombre} · {Math.floor(p.stock / pr.unidades)} disp.
+                                  </option>
+                                ))}
+                              </select>
+                            )}
+                          </td>
+
+                          {/* Cantidad */}
+                          <td className="px-1 py-2.5">
+                            <div className="flex items-center justify-center gap-1">
+                              <Button variant="outline" size="icon" className="h-7 w-7 p-0" onClick={() => updateQty(clave, -1)}>
+                                <Minus size={12} />
+                              </Button>
+                              <input
+                                type="number"
+                                min="1"
+                                max={maxQtyDeLinea(c)}
+                                className="h-7 w-11 text-center font-mono text-sm bg-transparent border border-transparent hover:border-border focus:border-primary focus:bg-background rounded focus:outline-none p-0 [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
+                                value={c.qty}
+                                onChange={(e) => setDirectQty(clave, parseInt(e.target.value, 10))}
+                              />
+                              <Button variant="outline" size="icon" className="h-7 w-7 p-0" onClick={() => updateQty(clave, 1)}>
+                                <Plus size={12} />
+                              </Button>
+                            </div>
+                          </td>
+
+                          {/* Descuento: monto plano o "%" */}
+                          <td className="px-1 py-2.5">
+                            <input
+                              type="text"
+                              value={c.descuentoStr ?? ""}
+                              onChange={(e) => setDescuentoLinea(clave, e.target.value)}
+                              placeholder="0 o 10%"
+                              title="Descuento: escribe un monto (ej. 5) o un porcentaje (ej. 10%)"
+                              className="h-8 w-full rounded-md border border-border/60 bg-muted/40 px-1 text-center font-mono text-sm text-foreground placeholder:text-[11px] placeholder:text-muted-foreground/60 focus:border-primary focus:bg-background focus:outline-none"
+                            />
+                            {descLinea > 0 && (
+                              <div className="mt-1 text-center font-mono text-[11px] font-semibold text-success-strong">
+                                −{fmt(descLinea, monedaSeleccionada)}
+                              </div>
+                            )}
+                          </td>
+
+                          {/* Total (neto) */}
+                          <td className="px-3 py-2.5 text-right">
+                            {descLinea > 0 && (
+                              <div className="font-mono text-[10px] font-normal text-muted-foreground line-through">
+                                {fmt(precioLinea * c.qty, monedaSeleccionada)}
+                              </div>
+                            )}
+                            <div className="font-mono text-sm font-semibold text-foreground">
+                              {fmt(totalLineaNeto(c), monedaSeleccionada)}
+                            </div>
+                          </td>
+
+                          {/* Quitar */}
+                          <td className="py-2.5 pr-2 text-right">
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              className="h-7 w-7 hover:bg-transparent hover:text-red-400"
+                              onClick={() => removeFromCart(clave)}
+                            >
+                              <X size={14} />
+                            </Button>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
               )}
             </div>
 
@@ -1332,15 +1609,25 @@ export default function PuntoDeVentaPage() {
                     <span className="font-mono">{fmt(tax, monedaSeleccionada)}</span>
                   </div>
                 )}
+                {descuentoLineas > 0 && (
+                  <div className="flex justify-between text-muted-foreground">
+                    <span>Descuento productos</span>
+                    <span className="font-mono">−{fmt(descuentoLineas, monedaSeleccionada)}</span>
+                  </div>
+                )}
                 {descuento > 0 && (
                   <div className="flex justify-between text-muted-foreground">
                     <span>Descuento</span>
                     <span className="font-mono">−{fmt(descuento, monedaSeleccionada)}</span>
                   </div>
                 )}
-                <div className="flex justify-between border-t border-border pt-1 text-base font-semibold">
-                  <span>Total ({monedaSeleccionada || "—"})</span>
-                  <span className="font-mono text-primary text-lg">{fmt(total, monedaSeleccionada)}</span>
+                <div className="flex items-center justify-between border-t border-border pt-1.5">
+                  <span className="text-sm font-semibold text-muted-foreground">
+                    Total ({monedaSeleccionada || "—"})
+                  </span>
+                  <span className="font-mono text-2xl font-extrabold leading-tight text-primary">
+                    {fmt(total, monedaSeleccionada)}
+                  </span>
                 </div>
               </div>
               <Button
@@ -1812,18 +2099,28 @@ export default function PuntoDeVentaPage() {
                 {/* Desglose de Productos */}
                 <div className="max-h-[300px] overflow-y-auto space-y-2 pr-1 divide-y divide-border/30 rounded-xl border border-border/60 bg-muted/20 p-3">
                   {cart.map((c) => (
-                    <div key={`checkout-item-${c.product.id}`} className="pt-2 first:pt-0">
+                    <div key={`checkout-item-${claveDe(c)}`} className="pt-2 first:pt-0">
                       <div className="flex justify-between items-start text-sm">
                         <span className="font-semibold text-foreground line-clamp-1 flex-1 pr-2">
                           {c.product.nombre}
+                          {c.presentacion && (
+                            <span className="ml-1.5 font-normal text-muted-foreground">
+                              ({c.presentacion.nombre})
+                            </span>
+                          )}
                         </span>
                         <span className="font-mono font-bold shrink-0">
-                          {fmt(getPrecio(c.product) * c.qty, monedaSeleccionada)}
+                          {fmt(totalLinea(c), monedaSeleccionada)}
                         </span>
                       </div>
                       <div className="flex justify-between items-center text-xs text-muted-foreground mt-1">
-                        <span className="font-mono">{c.product.codigo}</span>
-                        <span>{c.qty} × {fmt(getPrecio(c.product), monedaSeleccionada)}</span>
+                        <span className="font-mono">
+                          {c.product.codigo}
+                          {c.presentacion && ` · ${unidadesDeLinea(c)} und.`}
+                        </span>
+                        <span>
+                          {c.qty} × {fmt(getPrecioLinea(c), monedaSeleccionada)}
+                        </span>
                       </div>
                     </div>
                   ))}
@@ -1841,6 +2138,12 @@ export default function PuntoDeVentaPage() {
                     <div className="flex justify-between text-muted-foreground">
                       <span className="font-medium">IVA (16%)</span>
                       <span className="font-mono font-bold text-foreground">{fmt(tax, monedaSeleccionada)}</span>
+                    </div>
+                  )}
+                  {descuentoLineas > 0 && (
+                    <div className="flex items-center justify-between text-muted-foreground">
+                      <span className="font-medium">Descuento productos</span>
+                      <span className="font-mono font-bold text-foreground">−{fmt(descuentoLineas, monedaSeleccionada)}</span>
                     </div>
                   )}
                   <div className="flex items-center justify-between text-muted-foreground">

@@ -5,18 +5,27 @@ import { Table, Td, Tr } from "@/components/ui/table";
 import { StatusBadge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { useConfirm } from "@/components/ui/confirm-dialog";
-import { fmt, fmtDate } from "@/lib/format";
+import { fmt, fmtDate, fmtHora } from "@/lib/format";
 import { Calendar, CreditCard, Hash, Package, User } from "lucide-react";
 
 interface VentaItem {
   id: string;
   producto_nombre: string;
   producto_codigo: string;
+  /** SIEMPRE unidades (cajas × unidades). */
   cantidad: number;
   precio_unit: number | string;
   precio_unit_base: number | string;
   subtotal: number | string;
   subtotal_base: number | string;
+  /** Descuento de la línea (monto plano en la moneda de la venta). */
+  descuento?: number | string;
+  // Snapshot de la presentación en el momento de la venta. Permite mostrar
+  // "2 × Caja (12 unid.)" aunque la caja hoy valga otra cosa o ya no exista.
+  presentacion_nombre?: string | null;
+  presentacion_unidades?: number | null;
+  cantidad_presentaciones?: number | string | null;
+  precio_presentacion?: number | string | null;
 }
 
 interface VentaDetail {
@@ -26,12 +35,14 @@ interface VentaDetail {
   cliente_nombre: string | null;
   tipo_pago: string | null;
   fecha: string;
+  creado_en?: string | null;
   moneda_codigo: string;
   moneda_simbolo: string;
   metodo_pago_nombre: string | null;
   caja_nombre: string | null;
   subtotal: number | string;
   impuesto: number | string;
+  descuento?: number | string;
   total: number | string;
   total_base: number | string;
   tasa?: number | string | null;
@@ -61,7 +72,15 @@ export function VentaDetailModal({ open, venta, items, onClose, onDelete }: Vent
           label="Cliente"
           value={venta.cliente_nombre || venta.cliente || "Consumidor Final"}
         />
-        <InfoRow icon={Calendar} label="Fecha" value={fmtDate(venta.fecha)} />
+        <InfoRow
+          icon={Calendar}
+          label="Fecha"
+          value={
+            venta.creado_en
+              ? `${fmtDate(venta.fecha)} · ${fmtHora(venta.creado_en)}`
+              : fmtDate(venta.fecha)
+          }
+        />
         <InfoRow icon={CreditCard} label="Método de Pago" value={venta.metodo_pago_nombre || "—"} />
         <InfoRow icon={Hash} label="Caja" value={venta.caja_nombre || "—"} />
         <div className="flex items-center gap-2">
@@ -86,21 +105,68 @@ export function VentaDetailModal({ open, venta, items, onClose, onDelete }: Vent
           <Package size={14} /> Ítems ({items.length})
         </h4>
         <Table headers={["Código", "Producto", "Cantidad", "Precio Unit.", "Subtotal"]}>
-          {items.map((item) => (
+          {items.map((item) => {
+            // Snapshot de presentación (si la línea se vendió por caja/bolsa).
+            const cantPres = Number(item.cantidad_presentaciones) || 0;
+            const undPres = Number(item.presentacion_unidades) || 0;
+            const precioPres = Number(item.precio_presentacion) || 0;
+            const esPres = cantPres > 0 && undPres > 0 && item.presentacion_nombre;
+            return (
             <Tr key={item.id}>
               <Td mono>{item.producto_codigo}</Td>
-              <Td>{item.producto_nombre}</Td>
               <Td>
-                <span className="font-mono font-semibold">{item.cantidad}</span>
+                {item.producto_nombre}
+                {esPres && (
+                  <span className="ml-1.5 rounded bg-muted px-1 py-px text-[10px] font-medium text-muted-foreground">
+                    {item.presentacion_nombre}
+                  </span>
+                )}
               </Td>
               <Td>
-                <span className="font-mono">{fmt(item.precio_unit, venta.moneda_codigo)}</span>
+                {esPres ? (
+                  <>
+                    {/* Se muestra como se vendió (cajas), con el equivalente en
+                        unidades debajo: `cantidad` siempre son unidades. */}
+                    <div className="font-mono font-semibold">
+                      {cantPres} <span className="font-normal text-muted-foreground">{item.presentacion_nombre}</span>
+                    </div>
+                    <div className="font-mono text-[11px] font-normal text-muted-foreground">
+                      = {item.cantidad} und. ({undPres} c/u)
+                    </div>
+                  </>
+                ) : (
+                  <span className="font-mono font-semibold">{item.cantidad}</span>
+                )}
               </Td>
               <Td>
-                <span className="font-mono font-semibold">{fmt(item.subtotal, venta.moneda_codigo)}</span>
+                {esPres ? (
+                  <>
+                    <div className="font-mono">{fmt(precioPres, venta.moneda_codigo)}</div>
+                    <div className="font-mono text-[11px] text-muted-foreground">
+                      {fmt(item.precio_unit, venta.moneda_codigo)} / unid.
+                    </div>
+                  </>
+                ) : (
+                  <span className="font-mono">{fmt(item.precio_unit, venta.moneda_codigo)}</span>
+                )}
+              </Td>
+              <Td>
+                {Number(item.descuento) > 0.009 ? (
+                  <>
+                    <span className="font-mono font-semibold">
+                      {fmt(Number(item.subtotal) - Number(item.descuento), venta.moneda_codigo)}
+                    </span>
+                    <div className="font-mono text-[11px] text-success-strong">
+                      −{fmt(Number(item.descuento), venta.moneda_codigo)}
+                    </div>
+                  </>
+                ) : (
+                  <span className="font-mono font-semibold">{fmt(item.subtotal, venta.moneda_codigo)}</span>
+                )}
               </Td>
             </Tr>
-          ))}
+            );
+          })}
         </Table>
       </div>
 
@@ -115,6 +181,12 @@ export function VentaDetailModal({ open, venta, items, onClose, onDelete }: Vent
             <div className="flex justify-between text-sm">
               <span className="text-muted-foreground">IVA (16%)</span>
               <span className="font-mono">{fmt(venta.impuesto, venta.moneda_codigo)}</span>
+            </div>
+          )}
+          {Number(venta.descuento) > 0.009 && (
+            <div className="flex justify-between text-sm">
+              <span className="text-muted-foreground">Descuento</span>
+              <span className="font-mono text-success-strong">−{fmt(Number(venta.descuento), venta.moneda_codigo)}</span>
             </div>
           )}
           <div className="border-t border-border/60 pt-1.5 flex justify-between text-sm font-bold">

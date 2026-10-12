@@ -3,7 +3,8 @@ export const dynamic = 'force-dynamic';
 import { NextResponse } from "next/server";
 import { requireSession } from "@/lib/auth-server";
 import { transaction } from "@/lib/db";
-import { aBase, tasaUsd, monedaCostoDeProducto } from "@/lib/money";
+import { monedaCostoDeProducto, convertirConMetodo, reglasConversion } from "@/lib/money";
+import { getConfiguracionGlobal } from "@/lib/global-config";
 
 export async function POST(request: Request) {
   try {
@@ -54,7 +55,15 @@ export async function POST(request: Request) {
         const monedasCatalogo = (await client.query(`SELECT * FROM monedas`)).rows;
         const monedaBase = monedasCatalogo.find((m: any) => m.es_base) || monedasCatalogo[0];
         const monedaCosto = monedaCostoDeProducto(producto, monedaBase, monedasCatalogo);
-        const costoUnitBase = aBase(Number(producto.costo_base) || 0, tasaUsd(monedaCosto, monedasCatalogo));
+        // El costo estático → USD respeta el método de compras configurado
+        // (directa o triangulación), igual que las compras y el alta de producto.
+        const cfgGlobal = await getConfiguracionGlobal({
+          query: (text: string, params?: any[]) => client.query(text, params),
+        });
+        const costoUnitBase = convertirConMetodo(Number(producto.costo_base) || 0, monedaCosto, monedaBase, {
+          ...reglasConversion(cfgGlobal, monedasCatalogo).compras,
+          catalogo: monedasCatalogo,
+        }, 2);
 
         await client.query(
           `INSERT INTO kardex (producto_id, fecha, tipo, motivo, cantidad, costo_unit, costo_unit_base, saldo_anterior, saldo_actual, creado_por)
