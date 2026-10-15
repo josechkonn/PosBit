@@ -92,10 +92,14 @@ export function construirWhere(f: FiltrosProductos, omitir?: DimFiltro) {
   };
 
   if (f.busqueda) {
-    // Un solo parámetro reutilizado cinco veces (ILIKE no acepta listas).
+    // Un solo parámetro reutilizado (ILIKE no acepta listas).
     const p = ph(`%${f.busqueda}%`);
     conds.push(
-      `(p.nombre ILIKE ${p} OR p.codigo ILIKE ${p} OR c.nombre ILIKE ${p} OR m.nombre ILIKE ${p} OR p.descripcion ILIKE ${p})`
+      `(p.nombre ILIKE ${p} OR p.codigo ILIKE ${p} OR c.nombre ILIKE ${p} OR m.nombre ILIKE ${p} OR p.descripcion ILIKE ${p}
+        OR EXISTS (
+          SELECT 1 FROM producto_presentaciones pp
+           WHERE pp.producto_id = p.id AND pp.codigo IS NOT NULL AND pp.codigo ILIKE ${p}
+        ))`
     );
   }
 

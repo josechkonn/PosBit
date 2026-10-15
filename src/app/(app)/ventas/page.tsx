@@ -232,6 +232,12 @@ export default function VentasPage() {
     return allItems.filter((i) => i.venta_id === selectedVenta.id);
   }, [selectedVenta, allItems]);
 
+  // Cobros extra (delivery, bolsa, propina...) agrupados por venta
+  const selectedCobrosExtra = useMemo(() => {
+    if (!selectedVenta) return [];
+    return (selectedVenta as any).cobros_extra ?? [];
+  }, [selectedVenta]);
+
   const retornoItems = useMemo(() => {
     if (!retornoVenta) return [];
     return allItems.filter((i) => i.venta_id === retornoVenta.id).map((i) => ({
@@ -373,6 +379,7 @@ export default function VentasPage() {
         open={detailOpen}
         venta={selectedVenta}
         items={selectedItems}
+        cobrosExtra={selectedCobrosExtra}
         onClose={() => {
           setDetailOpen(false);
           setSelectedVenta(null);

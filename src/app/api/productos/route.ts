@@ -4,6 +4,7 @@ import { NextResponse } from "next/server";
 import { requireSession } from "@/lib/auth-server";
 import { query, queryOne, execute, transaction } from "@/lib/db";
 import { redondear, monedaDeProducto, monedaCostoDeProducto, preciosDeProducto, presentacionesDeProducto, convertirConMetodo, reglasConversion } from "@/lib/money";
+import { aplicarReglasRedondeo } from "@/lib/costing";
 import { getConfiguracionGlobal } from "@/lib/global-config";
 import { leerFiltros, SIN_FILTROS, construirWhere, calcularFacetas } from "@/lib/filtros-productos";
 
@@ -18,9 +19,76 @@ interface PresentacionNormalizada {
   nombre: string;
   unidades: number;
   activo: boolean;
+  /**
+   * Código de barras propio de la caja. Opcional: `null` = la caja no se
+   * escanea, solo se agrega desde el desplegable. Único en todo el catálogo.
+   */
+  codigo: string | null;
   modo_venta: ModoVentaPres;
   precio_override: number | null;
   margen_override: number | null;
+}
+
+/** Normaliza un código de barras: recorte, tope de longitud, vacío = null. */
+function normalizarCodigoBarras(v: unknown): string | null {
+  const s = String(v ?? "").trim().slice(0, 50);
+  return s.length > 0 ? s : null;
+}
+
+/**
+ * Verifica que los códigos de barras de las cajas no choquen con nada más del
+ * catálogo: ni con el código de un producto, ni con el de otra caja. Se compara
+ * con `lower()` porque el escaneo también es insensible a mayúsculas.
+ *
+ * La unicidad caja↔caja la blinda además el índice único parcial de la BD; esta
+ * función cubre las dos colisiones que ese índice NO puede ver (caja↔producto),
+ * y devuelve un mensaje legible en vez de un error crudo de Postgres.
+ *
+ * `excluirPresentacionId` deja fuera la propia caja cuando se está editando, para
+ * que guardar sin cambios no se rechace a sí misma.
+ */
+async function validarCodigosPresentaciones(
+  cliente: { query: (sql: string, params?: any[]) => Promise<any> },
+  presentaciones: PresentacionNormalizada[],
+  productoId?: number | null
+): Promise<void> {
+  const conCodigo = presentaciones.filter((p) => p.codigo);
+  if (conCodigo.length === 0) return;
+
+  // Dos cajas del MISMO envío con el mismo código: error local, sin tocar la BD.
+  const vistos = new Set<string>();
+  for (const p of conCodigo) {
+    const clave = p.codigo!.toLowerCase();
+    if (vistos.has(clave)) {
+      throw new ValidationError(`El código de barras "${p.codigo}" está repetido en las cajas de este producto`);
+    }
+    vistos.add(clave);
+  }
+
+  for (const p of conCodigo) {
+    const res = await cliente.query(
+      `SELECT 'producto' AS origen, p.nombre AS etiqueta
+         FROM productos p
+        WHERE lower(p.codigo) = lower($1) AND ($3::int IS NULL OR p.id <> $3)
+       UNION ALL
+       SELECT 'presentacion' AS origen, pp.nombre || ' (de ' || pr.nombre || ')' AS etiqueta
+         FROM producto_presentaciones pp
+         JOIN productos pr ON pr.id = pp.producto_id
+        WHERE lower(pp.codigo) = lower($1)
+          AND ($2::uuid IS NULL OR pp.id <> $2)
+          AND ($3::int IS NULL OR pp.producto_id <> $3)
+       LIMIT 1`,
+      [p.codigo, p.id, productoId ?? null]
+    );
+    if (res.rows.length > 0) {
+      const r = res.rows[0];
+      throw new ValidationError(
+        r.origen === "producto"
+          ? `El código de barras "${p.codigo}" ya lo usa el producto "${r.etiqueta}"`
+          : `El código de barras "${p.codigo}" ya lo usa la caja "${r.etiqueta}"`
+      );
+    }
+  }
 }
 
 /**
@@ -86,6 +154,7 @@ function normalizarPresentaciones(
       nombre,
       unidades,
       activo: p?.activo !== false,
+      codigo: normalizarCodigoBarras(p?.codigo),
       modo_venta,
       // Solo se guarda el override del modo activo; el otro se limpia para que
       // un cambio de modo no deje datos viejos que puedan reactivarse.
@@ -193,7 +262,7 @@ export async function GET(request: Request) {
     const productoIds = (productos as any[]).map((p) => p.id);
     const presentacionesRows = productoIds.length
       ? await query(
-          `SELECT id, producto_id, nombre, unidades, activo,
+          `SELECT id, producto_id, nombre, unidades, activo, codigo,
                   modo_venta, precio_override, margen_override
            FROM producto_presentaciones
            WHERE producto_id = ANY($1::int[])
@@ -327,9 +396,14 @@ export async function POST(request: Request) {
           ...reglas.compras,
           catalogo: catalogoPre,
         }, decVentaPre);
-        precioFinal = margen > 0
+        const bruto = margen > 0
           ? redondear(costoEnVenta * (1 + margen / 100), decVentaPre)
           : redondear(costoEnVenta, decVentaPre);
+        // Se respeta la regla global de redondeo de precios (Configuración →
+        // Precios): sin esto, un precio derivado del margen quedaba en 23.47
+        // mientras el motor de compras lo redondeaba a 25, y el mismo producto
+        // tenía dos precios según por dónde hubiera pasado.
+        precioFinal = aplicarReglasRedondeo(bruto, cfgGlobal, costoEnVenta).precio;
       }
 
       // CPP inicial: el costo estático de alta (sirve de base para el margen y
@@ -353,6 +427,11 @@ export async function POST(request: Request) {
 
       const producto = res.rows[0];
 
+      // Los códigos de las cajas se validan DESPUÉS del insert del producto:
+      // así una caja puede llevar el mismo código que el producto que recién se
+      // creó, y la comparación excluye explícitamente ese producto.
+      await validarCodigosPresentaciones(client, presentaciones, producto.id);
+
       // Relación N:M producto ⇄ proveedor (la fuente de verdad de la lista).
       for (const pid of proveedorIds) {
         await client.query(
@@ -365,13 +444,14 @@ export async function POST(request: Request) {
       // Presentaciones: se insertan tal cual (validación/limpieza ya hechas)
       for (const pres of presentaciones) {
         await client.query(
-          `INSERT INTO producto_presentaciones (producto_id, nombre, unidades, activo, modo_venta, precio_override, margen_override)
-           VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+          `INSERT INTO producto_presentaciones (producto_id, nombre, unidades, activo, codigo, modo_venta, precio_override, margen_override)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
           [
             producto.id,
             pres.nombre,
             pres.unidades,
             pres.activo,
+            pres.codigo,
             pres.modo_venta,
             pres.precio_override,
             pres.margen_override,
@@ -444,6 +524,9 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: error.message }, { status: 400 });
     }
     if (err.code === "23505") {
+      if (err.constraint === "idx_producto_presentaciones_codigo") {
+        return NextResponse.json({ error: "Ese código de barras ya lo usa otra caja" }, { status: 400 });
+      }
       if (err.constraint?.includes("codigo")) {
         return NextResponse.json({ error: "Ya existe un producto con ese código" }, { status: 400 });
       }
@@ -511,9 +594,13 @@ export async function PUT(request: Request) {
           ...reglas.compras,
           catalogo: catalogoCalc,
         }, decVen);
-        precioParam = margen > 0
+        const bruto = margen > 0
           ? redondear(costoEnVenta * (1 + margen / 100), decVen)
           : redondear(costoEnVenta, decVen);
+        // Igual que en el alta: el precio derivado del margen pasa por la regla
+        // global de redondeo, o el margen guardado y el precio guardado
+        // describirían utilidades distintas.
+        precioParam = aplicarReglasRedondeo(bruto, cfgGlobal, costoEnVenta).precio;
       }
 
       // Las columnas de moneda se VACÍAN si vienen explícitamente en `null`
@@ -612,6 +699,13 @@ export async function PUT(request: Request) {
         const idsGuardados = new Set<string>(existentes.rows.map((r: any) => String(r.id)));
         const idsEnviados = new Set<string>(presentaciones.filter((p) => p.id !== null).map((p) => String(p.id)));
 
+        // Los códigos se validan una sola vez contra el estado ACTUAL de la BD
+        // (antes de borrar ni actualizar nada): cada caja se excluye a sí misma,
+        // y las que se van a eliminar todavía no molestan. Solo dentro de este
+        // producto, para no rechazar una caja de otro producto que ya traía ese
+        // código de fábrica (esa se detectaría al crearse).
+        await validarCodigosPresentaciones(client, presentaciones, id);
+
         for (const guard of idsGuardados) {
           if (!idsEnviados.has(guard)) {
             await client.query(`DELETE FROM producto_presentaciones WHERE id = $1`, [guard]);
@@ -621,14 +715,15 @@ export async function PUT(request: Request) {
           if (pres.id && idsGuardados.has(pres.id)) {
             await client.query(
               `UPDATE producto_presentaciones
-               SET nombre = $2, unidades = $3, activo = $4,
-                   modo_venta = $5, precio_override = $6, margen_override = $7
+               SET nombre = $2, unidades = $3, activo = $4, codigo = $5,
+                   modo_venta = $6, precio_override = $7, margen_override = $8
                WHERE id = $1`,
               [
                 pres.id,
                 pres.nombre,
                 pres.unidades,
                 pres.activo,
+                pres.codigo,
                 pres.modo_venta,
                 pres.precio_override,
                 pres.margen_override,
@@ -636,13 +731,14 @@ export async function PUT(request: Request) {
             );
           } else {
             await client.query(
-              `INSERT INTO producto_presentaciones (producto_id, nombre, unidades, activo, modo_venta, precio_override, margen_override)
-               VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+              `INSERT INTO producto_presentaciones (producto_id, nombre, unidades, activo, codigo, modo_venta, precio_override, margen_override)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
               [
                 id,
                 pres.nombre,
                 pres.unidades,
                 pres.activo,
+                pres.codigo,
                 pres.modo_venta,
                 pres.precio_override,
                 pres.margen_override,
@@ -705,8 +801,13 @@ export async function PUT(request: Request) {
       return NextResponse.json({ error: error.message }, { status: 400 });
     }
     const err = error as { code?: string; constraint?: string; message?: string };
-    if (err?.code === "23505" && err?.constraint?.includes("producto_presentaciones")) {
-      return NextResponse.json({ error: "Ya existe una presentación con ese nombre para el producto" }, { status: 400 });
+    if (err?.code === "23505") {
+      if (err.constraint === "idx_producto_presentaciones_codigo") {
+        return NextResponse.json({ error: "Ese código de barras ya lo usa otra caja" }, { status: 400 });
+      }
+      if (err.constraint?.includes("producto_presentaciones")) {
+        return NextResponse.json({ error: "Ya existe una presentación con ese nombre para el producto" }, { status: 400 });
+      }
     }
     return NextResponse.json({ error: err?.message || "Error al actualizar producto" }, { status: 500 });
   }

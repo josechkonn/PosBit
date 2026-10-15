@@ -43,6 +43,7 @@ interface VentaDetail {
   subtotal: number | string;
   impuesto: number | string;
   descuento?: number | string;
+  cobros_extra?: number | string;
   total: number | string;
   total_base: number | string;
   tasa?: number | string | null;
@@ -54,11 +55,13 @@ interface VentaDetailModalProps {
   open: boolean;
   venta: VentaDetail | null;
   items: VentaItem[];
+  /** Cobros extra de la venta (delivery, bolsa, propina...), sin IVA. */
+  cobrosExtra?: Array<{ id?: string; concepto: string; monto: number | string }>;
   onClose: () => void;
   onDelete?: (id: string) => void;
 }
 
-export function VentaDetailModal({ open, venta, items, onClose, onDelete }: VentaDetailModalProps) {
+export function VentaDetailModal({ open, venta, items, cobrosExtra = [], onClose, onDelete }: VentaDetailModalProps) {
   const confirm = useConfirm();
   
   if (!venta) return null;
@@ -189,6 +192,13 @@ export function VentaDetailModal({ open, venta, items, onClose, onDelete }: Vent
               <span className="font-mono text-success-strong">−{fmt(Number(venta.descuento), venta.moneda_codigo)}</span>
             </div>
           )}
+          {/* Cobros extra (delivery, bolsa, propina...): sin IVA, suman al total */}
+          {cobrosExtra.map((c, i) => (
+            <div key={`cobro-${c.id ?? i}`} className="flex justify-between text-sm">
+              <span className="text-muted-foreground">{c.concepto}</span>
+              <span className="font-mono">+{fmt(Number(c.monto), venta.moneda_codigo)}</span>
+            </div>
+          ))}
           <div className="border-t border-border/60 pt-1.5 flex justify-between text-sm font-bold">
             <span>Total</span>
             <span className="font-mono text-primary">{fmt(venta.total, venta.moneda_codigo)}</span>

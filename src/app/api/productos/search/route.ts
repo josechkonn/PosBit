@@ -36,6 +36,10 @@ export async function GET(request: Request) {
         AND (
           p.nombre ILIKE $1
           OR p.codigo ILIKE $1
+          OR EXISTS (
+            SELECT 1 FROM producto_presentaciones pp
+             WHERE pp.producto_id = p.id AND pp.codigo IS NOT NULL AND pp.codigo ILIKE $1
+          )
         )
       ORDER BY p.nombre ASC
       LIMIT 15
@@ -59,7 +63,7 @@ export async function GET(request: Request) {
     const productoIds = (productos as any[]).map((p) => p.id);
     const presentacionesRows = productoIds.length
       ? await query(
-          `SELECT id, producto_id, nombre, unidades, activo,
+          `SELECT id, producto_id, nombre, unidades, activo, codigo,
                   modo_venta, precio_override, margen_override
            FROM producto_presentaciones
            WHERE producto_id = ANY($1::int[])

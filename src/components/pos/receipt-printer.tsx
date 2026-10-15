@@ -22,6 +22,8 @@ interface ReceiptProps {
   subtotal: number;
   impuesto: number;
   descuento: number;
+  /** Cobros extra (delivery, bolsa, propina...): sin IVA, ya en la moneda de la venta */
+  cobrosExtra?: Array<{ concepto: string; monto: number }>;
   total: number;
   /** Deuda restante (crédito), en la moneda de la venta */
   deuda?: number;
@@ -46,6 +48,7 @@ export const ReceiptPrinter = forwardRef<HTMLDivElement, ReceiptProps>(
       subtotal,
       impuesto,
       descuento,
+      cobrosExtra = [],
       total,
       deuda = 0,
       pagos = [],
@@ -132,6 +135,12 @@ export const ReceiptPrinter = forwardRef<HTMLDivElement, ReceiptProps>(
               <span>-{monedaSimbolo}{fmt(descuento, monedaCodigo)}</span>
             </div>
           )}
+          {cobrosExtra.map((c, i) => (
+            <div key={`cobro-${i}`} style={{ display: "flex", justifyContent: "space-between", marginBottom: "2px" }}>
+              <span>{c.concepto}:</span>
+              <span>{monedaSimbolo}{fmt(c.monto, monedaCodigo)}</span>
+            </div>
+          ))}
           {impuesto > 0 && (
             <div style={{ display: "flex", justifyContent: "space-between", marginBottom: "2px" }}>
               <span>Impuesto:</span>

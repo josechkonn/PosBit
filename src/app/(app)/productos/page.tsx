@@ -102,6 +102,7 @@ function PresentacionesCelda({
     nombre: string;
     unidades: number;
     precio: number;
+    codigo?: string | null;
     modo_venta?: ModoPres;
     precio_override?: number | null;
     margen_override?: number | null;
@@ -115,7 +116,7 @@ function PresentacionesCelda({
   return (
     <div className="flex flex-col gap-1">
       {presentaciones.map((pr) => (
-        <div key={pr.id} className="flex items-baseline gap-2">
+        <div key={pr.id} className="flex items-baseline gap-2 flex-wrap">
           <span className="flex items-baseline gap-1.5">
             <span className="font-medium text-foreground">{pr.nombre}</span>
             <span className="text-xs text-muted-foreground">×{pr.unidades}</span>
@@ -130,6 +131,15 @@ function PresentacionesCelda({
             <span className="rounded bg-muted px-1 py-px text-[10px] font-medium uppercase text-muted-foreground">
               fijo
             </span>
+          )}
+          {/* Código de barras propio de la caja: es lo que se escanea para
+              cobrarla como caja. Sin código solo se agrega desde el desplegable. */}
+          {pr.codigo ? (
+            <span className="rounded bg-primary/10 px-1 py-px font-mono text-[10px] font-semibold text-primary">
+              {pr.codigo}
+            </span>
+          ) : (
+            <span className="text-[10px] italic text-muted-foreground/60">sin código</span>
           )}
         </div>
       ))}

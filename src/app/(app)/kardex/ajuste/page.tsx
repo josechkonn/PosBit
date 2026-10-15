@@ -10,11 +10,20 @@ import { Select } from "@/components/ui/select";
 import { useToast } from "@/components/ui/toast";
 import { cn } from "@/lib/utils";
 
+interface PresentacionBusqueda {
+  id: string;
+  nombre: string;
+  unidades: number;
+  activo: boolean;
+  codigo?: string | null;
+}
+
 interface ProductoSearch {
   id: number;
   codigo: string;
   nombre: string;
   stock: number;
+  presentaciones?: PresentacionBusqueda[] | null;
 }
 
 interface AjusteItem {
@@ -26,6 +35,21 @@ interface AjusteItem {
   cantidad: number;
   motivo: string;
   stock_actual: number;
+  /**
+   * CAJA con la que se está ajustando (null = por unidad).
+   *
+   * OJO: el movimiento se guarda SIEMPRE en UNIDADES, que es la unidad base del
+   * inventario. La caja solo cambia cómo se escribe la cantidad: escribir "2"
+   * con una caja de 24 unidades equivale a 48. El servidor recalcula ese
+   * producto, así que aquí solo se manda el factor.
+   */
+  presentacion_id?: string | null;
+  presentacion_nombre?: string | null;
+  presentacion_unidades?: number | null;
+  /** Factor de la caja elegida; 1 = por unidad. */
+  factor: number;
+  /** Cajas del producto, para poder cambiar de Unidad a Caja en la línea. */
+  presentaciones?: PresentacionBusqueda[];
 }
 
 export default function AjusteKardexPage() {
@@ -83,9 +107,20 @@ export default function AjusteKardexPage() {
   }, []);
 
   // ── Global Barcode Scanner & Search Logic ──
-  const agregarOIncrementarProducto = (p: ProductoSearch) => {
+  /**
+   * Agrega (o suma 1) una línea de ajuste. `pres` no es solo cosmético: fija el
+   * factor por el que la cantidad se convierte a unidades al guardar.
+   *
+   * Una unidad y una caja del MISMO producto son líneas DISTINTAS (igual que en
+   * el POS): si se pidió "1 caja" y ya hay una línea de "1 unidad", no se deben
+   * sumar, porque cuentan cosas distintas.
+   */
+  const agregarOIncrementarProducto = (p: ProductoSearch, pres?: PresentacionBusqueda | null) => {
+    const factor = pres?.unidades && pres.unidades > 1 ? pres.unidades : 1;
     setItems((prev) => {
-      const index = prev.findIndex((i) => i.producto_id === p.id);
+      const index = prev.findIndex(
+        (i) => i.producto_id === p.id && (i.presentacion_id ?? null) === (pres?.id ?? null)
+      );
       if (index >= 0) {
         const copy = [...prev];
         copy[index] = {
@@ -105,9 +140,32 @@ export default function AjusteKardexPage() {
           cantidad: 1,
           motivo: "Ajuste manual",
           stock_actual: p.stock,
+          presentacion_id: pres?.id ?? null,
+          presentacion_nombre: pres?.nombre ?? null,
+          presentacion_unidades: pres?.unidades ?? null,
+          factor,
+          presentaciones: (p.presentaciones ?? []).filter((pr) => pr.activo !== false),
         },
       ];
     });
+  };
+
+  /** Cambia la caja de una línea y recalcula su equivalencia en unidades. */
+  const handleCambiarPresentacion = (itemId: string, presentacionId: string) => {
+    setItems((prev) =>
+      prev.map((item) => {
+        if (item.id !== itemId) return item;
+        const cajas = item.presentaciones ?? [];
+        const pres = cajas.find((pr) => pr.id === presentacionId) || null;
+        return {
+          ...item,
+          presentacion_id: pres?.id ?? null,
+          presentacion_nombre: pres?.nombre ?? null,
+          presentacion_unidades: pres?.unidades ?? null,
+          factor: pres?.unidades && pres.unidades > 1 ? pres.unidades : 1,
+        };
+      })
+    );
   };
 
   const agregarPorTexto = async (queryStr: string, limpiar: boolean = true) => {
@@ -116,25 +174,33 @@ export default function AjusteKardexPage() {
 
     try {
       setSearchLoading(true);
-      const res = await fetch(`/api/productos/search?q=${encodeURIComponent(q)}`);
+      // Endpoint único de resolución: decide producto-vs-caja con la misma
+      // regla que el POS, en vez de comparar códigos a mano aquí.
+      const res = await fetch(`/api/productos/por-codigo?codigo=${encodeURIComponent(q)}`);
       if (res.ok) {
         const data = await res.json();
-        const lista: ProductoSearch[] = Array.isArray(data) ? data : [];
-        const lowerQ = q.toLowerCase();
-
-        // Coincidencia exacta por código de barras o único resultado
-        const match =
-          lista.find((p) => p.codigo.trim().toLowerCase() === lowerQ) ||
-          (lista.length === 1 ? lista[0] : null);
-
-        if (match) {
-          agregarOIncrementarProducto(match);
+        if (data?.found && data.producto) {
+          const prod = data.producto as ProductoSearch;
+          const pres = (data.presentacion as PresentacionBusqueda | null) ?? null;
+          agregarOIncrementarProducto(prod, pres);
           if (limpiar) {
             setSearchQuery("");
             setSearchOpen(false);
           }
-          toast(`Producto agregado: ${match.nombre}`, "success");
-        } else if (lista.length > 0) {
+          toast(
+            pres ? `${prod.nombre} (${pres.nombre} ×${pres.unidades}) agregado` : `Producto agregado: ${prod.nombre}`,
+            "success"
+          );
+          return;
+        }
+      }
+
+      // Sin coincidencia unívoca: se muestran los candidatos para elegir a mano.
+      const fallback = await fetch(`/api/productos/search?q=${encodeURIComponent(q)}`);
+      if (fallback.ok) {
+        const data = await fallback.json();
+        const lista: ProductoSearch[] = Array.isArray(data) ? data : [];
+        if (lista.length > 0) {
           setSearchResults(lista);
           setSearchOpen(true);
         } else {
@@ -232,7 +298,10 @@ export default function AjusteKardexPage() {
         toast(`La cantidad de ${item.nombre} debe ser mayor a 0`, "warning");
         return;
       }
-      if (item.tipo === "Salida" && item.cantidad > item.stock_actual) {
+      // La validación de existencias compara en UNIDADES, que es como se guarda
+      // el movimiento: "1 caja" de 24 con 20 en stock no alcanza.
+      const unidades = item.cantidad * item.factor;
+      if (item.tipo === "Salida" && unidades > item.stock_actual) {
         toast(`Existencias insuficientes para ${item.nombre} (Existencias: ${item.stock_actual})`, "error");
         return;
       }
@@ -386,6 +455,35 @@ export default function AjusteKardexPage() {
                               item.stock_actual > 0 ? "bg-primary/10 text-primary" : "bg-danger/10 text-danger"
                             )}>Existencias actuales: {item.stock_actual}</span>
                           </div>
+                          {/* Selector Unidad / Caja. El movimiento se sigue
+                              guardando en unidades: la caja solo multiplica. */}
+                          {(item.presentaciones ?? []).length > 0 && (
+                            <div className="mt-2 flex flex-col gap-1">
+                              <Select
+                                value={item.presentacion_id ?? ""}
+                                onChange={(e) => handleCambiarPresentacion(item.id, e.target.value)}
+                                className="w-full sm:w-56 bg-background text-xs"
+                                aria-label="Unidad de venta"
+                              >
+                                <option value="">Unidad · {item.stock_actual} disp.</option>
+                                {(item.presentaciones ?? []).map((pr) => (
+                                  <option key={pr.id} value={pr.id}>
+                                    {pr.nombre} ×{pr.unidades} · {Math.floor(item.stock_actual / pr.unidades)} disp.
+                                    {pr.codigo ? ` · ${pr.codigo}` : ""}
+                                  </option>
+                                ))}
+                              </Select>
+                              {item.factor > 1 && (
+                                <span className="text-[11px] text-muted-foreground font-mono">
+                                  {item.cantidad || 0} × {item.factor} ={" "}
+                                  <span className="font-bold text-foreground">
+                                    {(item.cantidad || 0) * item.factor}
+                                  </span>{" "}
+                                  unidades
+                                </span>
+                              )}
+                            </div>
+                          )}
                         </td>
                         <td className="px-6 py-4">
                           <Select 

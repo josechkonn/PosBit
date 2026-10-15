@@ -542,7 +542,12 @@ export default function NuevaCompraPage() {
   }, [selectedMoneda?.id]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Add product to items ──
-  const addProduct = (producto: ProductoSearch) => {
+  /**
+   * Agrega el producto a la compra. `presInicial` es la CAJA que se escaneó:
+   * si viene, la línea nace directamente en esa caja (cantidad y costo por caja)
+   * en vez de en unidades. Sin ella, la línea nace por unidad como siempre.
+   */
+  const addProduct = (producto: ProductoSearch, presInicial?: PresentacionProducto | null) => {
     // Check if already in list
     const existing = items.find((i) => i.producto_id === producto.id);
     if (existing) {
@@ -574,8 +579,8 @@ export default function NuevaCompraPage() {
         moneda_costo_id: producto.moneda_costo_id ?? null,
         costoManual: null,
         costoSugerido: null,
-        presentacion: null,
-        cantidad_presentaciones: 0,
+        presentacion: presInicial ?? null,
+        cantidad_presentaciones: presInicial ? 1 : 0,
         presentaciones: (producto.presentaciones || []).filter((p) => p.activo !== false),
         margen: producto.margen_ganancia != null ? Number(producto.margen_ganancia) || 0 : 0,
         descuento1: 0,
@@ -585,13 +590,50 @@ export default function NuevaCompraPage() {
           parseFloat(String(producto.costo_promedio_base ?? producto.costo_base)) || 0,
       };
       setItems((prev) => [...prev, newItem]);
-      // Autocompletado: último costo conocido (por Unidad) en la moneda de la compra
-      sugerirUltimoCosto(newItem.id, producto.id, null);
+      // Autocompletado: último costo conocido. Con caja se pide el costo de ESA
+      // caja, que es el dato comparable con lo que se está comprando ahora.
+      sugerirUltimoCosto(newItem.id, producto.id, presInicial?.id ?? null);
     }
 
     setSearchQuery("");
     setSearchOpen(false);
-    toast(`"${producto.nombre}" agregado`, "info");
+    toast(
+      presInicial
+        ? `"${producto.nombre}" (${presInicial.nombre} ×${presInicial.unidades}) agregado`
+        : `"${producto.nombre}" agregado`,
+      "info"
+    );
+  };
+
+  /**
+   * Enter en el buscador de compras: resuelve por código (producto O caja) con
+   * el endpoint único, igual que POS y kardex. Si no hay coincidencia clara se
+   * deja el dropdown abierto para que el usuario elija a mano.
+   */
+  const handleSearchKeyDown = async (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key !== "Enter") return;
+    e.preventDefault();
+    const q = searchQuery.trim();
+    if (!q) return;
+
+    setSearchLoading(true);
+    try {
+      const res = await fetch(`/api/productos/por-codigo?codigo=${encodeURIComponent(q)}`);
+      if (res.ok) {
+        const data = await res.json();
+        if (data?.found && data.producto) {
+          addProduct(data.producto as ProductoSearch, (data.presentacion as PresentacionProducto | null) ?? null);
+          return;
+        }
+      }
+      // Sin coincidencia unívoca: se muestran los candidatos (el debounce del
+      // dropdown ya los trae con `presentaciones` incluidas).
+      setSearchOpen(true);
+    } catch {
+      toast("Error al buscar producto", "error");
+    } finally {
+      setSearchLoading(false);
+    }
   };
 
   // ── Presentación de un ítem (null = Unidad) ──
@@ -1037,8 +1079,9 @@ export default function NuevaCompraPage() {
                     type="text"
                     value={searchQuery}
                     onChange={(e) => setSearchQuery(e.target.value)}
+                    onKeyDown={handleSearchKeyDown}
                     onFocus={() => searchResults.length > 0 && setSearchOpen(true)}
-                    placeholder="Buscar por código o nombre de producto..."
+                    placeholder="Escanear código (producto o caja) o buscar por nombre..."
                     className="h-11 w-full rounded-lg border border-border bg-background pl-10 pr-4 text-sm placeholder:text-muted-foreground/50 focus:border-primary focus:outline-none focus:ring-1 focus:ring-ring"
                   />
                   {searchLoading && (

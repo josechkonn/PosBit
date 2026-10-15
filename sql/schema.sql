@@ -257,6 +257,10 @@ CREATE TABLE IF NOT EXISTS producto_presentaciones (
     modo_venta VARCHAR(10) NOT NULL DEFAULT 'derivado',
     precio_override NUMERIC(18, 6) NULL,
     margen_override NUMERIC(6, 3) NULL,
+    -- Código de barras PROPIO de la caja (opcional). NULL = no escaneable.
+    -- Único en todo el catálogo (case-insensitive) vía idx de abajo, para que
+    -- escanear un código resuelva siempre a una sola cosa.
+    codigo VARCHAR(50) NULL,
     creado_en TIMESTAMP NOT NULL DEFAULT NOW(),
     actualizado_en TIMESTAMP NOT NULL DEFAULT NOW(),
     UNIQUE (producto_id, nombre),
@@ -276,6 +280,14 @@ ALTER TABLE producto_presentaciones ADD COLUMN IF NOT EXISTS actualizado_en TIME
 ALTER TABLE producto_presentaciones ADD COLUMN IF NOT EXISTS modo_venta VARCHAR(10) NOT NULL DEFAULT 'derivado';
 ALTER TABLE producto_presentaciones ADD COLUMN IF NOT EXISTS precio_override NUMERIC(18, 6) NULL;
 ALTER TABLE producto_presentaciones ADD COLUMN IF NOT EXISTS margen_override NUMERIC(6, 3) NULL;
+-- Migración: código de barras propio de la caja (opcional y único en todo el
+-- catálogo). NULL = la caja no se escanea, solo se agrega desde el desplegable.
+ALTER TABLE producto_presentaciones ADD COLUMN IF NOT EXISTS codigo VARCHAR(50) NULL;
+-- Índice único PARCIAL: varios NULL conviven, pero dos cajas con el mismo
+-- código (sin distinguir mayúsculas) no pueden existir.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_producto_presentaciones_codigo
+  ON producto_presentaciones (lower(codigo))
+  WHERE codigo IS NOT NULL;
 -- Si la tabla ya existía, los CHECK se agregan aparte (puede haber duplicados).
 ALTER TABLE producto_presentaciones DROP CONSTRAINT IF EXISTS chk_presentacion_modo_venta;
 ALTER TABLE producto_presentaciones ADD CONSTRAINT chk_presentacion_modo_venta
@@ -458,9 +470,13 @@ CREATE TABLE IF NOT EXISTS ventas (
     subtotal DECIMAL(18, 2) NOT NULL DEFAULT 0.00,
     descuento DECIMAL(18, 2) NOT NULL DEFAULT 0.00,
     impuesto DECIMAL(18, 2) NOT NULL DEFAULT 0.00,
+    -- Cobros extra (delivery, bolsa, propina, servicio): sin IVA, se suman
+    -- crudo al total. El detalle vive en venta_cobros_extra.
+    cobros_extra DECIMAL(18, 2) NOT NULL DEFAULT 0.00,
     total DECIMAL(18, 2) NOT NULL DEFAULT 0.00,
     total_base DECIMAL(18, 2) NOT NULL DEFAULT 0.00,
     descuento_base DECIMAL(18, 2) NOT NULL DEFAULT 0.00,
+    cobros_extra_base DECIMAL(18, 2) NOT NULL DEFAULT 0.00,
     tasa DECIMAL(18, 6),
     estado VARCHAR(30) NOT NULL DEFAULT 'Pendiente',
     observaciones TEXT,
@@ -480,6 +496,11 @@ ALTER TABLE ventas ADD COLUMN IF NOT EXISTS descuento_base DECIMAL(18, 2) NOT NU
 -- Migración: momento real de la venta (para ordenar por hora dentro del mismo
 -- día, ya que `fecha` es solo DATE).
 ALTER TABLE ventas ADD COLUMN IF NOT EXISTS creado_en TIMESTAMP NOT NULL DEFAULT NOW();
+
+-- Migración: cobros extra de la venta (delivery, bolsa, propina, servicio...).
+-- No llevan IVA y se suman crudo al total. Detalle en venta_cobros_extra.
+ALTER TABLE ventas ADD COLUMN IF NOT EXISTS cobros_extra DECIMAL(18, 2) NOT NULL DEFAULT 0.00;
+ALTER TABLE ventas ADD COLUMN IF NOT EXISTS cobros_extra_base DECIMAL(18, 2) NOT NULL DEFAULT 0.00;
 
 -- ============================================================================
 -- 12. VENTA ITEMS
@@ -519,6 +540,24 @@ ALTER TABLE venta_items ADD COLUMN IF NOT EXISTS precio_presentacion DECIMAL(18,
 ALTER TABLE venta_items ADD COLUMN IF NOT EXISTS descuento DECIMAL(18, 2) NOT NULL DEFAULT 0.00;
 ALTER TABLE venta_items ADD COLUMN IF NOT EXISTS descuento_base DECIMAL(18, 2) NOT NULL DEFAULT 0.00;
 CREATE INDEX IF NOT EXISTS idx_venta_items_presentacion ON venta_items(presentacion_id);
+
+-- ============================================================================
+-- 12.3 COBROS EXTRA DE LA VENTA
+-- ----------------------------------------------------------------------------
+-- Cobros que no son productos (delivery, bolsa, propina, servicio). NO llevan
+-- IVA y se suman crudo al total. `monto` va en la moneda de la venta (el POS ya
+-- lo convierte) y `monto_base` en USD con la tasa efectiva del documento.
+-- ============================================================================
+CREATE TABLE IF NOT EXISTS venta_cobros_extra (
+    id SERIAL PRIMARY KEY,
+    venta_id INTEGER NOT NULL REFERENCES ventas(id) ON DELETE CASCADE,
+    concepto VARCHAR(150) NOT NULL,
+    monto DECIMAL(18, 2) NOT NULL DEFAULT 0.00,
+    monto_base DECIMAL(18, 2) NOT NULL DEFAULT 0.00,
+    creado_en TIMESTAMP NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_venta_cobros_extra_venta ON venta_cobros_extra(venta_id);
 
 -- ============================================================================
 -- 12.5 CREDITOS (cuentas por cobrar a clientes)

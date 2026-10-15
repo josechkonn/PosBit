@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useMemo, useCallback } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { Check, ChevronLeft, ChevronRight, Loader2, Plus, Trash2 } from "lucide-react";
+import { AlertCircle, Barcode, Check, CheckCircle2, ChevronLeft, ChevronRight, Loader2, Plus, Trash2 } from "lucide-react";
 import { Modal } from "@/components/ui/modal";
 import { CategoriaModal } from "@/components/categoria/categoria-modal";
 import { MarcaModal } from "@/components/marca/marca-modal";
@@ -19,6 +19,7 @@ import { StatusBadge } from "@/components/ui/badge";
 import { Alert } from "@/components/ui/alert";
 import { fmt, fmtDateTime } from "@/lib/format";
 import { redondear, precioUnidadDesdePresentacion, margenSobreCosto, precioPresentacionSegunModo, type ModoVentaPresentacion } from "@/lib/money";
+import { aplicarReglasRedondeo, type ReglasRedondeo } from "@/lib/redondeo";
 import { useReglasConversion } from "@/lib/use-reglas-conversion";
 
 interface Moneda {
@@ -92,6 +93,12 @@ interface PresentacionForm {
   nombre: string;
   unidades: string;
   activo: boolean;
+  /**
+   * Código de barras PROPIO de la caja. Vacío = la caja no se escanea y solo
+   * se agrega desde el desplegable. Único en todo el catálogo (el backend
+   * rechaza que dos cajas, o una caja y un producto, lo compartan).
+   */
+  codigoBarras: string;
   modo_venta: ModoVentaPresentacion;
   precio_override: string;
   margen_override: string;
@@ -287,6 +294,37 @@ function StockConPresentaciones({
   );
 }
 
+/**
+ * Estado de la verificación en vivo de un código de barras.
+ * - `vacio`     no hay nada que verificar (campo en blanco)
+ * - `libre`     comprobado contra el servidor y no existe
+ * - `ocupado`   ya lo usa otro producto o caja → `mensaje` lo explica
+ */
+interface VerificacionCodigo {
+  estado: "vacio" | "libre" | "ocupado";
+  mensaje?: string;
+}
+const VERIF_IDLE: VerificacionCodigo = { estado: "vacio" };
+
+/** Texto que se muestra bajo el campo mientras tecleas un código. */
+function pistaVerificacion(v: VerificacionCodigo | undefined): {
+  texto: string;
+  clase: string;
+} | null {
+  if (!v || v.estado === "vacio") return null;
+  if (v.estado === "libre") {
+    return { texto: "Código disponible", clase: "text-success-strong" };
+  }
+  return { texto: v.mensaje || "Este código ya está en uso", clase: "text-danger-strong" };
+}
+
+/** Clases del input según el estado de la verificación. */
+function clasesInputCodigo(v: VerificacionCodigo | undefined, base: string): string {
+  if (v?.estado === "ocupado") return `${base} border-danger-border bg-danger-soft/40 focus:border-danger`;
+  if (v?.estado === "libre") return `${base} border-success-border`;
+  return base;
+}
+
 export function ProductoModal({ open, mode, producto, monedas: monedasProp, defaultProveedorId, onClose, onSuccess }: ProductoModalProps) {
   const [step, setStep] = useState(1);
   const [loading, setLoading] = useState(false);
@@ -299,6 +337,13 @@ export function ProductoModal({ open, mode, producto, monedas: monedasProp, defa
   const [loadingMonedas, setLoadingMonedas] = useState(false);
   // Modal anidado abierto desde el "+" (categoría, marca o proveedor)
   const [modalAnidado, setModalAnidado] = useState<"categoria" | "marca" | "proveedor" | null>(null);
+
+  // ── Verificación de códigos de barras MIENTRAS se escribe ──
+  // Evita descubrir el duplicado recién al pulsar Guardar. Es una ayuda, no un
+  // candado: el servidor sigue validando al guardar (por si otro usuario tomó
+  // el código entre la verificación y el guardado).
+  const [verifCodigo, setVerifCodigo] = useState<VerificacionCodigo>(VERIF_IDLE);
+  const [verifCajas, setVerifCajas] = useState<Record<string, VerificacionCodigo>>({});
 
   // Combine prop currencies or loaded fallback currencies
   const effectiveMonedas = useMemo(() => {
@@ -375,9 +420,140 @@ export function ProductoModal({ open, mode, producto, monedas: monedasProp, defa
       setStockTexto(String(stock));
     }
   }, [presentaciones, stockUnidadId]);
+
+  // ── Verificación en vivo del código del PRODUCTO ──
+  // Debounce de 400ms: se sigue escribiendo sin cortar, y solo se consulta
+  // cuando el usuario deja de teclear un momento. Al editar se excluye el
+  // propio producto para que su código actual no se marque como duplicado.
+  useEffect(() => {
+    const cod = codigo.trim();
+    if (cod.length < 2) {
+      setVerifCodigo(VERIF_IDLE);
+      return;
+    }
+    let cancelado = false;
+    setVerifCodigo((v) => (v.estado === "ocupado" ? v : { ...v }));
+
+    const t = setTimeout(async () => {
+      try {
+        const qs = new URLSearchParams({ tipo: "producto", codigo: cod });
+        if (producto?.id) qs.set("excluirProductoId", String(producto.id));
+        const res = await fetch(`/api/productos/verificar-codigo?${qs}`);
+        if (!res.ok) return;
+        const data = await res.json();
+        if (cancelado) return;
+        const r = data?.resultados?.[cod];
+        setVerifCodigo(
+          r && r.disponible === false ? { estado: "ocupado", mensaje: r.mensaje } : { estado: "libre" }
+        );
+      } catch {
+        /* sin red: se deja el campo sin marca; el servidor valida al guardar */
+      }
+    }, 400);
+
+    return () => {
+      cancelado = true;
+      clearTimeout(t);
+    };
+  }, [codigo, producto?.id]);
+
+  // ── Verificación en vivo de los códigos de las CAJAS ──
+  // Se manda la lista completa en una sola consulta en vez de una por fila, así
+  // que agregar diez cajas no genera diez viajes. Además se detectan aquí los
+  // códigos repetidos DENTRO de la propia lista, que el servidor no puede ver
+  // hasta que se guarda.
+  const codigosCaja = useMemo(
+    () =>
+      presentaciones
+        .map((p) => ({ key: p.key, codigo: p.codigoBarras.trim() }))
+        .filter((c) => c.codigo.length >= 2),
+    [presentaciones]
+  );
+
+  useEffect(() => {
+    if (codigosCaja.length === 0) {
+      setVerifCajas({});
+      return;
+    }
+    let cancelado = false;
+
+    const t = setTimeout(async () => {
+      // Repetición dentro del propio formulario: se marca el aviso sin red.
+      const repetidos = new Set<string>();
+      const vistos = new Set<string>();
+      for (const c of codigosCaja) {
+        const k = c.codigo.toLowerCase();
+        if (vistos.has(k)) repetidos.add(c.codigo);
+        vistos.add(k);
+      }
+
+      let libres: Record<string, { disponible: boolean; mensaje: string }> = {};
+      try {
+        const qs = new URLSearchParams({ tipo: "caja" });
+        for (const c of codigosCaja) qs.append("codigo", c.codigo);
+        if (producto?.id) qs.set("excluirProductoId", String(producto.id));
+        const res = await fetch(`/api/productos/verificar-codigo?${qs}`);
+        if (res.ok) libres = (await res.json())?.resultados ?? {};
+      } catch {
+        /* sin red: solo se avisa lo local */
+      }
+      if (cancelado) return;
+
+      const siguiente: Record<string, VerificacionCodigo> = {};
+      for (const c of codigosCaja) {
+        if (repetidos.has(c.codigo)) {
+          siguiente[c.key] = { estado: "ocupado", mensaje: "Este código está repetido en las cajas de este producto" };
+          continue;
+        }
+        const r = libres[c.codigo];
+        siguiente[c.key] =
+          r && r.disponible === false ? { estado: "ocupado", mensaje: r.mensaje } : { estado: "libre" };
+      }
+      setVerifCajas(siguiente);
+    }, 400);
+
+    return () => {
+      cancelado = true;
+      clearTimeout(t);
+    };
+  }, [codigosCaja, producto?.id]);
+
   // Estado del buscador para agregar presentaciones nuevas
   const [nuevaPresNombre, setNuevaPresNombre] = useState("");
   const [nuevaPresUnidades, setNuevaPresUnidades] = useState("2");
+  const [nuevaPresCodigo, setNuevaPresCodigo] = useState("");
+
+  // Verificación en vivo del código que se está ESCRIBIENDO para la caja nueva
+  // (aún no está en `presentaciones`, así que no la cubre el efecto de la tabla).
+  const [verifNuevaPres, setVerifNuevaPres] = useState<VerificacionCodigo>(VERIF_IDLE);
+  useEffect(() => {
+    const cod = nuevaPresCodigo.trim();
+    if (cod.length < 2) {
+      setVerifNuevaPres(VERIF_IDLE);
+      return;
+    }
+    let cancelado = false;
+    const t = setTimeout(async () => {
+      try {
+        const qs = new URLSearchParams({ tipo: "caja", codigo: cod });
+        if (producto?.id) qs.set("excluirProductoId", String(producto.id));
+        const res = await fetch(`/api/productos/verificar-codigo?${qs}`);
+        if (!res.ok) return;
+        const data = await res.json();
+        if (cancelado) return;
+        const r = data?.resultados?.[cod];
+        setVerifNuevaPres(
+          r && r.disponible === false ? { estado: "ocupado", mensaje: r.mensaje } : { estado: "libre" }
+        );
+      } catch {
+        /* sin red: el servidor valida al guardar */
+      }
+    }, 400);
+    return () => {
+      cancelado = true;
+      clearTimeout(t);
+    };
+  }, [nuevaPresCodigo, producto?.id]);
 
   // Pricing: cada moneda tiene su precio de venta y su precio de compra. La
   // moneda de VENTA y la de COMPRA se eligen por separado (p. ej. costo en USD
@@ -469,7 +645,39 @@ export function ProductoModal({ open, mode, producto, monedas: monedasProp, defa
     return convertirProducto(compra, costoMoneda, ventaMoneda, "compra", Number(ventaMoneda.decimales ?? 2));
   };
 
+  // Regla global de redondeo de precios (Configuración → Precios). Se pide por
+  // la API al abrir el modal para que el botón "Redondear" aparezca (o no)
+  // según lo que el administrador tenga configurado, sin que el modal adivine.
+  // Se lee por HTTP y no importando `global-config.ts` porque ese módulo arrastra
+  // la capa de BD y rompería la build de este Client Component.
+  const [cfgRedondeo, setCfgRedondeo] = useState<ReglasRedondeo | null>(null);
+  const [msgRedondeo, setMsgRedondeo] = useState("");
+  useEffect(() => {
+    if (!open) return;
+    let vigente = true;
+    fetch("/api/configuracion-global")
+      .then((r) => (r.ok ? r.json() : null))
+      .then((c) => {
+        if (vigente && c) {
+          setCfgRedondeo({
+            redondeo_activo: c.redondeo_activo === true,
+            redondeo_multiplo: Number(c.redondeo_multiplo) > 0 ? Number(c.redondeo_multiplo) : 0,
+            redondeo_no_bajar_de_costo: c.redondeo_no_bajar_de_costo !== false,
+          });
+        }
+      })
+      .catch(() => {
+        /* sin config no se ofrece el botón; el backend sigue aplicando la regla */
+      });
+    return () => {
+      vigente = false;
+    };
+  }, [open]);
+
   const actualizarPrecio = (monedaId: string, field: "precioVenta" | "precioCompra", value: string) => {
+    // Si el operador vuelve a tocar un precio, el aviso del último redondeo
+    // queda obsoleto (ya no describe lo que hay en pantalla).
+    setMsgRedondeo("");
     setPreciosPorMoneda((prev) => ({
       ...prev,
       [monedaId]: { ...prev[monedaId], [field]: value },
@@ -492,10 +700,9 @@ export function ProductoModal({ open, mode, producto, monedas: monedasProp, defa
         const margen = parseFloat(margenGanancia);
         if (Number.isFinite(margen) && margen >= 0 && ventaMonedaId) {
           const costoEnVenta = compraEnVentaMoneda(valorNum);
-          const precioNuevo = redondear(
-            costoEnVenta * (1 + margen / 100),
-            Number(ventaMoneda?.decimales ?? 2)
-          );
+          // Pasa por el mismo cálculo que al escribir el margen, para que el
+          // precio resultante también cumpla el redondeo global.
+          const precioNuevo = precioDesdeMargen(costoEnVenta, margen);
           setPreciosPorMoneda((prev) => ({
             ...prev,
             [ventaMonedaId]: { ...prev[ventaMonedaId], precioVenta: String(precioNuevo) },
@@ -518,6 +725,22 @@ export function ProductoModal({ open, mode, producto, monedas: monedasProp, defa
   };
 
   /**
+   * Precio de venta derivado del margen. Es el MISMO cálculo que hace el
+   * backend al guardar, incluida la regla global de redondeo: si difieren, la
+   * pantalla muestra un precio que al guardar cambia solo.
+   */
+  const precioDesdeMargen = (costoEnVenta: number, margen: number): number => {
+    const dec = Number(ventaMoneda?.decimales ?? 2);
+    const bruto =
+      margen > 0
+        ? redondear(costoEnVenta * (1 + margen / 100), dec)
+        : redondear(costoEnVenta, dec);
+    return cfgRedondeo
+      ? aplicarReglasRedondeo(bruto, cfgRedondeo, costoEnVenta).precio
+      : bruto;
+  };
+
+  /**
    * Regla global de precios: margen % → precio de venta autocalculado desde el
    * costo en la moneda de COMPRA, convertido a la moneda de VENTA.
    */
@@ -526,10 +749,7 @@ export function ProductoModal({ open, mode, producto, monedas: monedasProp, defa
     const costoCompra = parseFloat(preciosPorMoneda[costoMonedaId]?.precioCompra || "") || 0;
     if (costoCompra <= 0) return;
     const costoEnVenta = compraEnVentaMoneda(costoCompra);
-    const precioNuevo = redondear(
-      costoEnVenta * (1 + margen / 100),
-      Number(ventaMoneda?.decimales ?? 2)
-    );
+    const precioNuevo = precioDesdeMargen(costoEnVenta, margen);
     setPreciosPorMoneda((prev) => ({
       ...prev,
       [ventaMonedaId]: { ...prev[ventaMonedaId], precioVenta: String(precioNuevo) },
@@ -656,6 +876,13 @@ const agregarPresentacionDesdePicker = () => {
       setError("Las unidades de la presentación deben ser enteras y mayores a 1");
       return;
     }
+    // No se agrega una caja con un código que ya existe: el aviso ya está en
+    // pantalla, así que acá solo se corta la acción en vez de dejar que el
+    // error aparezca recién al Guardar.
+    if (nuevaPresCodigo.trim().length >= 2 && verifNuevaPres.estado === "ocupado") {
+      setError(`No se puede agregar la caja: ${verifNuevaPres.mensaje || "ese código ya está en uso"}`);
+      return;
+    }
     setPresentaciones((prev) => [
       ...prev,
       {
@@ -663,12 +890,14 @@ const agregarPresentacionDesdePicker = () => {
         nombre: nombrePres,
         unidades: String(unidadesNum),
         activo: true,
+        codigoBarras: nuevaPresCodigo.trim(),
         modo_venta: "derivado",
         precio_override: "",
         margen_override: "",
       },
     ]);
     setNuevaPresNombre("");
+    setNuevaPresCodigo("");
   };
 
   const actualizarPresentacion = (key: string, cambios: Partial<PresentacionForm>) => {
@@ -812,6 +1041,7 @@ const agregarPresentacionDesdePicker = () => {
           nombre: pr.nombre,
           unidades: String(pr.unidades),
           activo: pr.activo,
+          codigoBarras: (pr as any).codigo ?? "",
           modo_venta: pr.modo_venta ?? "derivado",
           precio_override: pr.precio_override != null ? String(pr.precio_override) : "",
           margen_override: pr.margen_override != null ? String(pr.margen_override) : "",
@@ -874,8 +1104,94 @@ const agregarPresentacionDesdePicker = () => {
     setCostoMonedaId((prev) => (prev && effectiveMonedas.some((m) => m.id === prev) ? prev : defaultId()));
   }, [open, effectiveMonedas]);
 
-  const handleImageUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
+  /** ¿Se puede redondear con la configuración actual? */
+  const redondeoDisponible = !!cfgRedondeo?.redondeo_activo && Number(cfgRedondeo?.redondeo_multiplo) > 0;
+
+  /**
+   * Aplica la regla de redondeo global al precio de venta de la moneda de
+   * venta. Es un botón MANUAL a propósito: la regla se respeta siempre al
+   * derivar el precio del margen, pero si el operador escribió un precio a
+   * mano (o quiere un precio "bonito" del múltiplo) hay que pedirlo, porque
+   * redondear sin permiso cambia lo que el producto cuesta.
+   */
+  const redondearPrecioVenta = () => {
+    if (!cfgRedondeo || !ventaMonedaId) return;
+    const actual = parseFloat(preciosPorMoneda[ventaMonedaId]?.precioVenta || "") || 0;
+    if (actual <= 0) {
+      setMsgRedondeo("Escribe primero un precio de venta para poder redondearlo");
+      return;
+    }
+    const costoCompra = costoMonedaId
+      ? parseFloat(preciosPorMoneda[costoMonedaId]?.precioCompra || "") || 0
+      : 0;
+    const suelo = compraEnVentaMoneda(costoCompra);
+    const { precio, redondeado } = aplicarReglasRedondeo(actual, cfgRedondeo, suelo);
+    if (!redondeado) {
+      setMsgRedondeo(`El precio ${fmt(actual, ventaMoneda?.codigo)} ya es múltiplo de ${cfgRedondeo.redondeo_multiplo}`);
+      return;
+    }
+    const moneda = ventaMonedaId;
+    setPreciosPorMoneda((prev) => ({
+      ...prev,
+      [moneda]: { ...prev[moneda], precioVenta: String(precio) },
+    }));
+    derivarCampo("precioVenta", moneda, precio, false);
+    // El margen se recalcula del precio NUEVO: si no, la pantalla mostraría un
+    // margen que ya no corresponde al precio redondeado.
+    if (suelo > 0) {
+      setMargenGanancia(String(redondear(Math.max(0, (precio / suelo - 1) * 100), 2)));
+    }
+    setMsgRedondeo(
+      `Redondeado a múltiplo de ${cfgRedondeo.redondeo_multiplo}: ${fmt(actual, ventaMoneda?.codigo)} → ${fmt(precio, ventaMoneda?.codigo)}`
+    );
+  };
+
+  /**
+   * Botón "Redondear" + aviso del resultado. Comparte el cálculo del margen
+   * real, así que se usa igual en el paso de creación y en el de edición.
+   * Solo aparece si Configuración → Precios tiene el redondeo ACTIVO con un
+   * múltiplo válido; si está apagado, el operador no ve un botón inútil.
+   */
+  const renderBotonRedondear = () => {
+    if (!redondeoDisponible || !cfgRedondeo) return null;
+    const mult = cfgRedondeo.redondeo_multiplo;
+    const cod = ventaMoneda?.codigo;
+    return (
+      <div className="mt-3 flex flex-col gap-2">
+        <div className="flex flex-wrap items-center gap-2">
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            onClick={redondearPrecioVenta}
+            disabled={!ventaMonedaId || !(parseFloat(preciosPorMoneda[ventaMonedaId ?? ""]?.precioVenta || "") || 0)}
+            title={`Ajusta el precio de venta al múltiplo de ${mult} configurado en Configuración → Precios`}
+          >
+            <Barcode size={13} className="mr-1.5" />
+            Redondear a múltiplo de {mult}
+          </Button>
+          <span className="text-[11px] text-muted-foreground">
+            Aplica a <span className="font-semibold text-foreground">{cod ?? "—"}</span>, la moneda de venta.
+            {cfgRedondeo.redondeo_no_bajar_de_costo && " Nunca baja del costo."}
+          </span>
+        </div>
+        {msgRedondeo && (
+          <p
+            className={`flex items-center gap-1.5 rounded border px-2.5 py-1.5 text-[11px] font-medium ${
+              msgRedondeo.startsWith("Redondeado")
+                ? "border-success-border bg-success-soft text-success-strong"
+                : "border-border bg-muted/40 text-muted-foreground"
+            }`}
+          >
+            {msgRedondeo.startsWith("Redondeado") && <CheckCircle2 size={12} className="shrink-0" />}
+            {msgRedondeo}
+          </p>
+        )}
+      </div>
+    );
+  };
+
+  const handleImageUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {    const file = e.target.files?.[0];
     if (!file) return;
 
     setError("");
@@ -950,7 +1266,9 @@ const agregarPresentacionDesdePicker = () => {
       }
 
       // Presentaciones (misma pestaña): cada fila requiere nombre y unidades
-      // enteras > 1, y el modo de precio elegido debe tener su valor.
+      // enteras > 1, el modo de precio elegido debe tener su valor, y los
+      // códigos de barras no pueden repetirse.
+      const vistos = new Set<string>();
       for (const p of presentaciones) {
         const nombreP = p.nombre.trim();
         if (!nombreP) {
@@ -961,6 +1279,18 @@ const agregarPresentacionDesdePicker = () => {
         if (!Number.isInteger(unidades) || unidades <= 1) {
           setError(`Presentación "${nombreP}": las unidades deben ser un número entero mayor a 1`);
           return false;
+        }
+        // El código de barras es único en todo el catálogo. Se comprueba aquí
+        // lo que se puede ver sin red (dos cajas de ESTE producto) para no
+        // dejar ni siquiera llegar al error del servidor; el choque con otras
+        // cajas o con un producto lo avisa el backend al guardar.
+        const codigo = p.codigoBarras.trim();
+        if (codigo) {
+          if (vistos.has(codigo.toLowerCase())) {
+            setError(`El código de barras "${codigo}" está repetido en las cajas de este producto`);
+            return false;
+          }
+          vistos.add(codigo.toLowerCase());
         }
         const modo: ModoVentaPresentacion = p.modo_venta ?? "derivado";
         if (modo === "fijo") {
@@ -1044,6 +1374,8 @@ const agregarPresentacionDesdePicker = () => {
             nombre: p.nombre.trim(),
             unidades: parseInt(p.unidades, 10),
             activo: p.activo,
+            // Vacío = la caja no se escanea, solo se agrega desde el desplegable.
+            codigo: p.codigoBarras.trim() || null,
             modo_venta: modo,
             precio_override: modo === "fijo" && Number.isFinite(po) && po >= 0 ? po : null,
             margen_override: modo === "margen" && Number.isFinite(mo) && mo >= 0 ? mo : null,
@@ -1146,7 +1478,13 @@ const agregarPresentacionDesdePicker = () => {
   // relativa al viewport (78% de la pantalla): así el modal no "salta" al
   // cambiar de pestaña/paso con distinto contenido (entre 78vh y 90vh), y el
   // pie (Cancelar/Guardar/Siguiente) queda siempre anclado a la parte baja.
-  const stepWidth = isFormMode ? "max-w-4xl w-[92vw] min-h-[78vh]" : "max-w-xl w-[90vw]";
+  // El paso de presentaciones lleva una tabla de 8 columnas (nombre, código,
+  // unidades, modo, costo, precio, activo y acciones). Con `max-w-4xl` no
+  // entraban y había que hacer scroll horizontal para ver el PRECIO, que es
+  // justo la columna que más importa. `max-w-6xl` la deja entera en pantalla
+  // en una ventana de 1400px (la de Electron) y sigue siendo 92vw en una
+  // pantalla chica, donde el scroll horizontal sigue siendo el respaldo.
+  const stepWidth = isFormMode ? "max-w-6xl w-[94vw] min-h-[78vh]" : "max-w-xl w-[90vw]";
 
   /**
    * Tarjeta de una moneda en el paso de precios: permite marcarla como moneda
@@ -1262,8 +1600,8 @@ const agregarPresentacionDesdePicker = () => {
   const renderPresentaciones = () => (
     <div className="space-y-3">
       {/* Buscador/selector para agregar presentaciones */}
-      <div className="flex items-end gap-2">
-        <div className="flex-1">
+      <div className="flex items-end gap-3">
+        <div className="flex-1 min-w-0">
           <Label className="text-xs">Presentación</Label>
           <ComboboxCreatable
             options={PRESENTACIONES_SUGERIDAS.map((n) => ({ value: n.toLowerCase(), label: n }))}
@@ -1273,7 +1611,7 @@ const agregarPresentacionDesdePicker = () => {
             emptyLabel="Escribe el nombre de la presentación"
           />
         </div>
-        <div className="w-24">
+        <div className="w-20 shrink-0">
           <Label className="text-xs">Unidades</Label>
           <Input
             type="number"
@@ -1284,15 +1622,47 @@ const agregarPresentacionDesdePicker = () => {
             placeholder="24"
           />
         </div>
+        <div className="w-40 shrink-0">
+          <Label className="text-xs flex items-center gap-1">
+            <Barcode size={12} className="text-muted-foreground" />
+            Código
+          </Label>
+          <Input
+            value={nuevaPresCodigo}
+            onChange={(e) => setNuevaPresCodigo(e.target.value)}
+            placeholder="Opcional"
+            maxLength={50}
+            aria-invalid={verifNuevaPres.estado === "ocupado"}
+            className={clasesInputCodigo(verifNuevaPres, "")}
+          />
+          {pistaVerificacion(verifNuevaPres) && (
+            <p
+              className={`mt-1 flex items-start gap-1 text-[10px] leading-tight font-medium ${
+                verifNuevaPres.estado === "ocupado" ? "text-danger-strong" : "text-success-strong"
+              }`}
+            >
+              {verifNuevaPres.estado === "ocupado" ? (
+                <AlertCircle size={11} className="mt-px shrink-0" />
+              ) : (
+                <CheckCircle2 size={11} className="mt-px shrink-0" />
+              )}
+              <span>{pistaVerificacion(verifNuevaPres)!.texto}</span>
+            </p>
+          )}
+        </div>
         <Button
           type="button"
           variant="outline"
           onClick={agregarPresentacionDesdePicker}
-          className="h-10"
+          className="h-10 shrink-0"
         >
           <Plus size={14} /> Agregar
         </Button>
       </div>
+      <p className="text-[11px] text-muted-foreground">
+        El código es opcional y único en todo el catálogo. Con código, la caja se puede
+        escanear para cobrarla como caja; sin él, solo se agrega desde el desplegable.
+      </p>
 
       {presentaciones.length === 0 ? (
         <div className="rounded-lg border border-dashed border-border py-8 text-center text-sm text-muted-foreground">
@@ -1302,6 +1672,7 @@ const agregarPresentacionDesdePicker = () => {
         <Table
           headers={[
             "Presentación",
+            "Código",
             "Unid.",
             "Modo precio",
             `Costo compra (${costoMoneda?.codigo ?? "—"})`,
@@ -1327,15 +1698,45 @@ const agregarPresentacionDesdePicker = () => {
             const num = (n: number) =>
               n.toLocaleString("es-BO", { minimumFractionDigits: decVenta, maximumFractionDigits: decVenta });
             return (
-              <Tr key={p.key}>
+              <Tr key={p.key} className="align-middle">
                 <Td>
                   <Input
                     value={p.nombre}
                     onChange={(e) => actualizarPresentacion(p.key, { nombre: e.target.value })}
                     placeholder="Caja, Bolsa..."
                     maxLength={100}
-                    className="h-8"
+                    className="h-8 w-32"
                   />
+                </Td>
+                {/* Código de barras de la caja: es lo que se escanea para
+                    cobrarla como caja. Vacío = solo agregable desde el desplegable. */}
+                <Td>
+                  <Input
+                    value={p.codigoBarras}
+                    onChange={(e) => actualizarPresentacion(p.key, { codigoBarras: e.target.value })}
+                    placeholder="Sin código"
+                    maxLength={50}
+                    aria-invalid={verifCajas[p.key]?.estado === "ocupado"}
+                    className={`h-8 w-32 font-mono text-xs ${
+                      p.codigoBarras.trim() && verifCajas[p.key]?.estado !== "libre"
+                        ? "border-dashed text-muted-foreground"
+                        : ""
+                    } ${clasesInputCodigo(verifCajas[p.key], "")}`}
+                  />
+                  {pistaVerificacion(verifCajas[p.key]) && (
+                    <p
+                      className={`mt-1 flex items-start gap-1 text-[10px] leading-tight font-medium ${
+                        verifCajas[p.key]?.estado === "ocupado" ? "text-danger-strong" : "text-success-strong"
+                      }`}
+                    >
+                      {verifCajas[p.key]?.estado === "ocupado" ? (
+                        <AlertCircle size={11} className="mt-px shrink-0" />
+                      ) : (
+                        <CheckCircle2 size={11} className="mt-px shrink-0" />
+                      )}
+                      <span>{pistaVerificacion(verifCajas[p.key])!.texto}</span>
+                    </p>
+                  )}
                 </Td>
                 <Td>
                   <Input
@@ -1345,7 +1746,7 @@ const agregarPresentacionDesdePicker = () => {
                     value={p.unidades}
                     onChange={(e) => actualizarPresentacion(p.key, { unidades: e.target.value })}
                     placeholder="24"
-                    className="h-8 w-20"
+                    className="h-8 w-16 text-center"
                   />
                 </Td>
                 <Td>
@@ -1354,7 +1755,7 @@ const agregarPresentacionDesdePicker = () => {
                     onChange={(e) =>
                       actualizarPresentacion(p.key, { modo_venta: e.target.value as ModoVentaPresentacion })
                     }
-                    className="h-8 w-[7.5rem] rounded-md border border-border bg-background px-2 text-xs text-foreground focus:border-primary focus:outline-none"
+                    className="h-8 w-[6.5rem] rounded-md border border-border bg-background px-2 text-xs text-foreground focus:border-primary focus:outline-none"
                   >
                     <option value="derivado">Derivado</option>
                     <option value="fijo">Precio fijo</option>
@@ -1601,7 +2002,21 @@ const agregarPresentacionDesdePicker = () => {
                   placeholder="Ej: HAR-001"
                   autoFocus
                   maxLength={50}
+                  className={clasesInputCodigo(verifCodigo, "")}
+                  aria-invalid={verifCodigo.estado === "ocupado"}
                 />
+                {pistaVerificacion(verifCodigo) && (
+                  <p
+                    className={`mt-1.5 flex items-center gap-1 text-[11px] font-medium ${pistaVerificacion(verifCodigo)!.clase}`}
+                  >
+                    {verifCodigo.estado === "ocupado" ? (
+                      <AlertCircle size={12} className="shrink-0" />
+                    ) : (
+                      <CheckCircle2 size={12} className="shrink-0" />
+                    )}
+                    {pistaVerificacion(verifCodigo)!.texto}
+                  </p>
+                )}
               </div>
               <div>
                 <Label>Nombre</Label>
@@ -1786,6 +2201,7 @@ const agregarPresentacionDesdePicker = () => {
                     onChange={(e) => handleMargenChange(e.target.value)}
                     placeholder="0"
                   />
+                  {renderBotonRedondear()}
                 </div>
                 <div>
                   <Label className="text-sm font-medium text-warning-strong">Margen real</Label>
@@ -1931,7 +2347,21 @@ const agregarPresentacionDesdePicker = () => {
                   onChange={(e) => setCodigo(e.target.value)}
                   placeholder="Ej: HAR-001"
                   maxLength={50}
+                  className={clasesInputCodigo(verifCodigo, "")}
+                  aria-invalid={verifCodigo.estado === "ocupado"}
                 />
+                {pistaVerificacion(verifCodigo) && (
+                  <p
+                    className={`mt-1.5 flex items-center gap-1 text-[11px] font-medium ${pistaVerificacion(verifCodigo)!.clase}`}
+                  >
+                    {verifCodigo.estado === "ocupado" ? (
+                      <AlertCircle size={12} className="shrink-0" />
+                    ) : (
+                      <CheckCircle2 size={12} className="shrink-0" />
+                    )}
+                    {pistaVerificacion(verifCodigo)!.texto}
+                  </p>
+                )}
               </div>
               <div>
                 <Label>Nombre</Label>
@@ -2091,6 +2521,7 @@ const agregarPresentacionDesdePicker = () => {
                     onChange={(e) => handleMargenChange(e.target.value)}
                     placeholder="0"
                   />
+                  {renderBotonRedondear()}
                 </div>
                 <div>
                   <Label className="text-sm font-medium text-warning-strong">Margen real</Label>

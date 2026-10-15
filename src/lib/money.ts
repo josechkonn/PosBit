@@ -600,6 +600,12 @@ export interface PresentacionCalculada {
   nombre: string;
   unidades: number;
   activo: boolean;
+  /**
+   * Código de barras PROPIO de la caja (opcional). Es `null` cuando la caja no
+   * tiene código asignado: en ese caso solo se agrega desde el desplegable,
+   * nunca escaneando.
+   */
+  codigo: string | null;
   /** Precio de VENTA de la presentación completa, ya resuelto según el modo. */
   precio: number;
   /** Precio por UNIDAD dentro de la presentación (= precio ÷ unidades). */
@@ -628,6 +634,7 @@ export interface PresentacionCalculadaInput {
   nombre: string;
   unidades: number | string;
   activo?: boolean | null;
+  codigo?: string | null;
   modo_venta?: string | null;
   precio_override?: number | string | null;
   margen_override?: number | string | null;
@@ -777,6 +784,7 @@ export function presentacionesDeProducto(
       nombre: p.nombre,
       unidades: Number.isFinite(unidades) && unidades > 1 ? unidades : 0,
       activo: p.activo !== false,
+      codigo: p.codigo ? String(p.codigo).trim() || null : null,
       precio_override: Number.isFinite(po as number) ? (po as number) : null,
       margen_override: Number.isFinite(mo as number) ? (mo as number) : null,
       ...r,

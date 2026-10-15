@@ -31,6 +31,9 @@ export async function GET(request: Request) {
     const wherePagos = clienteId
       ? "WHERE vp.venta_id IN (SELECT id FROM ventas WHERE cliente_id = $1)"
       : "";
+    const whereCobros = clienteId
+      ? "WHERE venta_id IN (SELECT id FROM ventas WHERE cliente_id = $1)"
+      : "";
 
     const ventas = await query(`
       SELECT 
@@ -83,7 +86,24 @@ export async function GET(request: Request) {
     }
     const ventasConPagos = ventas.map((v) => ({ ...v, pagos: pagosPorVenta.get(v.id) || [] }));
 
-    return NextResponse.json({ ventas: ventasConPagos, items });
+    // Cobros extra por venta (delivery, bolsa, propina, servicio...)
+    const cobros = await query(`
+      SELECT * FROM venta_cobros_extra
+      ${whereCobros}
+      ORDER BY venta_id, id
+    `, params);
+    const cobrosPorVenta = new Map<number, typeof cobros>();
+    for (const c of cobros) {
+      const lista = cobrosPorVenta.get(c.venta_id) || [];
+      lista.push(c);
+      cobrosPorVenta.set(c.venta_id, lista);
+    }
+    const ventasCompletas = ventasConPagos.map((v) => ({
+      ...v,
+      cobros_extra: cobrosPorVenta.get(v.id) || [],
+    }));
+
+    return NextResponse.json({ ventas: ventasCompletas, items });
   } catch (error) {
     return NextResponse.json({ error: "Error al obtener ventas" }, { status: 500 });
   }
@@ -93,7 +113,7 @@ export async function POST(request: Request) {
   try {
     await requireSession();
     const body = await request.json();
-    const { cliente, cliente_id, tipo_pago, fecha, moneda_id, metodo_pago_id, caja_id, items, observaciones, descuento = 0, tasa: tasaCustom, monto_pagado, pagos } = body;
+    const { cliente, cliente_id, tipo_pago, fecha, moneda_id, metodo_pago_id, caja_id, items, observaciones, descuento = 0, tasa: tasaCustom, monto_pagado, pagos, cobros_extra } = body;
 
     if (!moneda_id || !items || items.length === 0) {
       return NextResponse.json({ error: "Campos requeridos: moneda_id, items" }, { status: 400 });
@@ -237,10 +257,27 @@ export async function POST(request: Request) {
 
       // Descuento total del documento = global + descuentos de línea.
       const descuentoVenta = redondear(Number(descuento) + descuentoItemsTotal, decVenta);
-      const total = Math.max(0, subtotalTotal - descuentoVenta + impuestoTotal);
+
+      // ── Cobros extra (delivery, bolsa, propina, servicio...) ──
+      // No son productos: no pasan por stock ni kardex y NO llevan IVA, así que
+      // se suman crudo al total. El POS los envía ya convertidos a la moneda de
+      // la venta, igual que `descuento`; aquí solo se sanea lo que llega.
+      const cobrosExtra = (Array.isArray(cobros_extra) ? cobros_extra : [])
+        .map((c: any) => ({
+          concepto: String(c?.concepto ?? "").trim().slice(0, 150) || "Cobro extra",
+          monto: Math.max(0, redondear(Number(c?.monto) || 0, decVenta)),
+        }))
+        .filter((c: { monto: number }) => c.monto > 0);
+      const cobrosExtraVenta = redondear(
+        cobrosExtra.reduce((s: number, c: { monto: number }) => s + c.monto, 0),
+        decVenta
+      );
+
+      const total = Math.max(0, subtotalTotal - descuentoVenta + impuestoTotal + cobrosExtraVenta);
       // `*_base` siempre en USD, usando la tasa efectiva del documento
       const totalBase = aBase(total, tasaUsdVenta);
       const descuentoBase = aBase(descuentoVenta, tasaUsdVenta);
+      const cobrosExtraBase = aBase(cobrosExtraVenta, tasaUsdVenta);
 
       // ── Pago: cuánto aplica a esta venta y cuánto queda como deuda ──
       // Con `pagos` (pago mixto) cada línea se convierte a la moneda de la
@@ -392,13 +429,22 @@ export async function POST(request: Request) {
       const estadoVenta = esCredito ? "Credito" : "Pagada";
 
       const ventaRes = await client.query(
-        `INSERT INTO ventas (numero, cliente, cliente_id, tipo_pago, fecha, moneda_id, metodo_pago_id, caja_id, subtotal, descuento, impuesto, total, total_base, descuento_base, tasa, estado, observaciones) 
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17) 
+        `INSERT INTO ventas (numero, cliente, cliente_id, tipo_pago, fecha, moneda_id, metodo_pago_id, caja_id, subtotal, descuento, impuesto, cobros_extra, total, total_base, descuento_base, cobros_extra_base, tasa, estado, observaciones) 
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19) 
          RETURNING *`,
-         [generarNumero(), clienteNombre, cliente_id || null, esCredito ? "Credito" : "Contado", fecha || new Date().toISOString().split("T")[0], moneda_id, metodoVentaId, cajaVentaId, subtotalTotal, descuentoVenta, impuestoTotal, total, totalBase, descuentoBase, tasaAplicada, estadoVenta, observaciones || null]
+         [generarNumero(), clienteNombre, cliente_id || null, esCredito ? "Credito" : "Contado", fecha || new Date().toISOString().split("T")[0], moneda_id, metodoVentaId, cajaVentaId, subtotalTotal, descuentoVenta, impuestoTotal, cobrosExtraVenta, total, totalBase, descuentoBase, cobrosExtraBase, tasaAplicada, estadoVenta, observaciones || null]
       );
 
       const venta = ventaRes.rows[0];
+
+      // Detalle de los cobros extra (concepto + monto) para el ticket y el historial
+      for (const c of cobrosExtra) {
+        await client.query(
+          `INSERT INTO venta_cobros_extra (venta_id, concepto, monto, monto_base)
+           VALUES ($1, $2, $3, $4)`,
+          [venta.id, c.concepto, c.monto, aBase(c.monto, tasaUsdVenta)]
+        );
+      }
 
       // Cada línea de pago queda registrada en su moneda (pago mixto)
       for (const l of lineasPago) {

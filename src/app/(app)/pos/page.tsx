@@ -13,7 +13,7 @@ import { MetodoPagoSelect, ordenarMetodosPorMoneda } from "@/components/ui/metod
 import { Combobox } from "@/components/ui/combobox";
 import { useToast } from "@/components/ui/toast";
 import { fmt, fmtDateTime, fmtNumber } from "@/lib/format";
-import { redondear, tasaUsd, tasaUsdDocumento, tasaMostrada, esConversionDirectaUsd, tasaPar } from "@/lib/money";
+import { redondear, tasaUsd, tasaUsdDocumento, tasaMostrada, tasaPar } from "@/lib/money";
 import { ReceiptPrinter } from "@/components/pos/receipt-printer";
 import { ClienteModal } from "@/components/cliente/cliente-modal";
 
@@ -27,6 +27,8 @@ interface PresentacionPOS {
   nombre: string;
   unidades: number;
   activo: boolean;
+  /** Código de barras propio de la caja (null = no escaneable). */
+  codigo?: string | null;
   precio: number;
   precioUnitario: number;
   costo: number;
@@ -112,6 +114,27 @@ interface LineaPago {
   metodoId: string | null; // null = usa el método de la venta (select del header)
   montoStr: string; // vacío = paga el resto que queda; "0" = no aporta
 }
+
+// Cobro extra del modal de cobro (delivery, bolsa, propina, servicio...). No es
+// un producto: no toca stock ni lleva IVA, se suma crudo al total.
+interface CobroExtra {
+  key: number;
+  concepto: string;
+  /** Lo que ve y edita el usuario, en la moneda actual del documento. */
+  montoStr: string;
+  /**
+   * Ancla del cobro: el monto SIN redondear y la moneda en la que se escribió.
+   * Es la única fuente de verdad y no se toca al cambiar de moneda, para que ir
+   * y volver no acumule centavos: 2000 COP → 666,67 VES → 2000 COP (y no
+   * 2000,01, que saldría de reconvertir un valor ya redondeado). Solo se
+   * recalcula cuando el usuario EDITA el monto a propósito.
+   */
+  montoAncla: number;
+  monedaAncla: string;
+}
+
+/** Conceptos de un clic para los cobros más habituales en caja. */
+const CONCEPTOS_RAPIDOS = ["Delivery", "Envío", "Bolsa", "Propina", "Servicio", "Productos"];
 
 interface PorCobrarItem {
   codigo: string;
@@ -218,6 +241,11 @@ export default function PuntoDeVentaPage() {
   const [descuentoStr, setDescuentoStr] = useState<string>("");
   const [observaciones, setObservaciones] = useState<string>("");
   const [isPagoMixto, setIsPagoMixto] = useState<boolean>(false);
+
+  // Cobros extra de la venta (delivery, bolsa, propina, servicio...). Solo
+  // existen dentro del modal de cobro: se descartan al cerrar la venta.
+  const [cobrosExtra, setCobrosExtra] = useState<CobroExtra[]>([]);
+  const cobroKeyRef = useRef(1);
 
   // Tasa personalizada de la venta (opcional; vacío = tasa por defecto de la moneda)
   const [tasaCustomStr, setTasaCustomStr] = useState<string>("");
@@ -378,42 +406,72 @@ export default function PuntoDeVentaPage() {
     return () => observer.disconnect();
   }, [cargarMas, hasMore, loading]);
 
-  // Búsqueda exacta de un producto (por código o texto) con respaldo en el
-  // servidor, para que el escáner funcione aunque el producto aún no se haya
-  // cargado con el scroll infinito.
-  const buscarProducto = async (q: string): Promise<Producto | null> => {
+  /**
+   * Resuelve lo escaneado o tecleado a un producto Y, si el código era el de
+   * una CAJA, a esa caja concreta. Delega en `/api/productos/por-codigo`, que
+   * es el único lugar donde se decide producto-vs-caja (misma regla en POS,
+   * kardex, productos y compras).
+   *
+   * Antes de pegarle al servidor se mira el catálogo ya cargado: el escaneo es
+   * la operación más repetida de la caja y así no depende de la red cuando el
+   * producto ya está en pantalla.
+   */
+  const buscarPorCodigo = async (
+    q: string
+  ): Promise<{ producto: Producto; presentacion: PresentacionPOS | null } | null> => {
     const lower = q.trim().toLowerCase();
     if (!lower) return null;
 
+    // 1) Código de una caja ya cargada.
+    for (const p of productos) {
+      const pres = (p.presentaciones ?? []).find(
+        (pr) => pr.activo && (pr.codigo ?? "").trim().toLowerCase() === lower
+      );
+      if (pres) return { producto: p, presentacion: pres };
+    }
+    // 2) Código de un producto ya cargado.
     const local = productos.find((p) => p.codigo.trim().toLowerCase() === lower);
-    if (local) return local;
+    if (local) return { producto: local, presentacion: null };
 
+    // 3) Resolver en el servidor (producto o caja, exacto o unívoco).
     try {
-      const res = await fetch(`/api/productos?page=1&limit=20&search=${encodeURIComponent(q.trim())}`);
+      const res = await fetch(`/api/productos/por-codigo?codigo=${encodeURIComponent(q.trim())}`);
       if (!res.ok) return null;
       const data = await res.json();
-      const lista: Producto[] = data.productos || [];
-      return (
-        lista.find((p) => p.codigo.trim().toLowerCase() === lower) ??
-        (lista.length === 1 ? lista[0] : null)
-      );
+      if (!data?.found || !data.producto) return null;
+      return {
+        producto: data.producto as Producto,
+        presentacion: (data.presentacion as PresentacionPOS | null) ?? null,
+      };
     } catch {
       return null;
     }
   };
 
   const agregarPorTexto = async (q: string, limpiar = false) => {
-    const match = await buscarProducto(q);
+    const match = await buscarPorCodigo(q);
     if (!match) {
       toast(`Producto no encontrado: ${q}`, "error");
       return;
     }
-    if (match.stock <= 0) {
-      toast(`Sin existencias: ${match.nombre}`, "warning");
+    const { producto, presentacion } = match;
+    if (presentacion && presentacion.activo === false) {
+      toast(`La caja "${presentacion.nombre}" de ${producto.nombre} está dada de baja`, "warning");
       return;
     }
-    addToCart(match);
-    toast(`Producto agregado: ${match.nombre}`, "success");
+    if (producto.stock <= 0) {
+      toast(`Sin existencias: ${producto.nombre}`, "warning");
+      return;
+    }
+    // Con caja la línea entra por presentación (1 caja = `unidades` unidades);
+    // sin ella entra por unidad, como siempre.
+    addToCart(producto, presentacion ?? null);
+    toast(
+      presentacion
+        ? `${producto.nombre} (${presentacion.nombre} ×${presentacion.unidades}) agregado`
+        : `Producto agregado: ${producto.nombre}`,
+      "success"
+    );
     if (limpiar) setSearch("");
   };
 
@@ -465,6 +523,9 @@ export default function PuntoDeVentaPage() {
       setMetodoPagoSeleccionado(metodo.id);
       setCajaSeleccionada(metodo.caja_id);
       if (metodo.moneda_codigo) {
+        // El método arrastra la moneda del documento: los cobros extra se
+        // rebasean para mostrar el importe ya convertido en la nueva moneda.
+        rebasarCobrosExtra(metodo.moneda_codigo);
         setMonedaSeleccionada(metodo.moneda_codigo);
       }
       // Al cambiar de moneda vuelve la tasa por defecto
@@ -573,6 +634,99 @@ export default function PuntoDeVentaPage() {
   /** Subtotal de la línea ya descontado: lo que realmente se cobra. */
   const totalLineaNeto = (item: CartItem): number => totalLinea(item) - descuentoDeLinea(item);
 
+  // ═══════════ Cobros extra (delivery, bolsa, propina, servicio...) ═══════════
+  // Un cobro es un importe con concepto, NO un producto: no toca stock y no
+  // lleva IVA, así que entra crudo en el total.
+
+  /** Agrega un cobro extra, opcionalmente con un concepto precargado. */
+  const agregarCobroExtra = (concepto = "") => {
+    const key = cobroKeyRef.current++;
+    setCobrosExtra((prev) => [
+      ...prev,
+      { key, concepto, montoStr: "", montoAncla: 0, monedaAncla: monedaSeleccionada },
+    ]);
+  };
+
+  const actualizarCobroExtra = (key: number, cambios: Partial<CobroExtra>) => {
+    setCobrosExtra((prev) => prev.map((c) => (c.key === key ? { ...c, ...cambios } : c)));
+  };
+
+  /**
+   * El usuario escribió un monto: ese importe pasa a ser la nueva ancla del
+   * cobro, en la moneda del documento. A partir de aquí, cambiar de moneda ya
+   * no vuelve a tocarlo salvo que se edite otra vez.
+   */
+  const editarMontoCobroExtra = (key: number, montoStr: string) => {
+    const num = parseFloat(montoStr.trim().replace(",", "."));
+    const montoAncla = Number.isFinite(num) && num > 0 ? num : 0;
+    setCobrosExtra((prev) =>
+      prev.map((c) =>
+        c.key === key ? { ...c, montoStr, montoAncla, monedaAncla: monedaSeleccionada } : c
+      )
+    );
+  };
+
+  const eliminarCobroExtra = (key: number) => {
+    setCobrosExtra((prev) => prev.filter((c) => c.key !== key));
+  };
+
+  /**
+   * Monto de un cobro extra expresado en una moneda concreta.
+   *
+   * Replica la misma regla que `getPrecioEnMoneda`: si la moneda pedida es
+   * aquella del ancla, se devuelve tal cual (sin conversiones ni redondeos
+   * extra); si no, se convierte con la tasa vigente. Se convierte SIEMPRE desde
+   * el ancla sin redondear, nunca desde el valor ya mostrado, para que cambiar
+   * de moneda y volver sea una operación idempotente.
+   *
+   * `tasaCustom` permite forzar la tasa por defecto (0 = ignorarla), necesario
+   * al rebasear porque la tasa personalizada se resetea al cambiar de método de
+   * pago en el mismo gesto.
+   */
+  const montoCobroEnMoneda = (c: CobroExtra, codMoneda: string, tasaCustom = parseFloat(tasaCustomStr)): number => {
+    const destino = codMoneda || c.monedaAncla;
+    if (!c.montoAncla || c.montoAncla <= 0) return 0;
+    if (!destino || destino === c.monedaAncla) return redondear(c.montoAncla, decMoneda(destino));
+
+    const desde = monedas.find((m) => m.codigo === c.monedaAncla);
+    const hasta = monedas.find((m) => m.codigo === destino);
+    // Sin alguna de las dos monedas no hay conversión posible: se usa el número.
+    if (!desde || !hasta) return redondear(c.montoAncla, decMoneda(destino));
+
+    const tasaCustomNum = Number.isFinite(tasaCustom) && tasaCustom > 0 ? tasaCustom : null;
+    const tasaHasta = tasaUsdDocumento(hasta, tasaCustomNum, monedas);
+    const factor = tasaPar(desde, hasta, monedas, { [String(hasta.id)]: tasaHasta });
+    return redondear(c.montoAncla * factor, decMoneda(destino));
+  };
+
+  /** Suma de todos los cobros extra en la moneda pedida (la del documento por defecto). */
+  const totalCobrosExtra = (codMoneda: string = monedaSeleccionada): number => {
+    if (cobrosExtra.length === 0) return 0;
+    const dec = decMoneda(codMoneda);
+    return redondear(
+      cobrosExtra.reduce((s, c) => s + montoCobroEnMoneda(c, codMoneda), 0),
+      dec
+    );
+  };
+
+  /**
+   * Actualiza el importe MOSTRADO de cada cobro al cambiar la moneda del
+   * documento. El ancla (`montoAncla`/`monedaAncla`) queda intacta: solo cambia
+   * el redondeo de lo que se ve, que es un problema de presentación, no de
+   * valor. Por eso volver a la moneda de partida devuelve el número exacto.
+   */
+  const rebasarCobrosExtra = (codDestino: string) => {
+    if (!codDestino) return;
+    setCobrosExtra((prev) => {
+      if (prev.length === 0) return prev;
+      return prev.map((c) =>
+        // Tasa 0 = la de por defecto de la moneda destino: la personalizada se
+        // resetea junto con el cambio de método, así que no debe aplicar aquí.
+        c.montoAncla > 0 ? { ...c, montoStr: String(montoCobroEnMoneda(c, codDestino, 0)) } : c
+      );
+    });
+  };
+
   // Tasa efectiva de la venta en "unidades de la moneda por su referencia"
   const tasaEfectiva = useMemo(() => {
     const targetMoneda = monedas.find((m) => m.codigo === monedaSeleccionada);
@@ -580,18 +734,6 @@ export default function PuntoDeVentaPage() {
     const tasaCustomNum = parseFloat(tasaCustomStr);
     return Number.isFinite(tasaCustomNum) && tasaCustomNum > 0 ? tasaCustomNum : tasaMostrada(targetMoneda);
   }, [monedas, monedaSeleccionada, tasaCustomStr]);
-
-  // Tasa por defecto de la moneda seleccionada (placeholder del campo)
-  const tasaPorDefecto = useMemo(() => {
-    const targetMoneda = monedas.find((m) => m.codigo === monedaSeleccionada);
-    return targetMoneda ? String(tasaMostrada(targetMoneda)) : "";
-  }, [monedas, monedaSeleccionada]);
-
-  // ¿La moneda de la venta usa conversión directa a USD? Cambia la etiqueta del campo.
-  const monedaVentaDirecta = useMemo(() => {
-    const targetMoneda = monedas.find((m) => m.codigo === monedaSeleccionada);
-    return esConversionDirectaUsd(targetMoneda);
-  }, [monedas, monedaSeleccionada]);
 
   /**
    * Clave de línea del carrito. Incluye la PRESENTACIÓN porque una unidad y una
@@ -744,7 +886,9 @@ export default function PuntoDeVentaPage() {
   );
   const descuentoTotal = descuento + descuentoLineas;
 
-  const total = Math.max(0, subtotal - descuentoTotal + tax);
+  // Los cobros extra no son productos: no entran en `subtotal` ni en el IVA, se
+  // suman crudo después de todo. El backend usa exactamente esta misma fórmula.
+  const total = Math.max(0, subtotal - descuentoTotal + tax + totalCobrosExtra());
 
   // Total del carrito expresado en una moneda cualquiera, usando la MISMA regla
   // de precios que el POS (precio exacto guardado cuando existe). Así, el total
@@ -764,7 +908,9 @@ export default function PuntoDeVentaPage() {
     // la misma razón que el subtotal en vez de convertirlo con otra tasa.
     const escala = subtotal > 0 ? sub / subtotal : 0;
     const descuentoMoneda = redondear(descuentoTotal * escala, decMoneda(codMoneda));
-    return Math.max(0, sub - descuentoMoneda + taxMoneda);
+    // Los cobros extra sí se convierten uno a uno con su propia tasa (cada uno
+    // lleva la moneda en la que se escribió), sin necesitar el factor `escala`.
+    return Math.max(0, sub - descuentoMoneda + taxMoneda + totalCobrosExtra(codMoneda));
   };
 
   const setPagarCompleto = () => {
@@ -1087,6 +1233,15 @@ export default function PuntoDeVentaPage() {
           }));
       }
 
+      // Cobros extra ya convertidos a la moneda de la venta (el backend los suma
+      // crudo al total, sin IVA). Los de monto 0 o vacío se descartan.
+      const cobrosParaEnviar = cobrosExtra
+        .map((c) => ({
+          concepto: c.concepto.trim() || "Cobro extra",
+          monto: redondear(montoCobroEnMoneda(c, monedaSeleccionada), decMoneda(monedaSeleccionada)),
+        }))
+        .filter((c) => c.monto > 0);
+
       const res = await fetch("/api/ventas", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -1097,6 +1252,7 @@ export default function PuntoDeVentaPage() {
           metodo_pago_id: metodoIdFinal,
           caja_id: montoPagadoFinal > 0 ? cajaDelMetodo : null,
           descuento,
+          cobros_extra: cobrosParaEnviar,
           pagos: pagosToSend,
           tasa: Number.isFinite(tasaCustomNum) && tasaCustomNum > 0 ? tasaCustomNum : null,
           observaciones: observaciones.trim() || null,
@@ -1121,6 +1277,7 @@ export default function PuntoDeVentaPage() {
           subtotal,
           impuesto: tax,
           descuento: descuentoTotal,
+          cobrosExtra: cobrosParaEnviar,
           total,
           montoPagado: montoPagadoFinal,
           deuda: deudaFinal,
@@ -1143,6 +1300,7 @@ export default function PuntoDeVentaPage() {
         setLineasPago([nuevaLineaPago()]);
         setDescuento(0);
         setDescuentoStr("");
+        setCobrosExtra([]);
         setObservaciones("");
         setIsPagoMixto(false);
         setTasaCustomStr("");
@@ -1522,6 +1680,7 @@ export default function PuntoDeVentaPage() {
                                 {presOpts.map((pr) => (
                                   <option key={pr.id} value={pr.id}>
                                     {pr.nombre} · {Math.floor(p.stock / pr.unidades)} disp.
+                                    {pr.codigo ? ` · ${pr.codigo}` : ""}
                                   </option>
                                 ))}
                               </select>
@@ -1840,24 +1999,85 @@ export default function PuntoDeVentaPage() {
                   />
                 </div>
 
-                {/* Tasa de Cambio Personalizada */}
-                {monedaSeleccionada && (
-                  <div>
-                    <Label className="text-xs font-bold text-foreground">
-                      Tasa {monedaSeleccionada}
-                      {monedaVentaDirecta ? " por 1 USD" : ""} (opcional)
-                    </Label>
-                    <Input
-                      className="mt-1 h-10 text-right font-mono text-sm font-semibold"
-                      type="number"
-                      step="any"
-                      min="0"
-                      value={tasaCustomStr}
-                      placeholder={tasaPorDefecto}
-                      onChange={(e) => setTasaCustomStr(e.target.value)}
-                    />
+                {/* COBROS EXTRA (delivery, bolsa, propina, servicio...) */}
+                {/* Va en esta columna del medio, pegada al resumen de productos de
+                    la derecha: al agregar uno se ve junto a lo que se está cobrando.
+                    No son productos: no mueven stock ni llevan IVA, se suman crudo. */}
+                <div className="rounded-2xl border border-border/80 bg-card p-3 space-y-3 shadow-xs">
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-extrabold uppercase tracking-wider text-muted-foreground">
+                      Cobros Extra
+                    </span>
+                    {cobrosExtra.length > 0 && (
+                      <span className="text-xs font-semibold text-muted-foreground">
+                        Total:{" "}
+                        <span className="font-mono font-black text-foreground">
+                          {fmt(totalCobrosExtra(), monedaSeleccionada)}
+                        </span>
+                      </span>
+                    )}
                   </div>
-                )}
+
+                  {/* Conceptos de un clic */}
+                  <div className="flex flex-wrap gap-1.5">
+                    {CONCEPTOS_RAPIDOS.map((concepto) => (
+                      <button
+                        key={`cobro-rapido-${concepto}`}
+                        type="button"
+                        onClick={() => agregarCobroExtra(concepto)}
+                        className="px-2.5 py-1 rounded-full border border-border/80 bg-muted/40 hover:bg-primary/10 hover:border-primary/50 hover:text-primary text-[11px] font-bold text-muted-foreground transition-colors cursor-pointer"
+                      >
+                        + {concepto}
+                      </button>
+                    ))}
+                  </div>
+
+                  {cobrosExtra.length === 0 ? (
+                    <p className="text-[11px] text-muted-foreground italic text-center">
+                      Sin cobros extra. El total es solo el de los productos.
+                    </p>
+                  ) : (
+                    <div className="space-y-2 max-h-[190px] overflow-y-auto pr-1">
+                      {cobrosExtra.map((c) => (
+                        <div key={`cobro-extra-${c.key}`} className="flex items-center gap-2">
+                          <Input
+                            className="h-10 flex-1 min-w-0 text-base font-semibold"
+                            placeholder="Concepto"
+                            value={c.concepto}
+                            onChange={(e) => actualizarCobroExtra(c.key, { concepto: e.target.value })}
+                          />
+                          <Input
+                            className="h-10 flex-1 min-w-0 text-right font-mono text-base font-black"
+                            type="number"
+                            step="any"
+                            min="0"
+                            placeholder="0.00"
+                            value={c.montoStr}
+                            onChange={(e) => editarMontoCobroExtra(c.key, e.target.value)}
+                          />
+                          <button
+                            type="button"
+                            onClick={() => eliminarCobroExtra(c.key)}
+                            aria-label={`Quitar cobro ${c.concepto || "extra"}`}
+                            className="h-10 w-10 shrink-0 rounded-lg border border-border/80 bg-muted/30 hover:bg-destructive/10 hover:text-destructive flex items-center justify-center transition-colors cursor-pointer"
+                          >
+                            <X className="h-4 w-4" />
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+
+                  <Button
+                    variant="outline"
+                    type="button"
+                    onClick={() => agregarCobroExtra()}
+                    className="w-full h-8 text-xs font-bold"
+                  >
+                    <Plus className="h-3.5 w-3.5 mr-1.5" />
+                    Agregar cobro
+                  </Button>
+                </div>
               </div>
 
               {/* BOTONES PRINCIPALES DE ACCIÓN DIRECTA EN 2 COLUMNAS LADO A LADO */}
@@ -2159,6 +2379,18 @@ export default function PuntoDeVentaPage() {
                       }}
                     />
                   </div>
+
+                  {totalCobrosExtra() > 0 && (
+                    <div className="flex justify-between text-muted-foreground">
+                      <span className="font-medium">
+                        Cobros extra
+                        {cobrosExtra.length > 1 && ` (${cobrosExtra.length})`}
+                      </span>
+                      <span className="font-mono font-bold text-foreground">
+                        +{fmt(totalCobrosExtra(), monedaSeleccionada)}
+                      </span>
+                    </div>
+                  )}
 
                   {/* Total Original de la Venta */}
                   <div className="flex justify-between items-center pt-2 border-t border-border/40 text-muted-foreground">
@@ -2482,6 +2714,16 @@ export default function PuntoDeVentaPage() {
               La venta {lastSaleData?.ventaNumero} ha sido registrada en el sistema.
             </p>
             <div className="w-full border rounded-lg p-4 bg-muted/30 text-left text-sm space-y-2">
+              {/* Cobros extra (delivery, bolsa, propina...) que se cobran aparte */}
+              {(lastSaleData?.cobrosExtra ?? []).map((c: any, i: number) => (
+                <div key={`cobro-ok-${i}`} className="flex justify-between">
+                  <span className="text-muted-foreground">{c.concepto}:</span>
+                  <span className="font-mono font-semibold">
+                    {lastSaleData?.monedaSimbolo}
+                    {fmt(c.monto, lastSaleData?.monedaCodigo)}
+                  </span>
+                </div>
+              ))}
               <div className="flex justify-between">
                 <span className="text-muted-foreground">Total:</span>
                 <span className="font-bold text-base">{lastSaleData?.monedaSimbolo}{fmt(lastSaleData?.total ?? 0, lastSaleData?.monedaCodigo)}</span>
@@ -2536,6 +2778,7 @@ export default function PuntoDeVentaPage() {
           subtotal={lastSaleData.subtotal}
           impuesto={lastSaleData.impuesto}
           descuento={lastSaleData.descuento}
+          cobrosExtra={lastSaleData.cobrosExtra ?? []}
           total={lastSaleData.total}
           deuda={lastSaleData.deuda}
           pagos={lastSaleData.pagos}

@@ -143,38 +143,22 @@ export function costoEstaticoEnBase(
 // 3. REGLAS DE REDONDEO GLOBAL + PRECIO DE VENTA
 // ============================================================================
 
-/** Precio de venta bruto = CPP × (1 + margen/100). El margen nunca es negativo. */
+/**
+ * Precio de venta bruto = CPP × (1 + margen/100). El margen nunca es negativo.
+ */
 export function precioVentaDesdeCosto(costoUnitarioVenta: number, margen: number): number {
   const m = Number.isFinite(margen) && margen > 0 ? margen : 0;
   return costoUnitarioVenta * (1 + m / 100);
 }
 
 /**
- * Aplica la regla global de redondeo al precio.
- * `costoUnitarioVenta` se usa como suelo cuando `redondeo_no_bajar_de_costo`.
+ * La regla global de redondeo vive en `@/lib/redondeo` (módulo puro) para que el
+ * modal de producto pueda previsualizar el mismo redondeo que aplica el
+ * servidor, sin arrastrar la capa de BD al bundle del navegador. Se re-exporta
+ * aquí para no romper a quien ya la importaba desde `costing`.
  */
-export function aplicarReglasRedondeo(
-  precio: number,
-  cfg: Pick<ConfiguracionGlobal, "redondeo_activo" | "redondeo_multiplo" | "redondeo_no_bajar_de_costo">,
-  costoUnitarioVenta: number
-): { precio: number; redondeado: boolean } {
-  let p = Number(precio);
-  let redondeado = false;
-
-  if (cfg.redondeo_activo && Number(cfg.redondeo_multiplo) > 0) {
-    const m = Number(cfg.redondeo_multiplo);
-    const r = Math.round(p / m) * m;
-    redondeado = Math.abs(r - p) > 1e-9;
-    p = r;
-  }
-  p = redondear(p, 2);
-
-  if (cfg.redondeo_no_bajar_de_costo && Number(costoUnitarioVenta) > 0 && p < costoUnitarioVenta) {
-    p = redondear(costoUnitarioVenta, 2);
-    redondeado = true; // el redondeo pretendía bajar del costo; lo fijamos en costo
-  }
-  return { precio: p, redondeado };
-}
+import { aplicarReglasRedondeo } from "@/lib/redondeo";
+export { aplicarReglasRedondeo };
 
 // ============================================================================
 // 4. PROCESAMIENTO DE UNA LÍNEA DE COMPRA (EFECTO CASCADA)

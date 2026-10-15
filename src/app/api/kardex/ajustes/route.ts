@@ -29,19 +29,48 @@ export async function POST(request: Request) {
         if (pRes.rows.length === 0) throw new Error(`Producto con ID ${item.producto_id} no encontrado`);
         const producto = pRes.rows[0];
 
+        // ── Caja (presentación) ──
+        // El cliente puede pedir "2 cajas"; la caja solo es un FACTOR de
+        // conversión. El factor se resuelve AQUÍ, contra la BD, y nunca se
+        // confía en el que manda el navegador: se valida que la caja exista,
+        // que siga activa y que sea del producto de esta línea. El movimiento
+        // se sigue guardando en UNIDADES, que es la unidad base del inventario.
+        let factor = 1;
+        let etiquetaCaja: string | null = null;
+        if (item.presentacion_id) {
+          const presRes = await client.query(
+            `SELECT id, nombre, unidades, activo
+               FROM producto_presentaciones
+              WHERE id = $1 AND producto_id = $2`,
+            [item.presentacion_id, item.producto_id]
+          );
+          if (presRes.rows.length === 0) {
+            throw new Error(`La caja indicada no corresponde a ${producto.nombre}`);
+          }
+          const pres = presRes.rows[0];
+          if (pres.activo === false) {
+            throw new Error(`La caja "${pres.nombre}" de ${producto.nombre} está dada de baja`);
+          }
+          factor = Math.max(1, parseInt(String(pres.unidades), 10) || 1);
+          etiquetaCaja = pres.nombre;
+        }
+
+        // Cantidad real en unidades (lo que entra al stock y al kardex).
+        const qtyUnidades = Math.round(qty * factor);
+
         const saldoAnterior = parseFloat(producto.stock);
         let nuevoStock = saldoAnterior;
         let cantKardex = 0;
 
         if (item.tipo === "Salida") {
-          if (saldoAnterior < qty) {
+          if (saldoAnterior < qtyUnidades) {
             throw new Error(`Existencias insuficientes para el producto ${producto.nombre} (Existencias actuales: ${saldoAnterior})`);
           }
-          nuevoStock = saldoAnterior - qty;
-          cantKardex = -qty;
+          nuevoStock = saldoAnterior - qtyUnidades;
+          cantKardex = -qtyUnidades;
         } else if (item.tipo === "Entrada") {
-          nuevoStock = saldoAnterior + qty;
-          cantKardex = qty;
+          nuevoStock = saldoAnterior + qtyUnidades;
+          cantKardex = qtyUnidades;
         } else {
           throw new Error("Tipo de ajuste inválido");
         }
@@ -71,7 +100,13 @@ export async function POST(request: Request) {
           [
             producto.id,
             "Ajuste",
-            item.motivo || 'Ajuste manual',
+            // La caja queda anotada en el motivo para que el histórico diga
+            // "2 Cajas ×24" y no un 48 anónimo. `cantidad` sigue en unidades.
+            item.motivo
+              ? `${item.motivo}${etiquetaCaja ? ` (${qty} × ${etiquetaCaja} ×${factor})` : ""}`
+              : etiquetaCaja
+                ? `Ajuste manual (${qty} × ${etiquetaCaja} ×${factor})`
+                : "Ajuste manual",
             cantKardex,
             producto.costo_base,
             costoUnitBase,
