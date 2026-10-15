@@ -24,23 +24,45 @@ CREATE INDEX IF NOT EXISTS idx_compras_estado_pago ON compras(estado_pago);
 CREATE INDEX IF NOT EXISTS idx_compras_proveedor_estado ON compras(proveedor_id, estado_pago);
 
 -- 3. Tabla de abonos (pagos parciales/posteriores)
-CREATE TABLE IF NOT EXISTS compra_abonos (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  compra_id UUID NOT NULL REFERENCES compras(id) ON DELETE RESTRICT,
-  fecha DATE NOT NULL DEFAULT CURRENT_DATE,
-  -- Monto en la moneda EN QUE SE PAGA (puede ser distinta a la de la compra)
-  monto NUMERIC(18, 6) NOT NULL,
-  moneda_id UUID NOT NULL REFERENCES monedas(id),
-  -- Tasa de cambio al momento del abono: unidades de moneda_abono por 1 USD
-  tasa_cambio NUMERIC(18, 6) NOT NULL,
-  -- Monto en moneda BASE (USD) para consolidar deuda
-  monto_base NUMERIC(18, 6) NOT NULL,
-  metodo_pago_id UUID REFERENCES metodos_pago(id),
-  caja_id UUID REFERENCES cajas(id),
-  observaciones TEXT,
-  creado_en TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  actualizado_en TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'compra_abonos') THEN
+    IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'compras' AND column_name = 'id' AND udt_name = 'uuid') THEN
+      CREATE TABLE compra_abonos (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        compra_id UUID NOT NULL REFERENCES compras(id) ON DELETE RESTRICT,
+        fecha DATE NOT NULL DEFAULT CURRENT_DATE,
+        -- Monto en la moneda EN QUE SE PAGA (puede ser distinta a la de la compra)
+        monto NUMERIC(18, 6) NOT NULL,
+        moneda_id UUID NOT NULL REFERENCES monedas(id),
+        -- Tasa de cambio al momento del abono: unidades de moneda_abono por 1 USD
+        tasa_cambio NUMERIC(18, 6) NOT NULL,
+        -- Monto en moneda BASE (USD) para consolidar deuda
+        monto_base NUMERIC(18, 6) NOT NULL,
+        metodo_pago_id UUID REFERENCES metodos_pago(id),
+        caja_id UUID REFERENCES cajas(id),
+        observaciones TEXT,
+        creado_en TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        actualizado_en TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+    ELSE
+      CREATE TABLE compra_abonos (
+        id SERIAL PRIMARY KEY,
+        compra_id INTEGER NOT NULL REFERENCES compras(id) ON DELETE RESTRICT,
+        fecha DATE NOT NULL DEFAULT CURRENT_DATE,
+        monto NUMERIC(18, 6) NOT NULL,
+        moneda_id INTEGER NOT NULL REFERENCES monedas(id),
+        tasa_cambio NUMERIC(18, 6) NOT NULL,
+        monto_base NUMERIC(18, 6) NOT NULL,
+        metodo_pago_id INTEGER REFERENCES metodos_pago(id),
+        caja_id INTEGER REFERENCES cajas(id),
+        observaciones TEXT,
+        creado_en TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        actualizado_en TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+    END IF;
+  END IF;
+END $$;
 
 CREATE INDEX IF NOT EXISTS idx_compra_abonos_compra ON compra_abonos(compra_id);
 CREATE INDEX IF NOT EXISTS idx_compra_abonos_fecha ON compra_abonos(fecha);

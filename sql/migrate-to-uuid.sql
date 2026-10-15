@@ -15,7 +15,7 @@ DECLARE
         'clientes','compra_items','compras','configuracion','creditos',
         'kardex','marcas','metodos_pago','monedas','producto_precios',
         'proveedores','retorno_items','retornos','transacciones',
-        'venta_items','venta_pagos','ventas','venta_cobros_extra'
+        'venta_items','venta_pagos','ventas','venta_cobros_extra','compra_abonos'
     ];
     tbls text[] := ARRAY[]::text[];
     fk_rec record;

@@ -87,11 +87,16 @@ export async function GET(request: Request) {
     const ventasConPagos = ventas.map((v) => ({ ...v, pagos: pagosPorVenta.get(v.id) || [] }));
 
     // Cobros extra por venta (delivery, bolsa, propina, servicio...)
-    const cobros = await query(`
-      SELECT * FROM venta_cobros_extra
-      ${whereCobros}
-      ORDER BY venta_id, id
-    `, params);
+    let cobros: any[] = [];
+    try {
+      cobros = await query(`
+        SELECT * FROM venta_cobros_extra
+        ${whereCobros}
+        ORDER BY venta_id, id
+      `, params);
+    } catch (e: any) {
+      console.warn("Aviso al consultar venta_cobros_extra (se omiten cobros extra):", e?.message || e);
+    }
     const cobrosPorVenta = new Map<number, typeof cobros>();
     for (const c of cobros) {
       const lista = cobrosPorVenta.get(c.venta_id) || [];

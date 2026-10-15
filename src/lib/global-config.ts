@@ -71,27 +71,32 @@ type Queryable = {
 };
 
 export async function getConfiguracionGlobal(client?: Queryable): Promise<ConfiguracionGlobal> {
-  // Import diferido: el resto de este módulo es puro (sin DB) para poder
-  // testearlo con Node sin levantar la pila de la app.
-  const { query } = await import("@/lib/db");
-  const q = client ?? ({ query } as Queryable);
-  const res = await q.query(`SELECT * FROM configuracion_global WHERE id = 1`);
-  const fila =
-    Array.isArray(res) ? res[0]
-    : Array.isArray((res as any)?.rows) ? (res as any).rows[0]
-    : undefined;
-  const cfg = parsearConfiguracionGlobal(fila);
+  try {
+    // Import diferido: el resto de este módulo es puro (sin DB) para poder
+    // testearlo con Node sin levantar la pila de la app.
+    const { query } = await import("@/lib/db");
+    const q = client ?? ({ query } as Queryable);
+    const res = await q.query(`SELECT * FROM configuracion_global WHERE id = 1`);
+    const fila =
+      Array.isArray(res) ? res[0]
+      : Array.isArray((res as any)?.rows) ? (res as any).rows[0]
+      : undefined;
+    const cfg = parsearConfiguracionGlobal(fila);
 
-  // El método de costeo vive en la tabla clave-valor `configuracion`
-  // (Configuración → Inventario). Se lee aquí para que todo el motor comparta
-  // la misma regla (solo 'Promedio' aplica el CPP al comprar).
-  const resMetodo = await q.query(`SELECT valor FROM configuracion WHERE clave = 'inventario_metodo_costeo'`);
-  const filaMetodo =
-    Array.isArray(resMetodo) ? resMetodo[0]
-    : Array.isArray((resMetodo as any)?.rows) ? (resMetodo as any).rows[0]
-    : undefined;
-  cfg.metodo_costeo = String(filaMetodo?.valor ?? "Promedio");
-  return cfg;
+    // El método de costeo vive en la tabla clave-valor `configuracion`
+    // (Configuración → Inventario). Se lee aquí para que todo el motor comparta
+    // la misma regla (solo 'Promedio' aplica el CPP al comprar).
+    const resMetodo = await q.query(`SELECT valor FROM configuracion WHERE clave = 'inventario_metodo_costeo'`).catch(() => []);
+    const filaMetodo =
+      Array.isArray(resMetodo) ? resMetodo[0]
+      : Array.isArray((resMetodo as any)?.rows) ? (resMetodo as any).rows[0]
+      : undefined;
+    cfg.metodo_costeo = String(filaMetodo?.valor ?? "Promedio");
+    return cfg;
+  } catch (err: any) {
+    console.warn("Aviso: configuracion_global no disponible, usando defaults:", err?.message || err);
+    return { ...DEFAULTS };
+  }
 }
 
 /**

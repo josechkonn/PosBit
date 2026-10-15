@@ -83,7 +83,22 @@ ALTER TABLE monedas ADD COLUMN IF NOT EXISTS decimales INT NOT NULL DEFAULT 2;
 
 -- Migración: la tasa pasa a referirse a otra moneda (NULL = USD, la base).
 -- Ej.: COP tasa 3.2 referida a BS → 1 COP = 3.2/892.2342 USD (ver src/lib/money.ts)
-ALTER TABLE monedas ADD COLUMN IF NOT EXISTS tasa_ref_moneda_id INTEGER REFERENCES monedas(id) ON DELETE SET NULL;
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = 'public' AND table_name = 'monedas' AND column_name = 'tasa_ref_moneda_id'
+    ) THEN
+        IF EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_schema = 'public' AND table_name = 'monedas' AND column_name = 'id' AND udt_name = 'uuid'
+        ) THEN
+            ALTER TABLE monedas ADD COLUMN tasa_ref_moneda_id UUID REFERENCES monedas(id) ON DELETE SET NULL;
+        ELSE
+            ALTER TABLE monedas ADD COLUMN tasa_ref_moneda_id INTEGER REFERENCES monedas(id) ON DELETE SET NULL;
+        END IF;
+    END IF;
+END $$;
 
 -- Migración: conversión directa a USD independiente de la referencia.
 -- Con `usa_tasa_usd_directa = true`, `tasa_usd_directa` son las unidades de la
@@ -488,7 +503,22 @@ CREATE TABLE IF NOT EXISTS ventas (
 ALTER TABLE ventas ADD COLUMN IF NOT EXISTS tasa DECIMAL(18, 6);
 
 -- Migración: integrar clientes en las ventas (BD existentes)
-ALTER TABLE ventas ADD COLUMN IF NOT EXISTS cliente_id INTEGER REFERENCES clientes(id) ON DELETE SET NULL;
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = 'public' AND table_name = 'ventas' AND column_name = 'cliente_id'
+    ) THEN
+        IF EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_schema = 'public' AND table_name = 'clientes' AND column_name = 'id' AND udt_name = 'uuid'
+        ) THEN
+            ALTER TABLE ventas ADD COLUMN cliente_id UUID REFERENCES clientes(id) ON DELETE SET NULL;
+        ELSE
+            ALTER TABLE ventas ADD COLUMN cliente_id INTEGER REFERENCES clientes(id) ON DELETE SET NULL;
+        END IF;
+    END IF;
+END $$;
 ALTER TABLE ventas ADD COLUMN IF NOT EXISTS tipo_pago VARCHAR(20) NOT NULL DEFAULT 'Contado';
 ALTER TABLE ventas ADD COLUMN IF NOT EXISTS descuento DECIMAL(18, 2) NOT NULL DEFAULT 0.00;
 ALTER TABLE ventas ADD COLUMN IF NOT EXISTS descuento_base DECIMAL(18, 2) NOT NULL DEFAULT 0.00;
@@ -548,14 +578,37 @@ CREATE INDEX IF NOT EXISTS idx_venta_items_presentacion ON venta_items(presentac
 -- IVA y se suman crudo al total. `monto` va en la moneda de la venta (el POS ya
 -- lo convierte) y `monto_base` en USD con la tasa efectiva del documento.
 -- ============================================================================
-CREATE TABLE IF NOT EXISTS venta_cobros_extra (
-    id SERIAL PRIMARY KEY,
-    venta_id INTEGER NOT NULL REFERENCES ventas(id) ON DELETE CASCADE,
-    concepto VARCHAR(150) NOT NULL,
-    monto DECIMAL(18, 2) NOT NULL DEFAULT 0.00,
-    monto_base DECIMAL(18, 2) NOT NULL DEFAULT 0.00,
-    creado_en TIMESTAMP NOT NULL DEFAULT NOW()
-);
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.tables
+        WHERE table_schema = 'public' AND table_name = 'venta_cobros_extra'
+    ) THEN
+        IF EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_schema = 'public' AND table_name = 'ventas'
+              AND column_name = 'id' AND udt_name = 'uuid'
+        ) THEN
+            CREATE TABLE venta_cobros_extra (
+                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                venta_id UUID NOT NULL REFERENCES ventas(id) ON DELETE CASCADE,
+                concepto VARCHAR(150) NOT NULL,
+                monto DECIMAL(18, 2) NOT NULL DEFAULT 0.00,
+                monto_base DECIMAL(18, 2) NOT NULL DEFAULT 0.00,
+                creado_en TIMESTAMP NOT NULL DEFAULT NOW()
+            );
+        ELSE
+            CREATE TABLE venta_cobros_extra (
+                id SERIAL PRIMARY KEY,
+                venta_id INTEGER NOT NULL REFERENCES ventas(id) ON DELETE CASCADE,
+                concepto VARCHAR(150) NOT NULL,
+                monto DECIMAL(18, 2) NOT NULL DEFAULT 0.00,
+                monto_base DECIMAL(18, 2) NOT NULL DEFAULT 0.00,
+                creado_en TIMESTAMP NOT NULL DEFAULT NOW()
+            );
+        END IF;
+    END IF;
+END $$;
 
 CREATE INDEX IF NOT EXISTS idx_venta_cobros_extra_venta ON venta_cobros_extra(venta_id);
 
@@ -931,3 +984,175 @@ ON CONFLICT (nombre, caja_id) DO NOTHING;
 -- (las referencias en ventas/abonos quedan en NULL, no se borra historial)
 DELETE FROM metodos_pago
 WHERE nombre IN ('Transferencia USD', 'Efectivo VES');
+
+-- ============================================================================
+-- 17. CONFIGURACION GLOBAL (reglas del motor de costeo / pricing Set & Forget)
+-- ============================================================================
+CREATE TABLE IF NOT EXISTS configuracion_global (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    metodo_conversion_compras VARCHAR(20) NOT NULL DEFAULT 'directa'
+        CHECK (metodo_conversion_compras IN ('directa', 'triangulacion')),
+    metodo_conversion_ventas VARCHAR(20) NOT NULL DEFAULT 'directa'
+        CHECK (metodo_conversion_ventas IN ('directa', 'triangulacion')),
+    auto_precio_compra BOOLEAN NOT NULL DEFAULT true,
+    redondeo_activo BOOLEAN NOT NULL DEFAULT false,
+    redondeo_multiplo DECIMAL(18, 2) NOT NULL DEFAULT 0.00 CHECK (redondeo_multiplo >= 0),
+    redondeo_no_bajar_de_costo BOOLEAN NOT NULL DEFAULT true,
+    actualizado_en TIMESTAMP NOT NULL DEFAULT NOW()
+);
+
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = 'public' AND table_name = 'monedas'
+          AND column_name = 'id' AND udt_name = 'uuid'
+    ) THEN
+        ALTER TABLE configuracion_global ADD COLUMN IF NOT EXISTS
+            moneda_transito_compras_id uuid REFERENCES monedas(id) ON DELETE SET NULL;
+        ALTER TABLE configuracion_global ADD COLUMN IF NOT EXISTS
+            moneda_transito_ventas_id uuid REFERENCES monedas(id) ON DELETE SET NULL;
+    ELSE
+        ALTER TABLE configuracion_global ADD COLUMN IF NOT EXISTS
+            moneda_transito_compras_id INTEGER REFERENCES monedas(id) ON DELETE SET NULL;
+        ALTER TABLE configuracion_global ADD COLUMN IF NOT EXISTS
+            moneda_transito_ventas_id INTEGER REFERENCES monedas(id) ON DELETE SET NULL;
+    END IF;
+END $$;
+
+INSERT INTO configuracion_global
+    (id, metodo_conversion_compras, metodo_conversion_ventas,
+     auto_precio_compra, redondeo_activo, redondeo_multiplo, redondeo_no_bajar_de_costo)
+VALUES
+    (1, 'directa', 'directa', true, false, 0.00, true)
+ON CONFLICT (id) DO NOTHING;
+
+-- ============================================================================
+-- 18. PRODUCTO PROVEEDORES (relación N:M)
+-- ============================================================================
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.tables
+        WHERE table_schema = 'public' AND table_name = 'producto_proveedores'
+    ) THEN
+        IF EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_schema = 'public' AND table_name = 'proveedores'
+              AND column_name = 'id' AND udt_name = 'uuid'
+        ) THEN
+            CREATE TABLE producto_proveedores (
+                producto_id  INTEGER NOT NULL REFERENCES productos(id) ON DELETE CASCADE,
+                proveedor_id uuid NOT NULL REFERENCES proveedores(id) ON DELETE CASCADE,
+                PRIMARY KEY (producto_id, proveedor_id)
+            );
+        ELSE
+            CREATE TABLE producto_proveedores (
+                producto_id  INTEGER NOT NULL REFERENCES productos(id) ON DELETE CASCADE,
+                proveedor_id INTEGER NOT NULL REFERENCES proveedores(id) ON DELETE CASCADE,
+                PRIMARY KEY (producto_id, proveedor_id)
+            );
+        END IF;
+    END IF;
+END $$;
+
+INSERT INTO producto_proveedores (producto_id, proveedor_id)
+SELECT id, proveedor_id FROM productos WHERE proveedor_id IS NOT NULL
+ON CONFLICT DO NOTHING;
+
+CREATE INDEX IF NOT EXISTS idx_producto_proveedores_proveedor
+    ON producto_proveedores (proveedor_id);
+
+-- ============================================================================
+-- 19. PRODUCTO COSTOS HISTORICOS (autocompletado de costos)
+-- ============================================================================
+CREATE TABLE IF NOT EXISTS producto_costos_historicos (
+    id SERIAL PRIMARY KEY,
+    producto_id INTEGER NOT NULL REFERENCES productos(id) ON DELETE CASCADE,
+    cantidad INTEGER NOT NULL,
+    presentacion_id UUID REFERENCES producto_presentaciones(id) ON DELETE SET NULL,
+    presentacion_nombre VARCHAR(100),
+    presentacion_unidades INTEGER,
+    cantidad_presentaciones INTEGER,
+    costo_presentacion DECIMAL(18, 2),
+    costo_unit DECIMAL(18, 6),
+    costo_unit_base DECIMAL(18, 6),
+    fecha DATE NOT NULL DEFAULT CURRENT_DATE,
+    creado_en TIMESTAMP NOT NULL DEFAULT NOW()
+);
+
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = 'public' AND table_name = 'monedas'
+          AND column_name = 'id' AND udt_name = 'uuid'
+    ) THEN
+        ALTER TABLE producto_costos_historicos ADD COLUMN IF NOT EXISTS
+            moneda_id uuid REFERENCES monedas(id) ON DELETE RESTRICT;
+    ELSE
+        ALTER TABLE producto_costos_historicos ADD COLUMN IF NOT EXISTS
+            moneda_id INTEGER REFERENCES monedas(id) ON DELETE RESTRICT;
+    END IF;
+
+    IF EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = 'public' AND table_name = 'compras'
+          AND column_name = 'id' AND udt_name = 'uuid'
+    ) THEN
+        ALTER TABLE producto_costos_historicos ADD COLUMN IF NOT EXISTS
+            compra_id uuid REFERENCES compras(id) ON DELETE CASCADE;
+    ELSE
+        ALTER TABLE producto_costos_historicos ADD COLUMN IF NOT EXISTS
+            compra_id INTEGER REFERENCES compras(id) ON DELETE CASCADE;
+    END IF;
+END $$;
+
+CREATE INDEX IF NOT EXISTS idx_producto_costos_historicos_producto
+    ON producto_costos_historicos(producto_id, fecha DESC, creado_en DESC);
+CREATE INDEX IF NOT EXISTS idx_producto_costos_historicos_compra
+    ON producto_costos_historicos(compra_id);
+
+-- ============================================================================
+-- 20. COMPRA ABONOS (sistema de pagos y deudas de compras)
+-- ============================================================================
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'compra_abonos') THEN
+    IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'compras' AND column_name = 'id' AND udt_name = 'uuid') THEN
+      CREATE TABLE compra_abonos (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        compra_id UUID NOT NULL REFERENCES compras(id) ON DELETE RESTRICT,
+        fecha DATE NOT NULL DEFAULT CURRENT_DATE,
+        monto NUMERIC(18, 6) NOT NULL,
+        moneda_id UUID NOT NULL REFERENCES monedas(id),
+        tasa_cambio NUMERIC(18, 6) NOT NULL,
+        monto_base NUMERIC(18, 6) NOT NULL,
+        metodo_pago_id UUID REFERENCES metodos_pago(id),
+        caja_id UUID REFERENCES cajas(id),
+        observaciones TEXT,
+        creado_en TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        actualizado_en TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+    ELSE
+      CREATE TABLE compra_abonos (
+        id SERIAL PRIMARY KEY,
+        compra_id INTEGER NOT NULL REFERENCES compras(id) ON DELETE RESTRICT,
+        fecha DATE NOT NULL DEFAULT CURRENT_DATE,
+        monto NUMERIC(18, 6) NOT NULL,
+        moneda_id INTEGER NOT NULL REFERENCES monedas(id),
+        tasa_cambio NUMERIC(18, 6) NOT NULL,
+        monto_base NUMERIC(18, 6) NOT NULL,
+        metodo_pago_id INTEGER REFERENCES metodos_pago(id),
+        caja_id INTEGER REFERENCES cajas(id),
+        observaciones TEXT,
+        creado_en TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        actualizado_en TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+    END IF;
+  END IF;
+END $$;
+
+CREATE INDEX IF NOT EXISTS idx_compra_abonos_compra ON compra_abonos(compra_id);
+CREATE INDEX IF NOT EXISTS idx_compra_abonos_fecha ON compra_abonos(fecha);
+

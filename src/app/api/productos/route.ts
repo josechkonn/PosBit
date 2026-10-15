@@ -260,16 +260,21 @@ export async function GET(request: Request) {
     // Presentaciones de los productos de la página (una sola consulta).
     // `presentacionesDeProducto` deriva precio/costo de presentación en lectura.
     const productoIds = (productos as any[]).map((p) => p.id);
-    const presentacionesRows = productoIds.length
-      ? await query(
+    let presentacionesRows: any[] = [];
+    if (productoIds.length) {
+      try {
+        presentacionesRows = await query(
           `SELECT id, producto_id, nombre, unidades, activo, codigo,
                   modo_venta, precio_override, margen_override
            FROM producto_presentaciones
            WHERE producto_id = ANY($1::int[])
            ORDER BY nombre ASC, unidades ASC`,
           [productoIds]
-        )
-      : [];
+        );
+      } catch (e: any) {
+        console.warn("Aviso al consultar producto_presentaciones (se continuará sin presentaciones):", e?.message || e);
+      }
+    }
     const presPorProducto = new Map<number, any[]>();
     for (const pr of presentacionesRows as any[]) {
       const lista = presPorProducto.get(pr.producto_id) || [];
@@ -278,16 +283,21 @@ export async function GET(request: Request) {
     }
 
     // Relación N:M proveedores del producto (lista completa, no solo el principal).
-    const proveedoresRows = productoIds.length
-      ? await query(
+    let proveedoresRows: any[] = [];
+    if (productoIds.length) {
+      try {
+        proveedoresRows = await query(
           `SELECT pp.producto_id, pr.id, pr.nombre
            FROM producto_proveedores pp
            JOIN proveedores pr ON pr.id = pp.proveedor_id
            WHERE pp.producto_id = ANY($1::int[])
            ORDER BY pr.nombre ASC, pr.id ASC`,
           [productoIds]
-        )
-      : [];
+        );
+      } catch (e: any) {
+        console.warn("Aviso al consultar producto_proveedores (se continuará con proveedor principal):", e?.message || e);
+      }
+    }
     const provPorProducto = new Map<number, any[]>();
     for (const pv of proveedoresRows as any[]) {
       const lista = provPorProducto.get(pv.producto_id) || [];

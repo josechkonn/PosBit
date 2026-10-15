@@ -68,15 +68,31 @@ export async function ensureDatabase(): Promise<void> {
       try { readFileSync(p, "utf-8"); return true; } catch { return false; }
     });
     if (!schemaPath) throw new Error(`schema.sql no encontrado. Buscado en: ${candidates.join(", ")}`);
-    const schema = readFileSync(schemaPath, "utf-8");
-    await appPool.query(schema);
-    console.log("Tablas y datos iniciales verificados.");
 
-    // SQL migraciones incrementales: se ejecutan en orden e idénticamente en dev y Electron
+    // 1. Ejecutar migraciones automáticas previas si la base de datos ya contiene datos
+    const { ensureSchemaAndMigrate } = await import("./auto-migrate");
+    try {
+      await ensureSchemaAndMigrate(appPool);
+    } catch (migErr: any) {
+      console.warn("Aviso en pre-migración automática:", migErr?.message || migErr);
+    }
+
+    // 2. Aplicar/verificar esquema base
+    const schema = readFileSync(schemaPath, "utf-8");
+    try {
+      await appPool.query(schema);
+      console.log("Tablas y datos iniciales verificados.");
+    } catch (schemaErr: any) {
+      console.warn("Aviso al aplicar schema.sql (continuando con migraciones incrementales):", schemaErr?.message || schemaErr);
+    }
+
+    // 3. SQL migraciones incrementales: se ejecutan en orden e idénticamente en dev y Electron
     const extraSqlFiles = [
       { file: "global-config-pricing.sql", desc: "Reglas globales de costeo/pricing" },
       { file: "producto-proveedores.sql", desc: "Relación producto-proveedor" },
       { file: "presentaciones-precio.sql", desc: "Presentaciones con precio propio" },
+      { file: "presentaciones-codigo.sql", desc: "Códigos de barra de presentaciones" },
+      { file: "ventas-cobros-extra.sql", desc: "Cobros extra en ventas" },
       { file: "compras-descuentos.sql", desc: "Descuentos en compras" },
       { file: "compras-abonos.sql", desc: "Sistema de abonos y deudas de compras" },
     ];
@@ -84,7 +100,7 @@ export async function ensureDatabase(): Promise<void> {
     const sqlDir = dirname(schemaPath);
     for (const { file, desc } of extraSqlFiles) {
       try {
-        const filePath = join(sqlDir, file);
+        const filePath = join(/*turbopackIgnore: true*/ sqlDir, file);
         if (existsSync(/*turbopackIgnore: true*/ filePath)) {
           const extra = readFileSync(/*turbopackIgnore: true*/ filePath, "utf-8");
           await appPool.query(extra);
@@ -95,10 +111,11 @@ export async function ensureDatabase(): Promise<void> {
       }
     }
 
+    // 4. Semilla de usuario administrador
     const { seedAdminUser } = await import("./seed-admin");
     await seedAdminUser();
 
-    const { ensureSchemaAndMigrate } = await import("./auto-migrate");
+    // 5. Garantía final de auto-migración y auto-reparación
     await ensureSchemaAndMigrate(appPool);
   } finally {
     await appPool.query("SELECT pg_advisory_unlock($1)", [LOCK_ID]).catch(() => {});
