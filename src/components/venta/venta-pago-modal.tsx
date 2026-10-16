@@ -6,7 +6,7 @@ import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { useToast } from "@/components/ui/toast";
-import { fmt, fmtDate } from "@/lib/format";
+import { fmt, fmtDate, fechaLocalISO } from "@/lib/format";
 import {
   CheckCircle2,
   DollarSign,
@@ -130,7 +130,7 @@ export function VentaPagoModal({
   const [cajaSeleccionadaId, setCajaSeleccionadaId] = useState<string>("");
   const [montoSimpleStr, setMontoSimpleStr] = useState<string>("");
   const [fechaPago, setFechaPago] = useState<string>(
-    new Date().toISOString().split("T")[0]
+    fechaLocalISO()
   );
   const [observaciones, setObservaciones] = useState<string>("");
 
@@ -211,7 +211,7 @@ export function VentaPagoModal({
       setMontoSimpleStr("");
       setObservaciones("");
       setIsPagoMixto(false);
-      setFechaPago(new Date().toISOString().split("T")[0]);
+      setFechaPago(fechaLocalISO());
       loadInitialData();
     }
   }, [open, venta, loadInitialData]);

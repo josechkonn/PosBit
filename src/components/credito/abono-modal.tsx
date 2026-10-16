@@ -6,7 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Field } from "@/components/ui/label";
 import { MetodoPagoSelect } from "@/components/ui/metodo-pago-select";
-import { fmt } from "@/lib/format";
+import { fmt, fechaLocalISO } from "@/lib/format";
 import { convertir } from "@/lib/money";
 
 interface Credito {
@@ -66,7 +66,7 @@ export function AbonoModal({ open, credito, onClose, onSuccess }: AbonoModalProp
   useEffect(() => {
     if (open && credito) {
       setMonto(String(credito.saldo));
-      setFecha(new Date().toISOString().split("T")[0]);
+      setFecha(fechaLocalISO());
       setMetodoPagoId("");
       setCajaId("");
       setObservaciones("");

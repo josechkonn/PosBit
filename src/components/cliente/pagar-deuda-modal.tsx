@@ -7,7 +7,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Field } from "@/components/ui/label";
 import { MetodoPagoSelect } from "@/components/ui/metodo-pago-select";
-import { fmt } from "@/lib/format";
+import { fmt, fechaLocalISO } from "@/lib/format";
 import { convertir } from "@/lib/money";
 import { cn } from "@/lib/utils";
 
@@ -94,7 +94,7 @@ export function PagarDeudaModal({
   useEffect(() => {
     if (open) {
       setMonto("");
-      setFecha(new Date().toISOString().split("T")[0]);
+      setFecha(fechaLocalISO());
       setMetodoPagoId("");
       setCajaId("");
       setObservaciones("");

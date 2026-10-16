@@ -72,6 +72,21 @@ export const fmtNumber = (n: number | string) => {
   return new Intl.NumberFormat("es-BO").format(num);
 };
 
+/**
+ * Fecha local en formato `YYYY-MM-DD`: el día que ve el operador.
+ *
+ * NO usar `new Date().toISOString().split("T")[0]` para esto. `toISOString()`
+ * devuelve la fecha en **UTC**, que en Venezuela (UTC-4) ya es del día
+ * siguiente a partir de las 20:00: una venta hecha a las 8:30 pm quedaba
+ * guardada con la fecha del día siguiente y no aparecía en el reporte del día.
+ *
+ * Se construye con los getters locales (`getFullYear`/`getMonth`/`getDate`), por
+ * eso es la fecha del reloj del operador y no la de UTC. Sirve igual en el
+ * cliente y en el servidor (ambos corren en la zona horaria del equipo).
+ */
+export const fechaLocalISO = (d: Date = new Date()): string =>
+  `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+
 /** Formatea una tasa sin ceros sobrantes: 3200.0000 → "3200", 3.500000 → "3.5". */
 export const fmtTasa = (n: number | string) => {
   const num = typeof n === "string" ? parseFloat(n) : n;

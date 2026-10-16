@@ -8,7 +8,7 @@ import { Input } from "@/components/ui/input";
 import { Field } from "@/components/ui/label";
 import { Select } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
-import { fmt } from "@/lib/format";
+import { fmt, fechaLocalISO } from "@/lib/format";
 
 interface Producto {
   id: number;
@@ -74,7 +74,7 @@ export function RetornoModal({ open, onClose, onSuccess, initialTipo, initialVen
       setVentaId(initialVentaId ? String(initialVentaId) : "");
       setCompraId(initialCompraId ? String(initialCompraId) : "");
       setAbonarCredito(true);
-      setFecha(new Date().toISOString().split("T")[0]);
+      setFecha(fechaLocalISO());
       setMotivo("");
       setProductoId("");
       setCantidad("1");

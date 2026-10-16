@@ -12,7 +12,7 @@ import { SearchBar } from "@/components/ui/search-bar";
 import { MetodoPagoSelect, ordenarMetodosPorMoneda } from "@/components/ui/metodo-pago-select";
 import { Combobox } from "@/components/ui/combobox";
 import { useToast } from "@/components/ui/toast";
-import { fmt, fmtDateTime, fmtNumber } from "@/lib/format";
+import { fmt, fmtDateTime, fmtNumber, fechaLocalISO } from "@/lib/format";
 import { redondear, tasaUsd, tasaUsdDocumento, tasaMostrada, tasaPar, precioPresentacionEnMoneda } from "@/lib/money";
 import { ReceiptPrinter } from "@/components/pos/receipt-printer";
 import { ClienteModal } from "@/components/cliente/cliente-modal";
@@ -1317,6 +1317,10 @@ export default function PuntoDeVentaPage() {
           cobros_extra: cobrosParaEnviar,
           pagos: pagosToSend,
           tasa: Number.isFinite(tasaCustomNum) && tasaCustomNum > 0 ? tasaCustomNum : null,
+          // La fecha viaja desde el cliente: es el día del reloj del cajero. Si
+          // la dejáramos al servidor, una venta hecha después de las 20:00 (UTC-4)
+          // se guardaría con la fecha del día siguiente.
+          fecha: fechaLocalISO(),
           observaciones: observaciones.trim() || null,
           items,
         }),

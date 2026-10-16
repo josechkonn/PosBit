@@ -54,7 +54,7 @@ export async function GET() {
 
     const backupPayload = {
       app: "PosBit",
-      version: "0.1.21",
+      version: "0.1.22",
       fecha: new Date().toISOString(),
       counts,
       tables: data,

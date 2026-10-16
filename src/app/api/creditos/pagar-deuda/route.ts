@@ -3,6 +3,7 @@ export const dynamic = "force-dynamic";
 import { NextResponse } from "next/server";
 import { requireSession } from "@/lib/auth-server";
 import { transaction } from "@/lib/db";
+import { fechaLocalISO } from "@/lib/format";
 import { convertirConMetodo, redondear } from "@/lib/money";
 import { getConfiguracionGlobal } from "@/lib/global-config";
 
@@ -121,7 +122,7 @@ export async function POST(request: Request) {
           [
             credito.id,
             cliente_id,
-            fecha || new Date().toISOString().split("T")[0],
+            fecha || fechaLocalISO(),
             takeCurrency,
             monedaCredito.id,
             takeBase,

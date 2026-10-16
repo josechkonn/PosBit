@@ -1,8 +1,94 @@
-import { Pool, PoolClient } from "pg";
+import type { Pool, PoolClient } from "pg";
 import fs from "fs";
 import path from "path";
 
 let migrationPromise: Promise<void> | null = null;
+
+/**
+ * Tablas cuyo `fecha` se escribía con la fecha en UTC (el bug que motivó
+ * `fechaLocalISO` en `@/lib/format`). Lista FIJA a propósito: nunca se arma un
+ * UPDATE sobre un nombre de tabla que venga de la base de datos.
+ */
+const TABLAS_CON_FECHA_DE_DOCUMENTO = ["ventas", "compras", "retornos", "compra_abonos", "abonos"];
+
+/**
+ * Corrige los documentos que quedaron con la fecha UN DÍA adelantado.
+ *
+ * El bug: `new Date().toISOString().split("T")[0]` devuelve la fecha en UTC, que
+ * en Venezuela (UTC-4) ya es del día siguiente a partir de las 20:00. Una venta
+ * de las 8:30 pm se guardaba con la fecha del 16 y no aparecía en el reporte del
+ * 15. La fecha correcta es la del reloj del operador, que se reconstruye desde
+ * `creado_en` (que sí lo guarda Postgres en hora local).
+ *
+ * POR QUÉ NO ROMPE NADA — el UPDATE solo toca filas que cumplen las TRES
+ * condiciones de la firma exacta del bug:
+ *   1. `fecha` = (fecha local de creación) + 1 día  → solo el desfase de un día
+ *      hacia adelante. Un documento fechado a mano en el pasado (lo normal al
+ *      registrar una venta de ayer) queda intacto: su `fecha` es ANTERIOR.
+ *   2. Se creó de noche, en la franja en la que la fecha UTC se adelanta
+ *      (hora local ≥ 24 − |offset del servidor|; en Caracas, desde las 20:00).
+ *      El umbral se calcula desde la zona horaria del servidor, no fijo.
+ *   3. Solo tablas que tengan `fecha` y `creado_en`.
+ *
+ * Es idempotente: una vez corregida, la fila ya no cumple la condición.
+ */
+async function corrigeFechasDesfasadasUTC(client: PoolClient | Pool): Promise<void> {
+  try {
+    const info = await client.query(
+      `SELECT c.table_name,
+              MAX(CASE WHEN c.column_name = 'fecha'     THEN 1 ELSE 0 END) AS tiene_fecha,
+              MAX(CASE WHEN c.column_name = 'creado_en' THEN c.data_type END) AS creado_tipo
+         FROM information_schema.columns c
+        WHERE c.table_schema = 'public'
+          AND c.column_name IN ('fecha', 'creado_en')
+          AND c.table_name = ANY($1::text[])
+        GROUP BY c.table_name`,
+      [TABLAS_CON_FECHA_DE_DOCUMENTO]
+    );
+
+    // Umbral horario del desfase, derivado del offset del servidor:
+    // en UTC-4 el día local se adelanta a partir de las 20:00.
+    const thr = await client.query(
+      `SELECT 24 - abs(EXTRACT(timezone FROM now()) / 3600)::int AS hora`
+    );
+    const horaDesfase = Number(thr.rows[0]?.hora ?? 20);
+
+    let total = 0;
+    for (const row of info.rows) {
+      if (!row.tiene_fecha || !row.creado_tipo) continue;
+
+      // `creado_en` en timestamptz guarda un instante: hay que traerlo a la hora
+      // local. En `timestamp` ya viene en hora local (NOW() la guarda en la zona
+      // del servidor), así que se usa tal cual.
+      const local =
+        row.creado_tipo === "timestamp with time zone"
+          ? `(creado_en AT TIME ZONE current_setting('TimeZone'))::timestamp`
+          : `creado_en::timestamp`;
+
+      const res = await client.query(
+        `UPDATE "${row.table_name}"
+            SET fecha = (${local})::date
+          WHERE fecha = ((${local})::date + 1)
+            AND EXTRACT(hour FROM (${local})::timestamp) >= $1`,
+        [horaDesfase]
+      );
+      if (res.rowCount && res.rowCount > 0) {
+        console.log(
+          `🗓️  ${row.table_name}: ${res.rowCount} documento(s) con la fecha adelantada por UTC corregidos.`
+        );
+        total += res.rowCount;
+      }
+    }
+
+    if (total > 0) {
+      console.log(`🗓️  Fechas corregidas automáticamente: ${total} documento(s).`);
+    }
+  } catch (error) {
+    // Nunca debe impedir que la app arranque: si esta corrección falla, se avisa
+    // y se sigue. Los datos quedan como estaban (sin tocar).
+    console.warn("Aviso: no se pudieron corregir las fechas con desfase UTC:", (error as Error)?.message || error);
+  }
+}
 
 export async function ensureSchemaAndMigrate(customPool?: Pool | PoolClient): Promise<void> {
   if (migrationPromise) return migrationPromise;
@@ -320,6 +406,9 @@ export async function ensureSchemaAndMigrate(customPool?: Pool | PoolClient): Pr
           UPDATE configuracion SET valor = 'Promedio' WHERE clave = 'inventario_metodo_costeo' AND valor = 'FIFO';
         END $$;
       `);
+
+      // ── Corrección de fechas adelantadas por desfase UTC ──────────────────
+      await corrigeFechasDesfasadasUTC(client);
 
       console.log("✅ Migraciones automáticas verificadas y aplicadas con éxito sin alteración de datos existentes.");
     } catch (error) {

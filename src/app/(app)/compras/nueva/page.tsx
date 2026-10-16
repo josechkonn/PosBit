@@ -174,7 +174,7 @@ interface LineItem {
 
 /* ───── Helpers ───── */
 
-import { fmtMonedaConSimbolo } from "@/lib/format";
+import { fmtMonedaConSimbolo, fechaLocalISO } from "@/lib/format";
 
 function fmtMoney(n: number, moneda: { simbolo: string; decimales?: number }): string {
   return fmtMonedaConSimbolo(n, moneda.simbolo, moneda.decimales ?? 2);
@@ -227,7 +227,7 @@ export default function NuevaCompraPage() {
 
   // ── Form state ──
   const [proveedorId, setProveedorId] = useState<string | null>(null);
-  const [fecha, setFecha] = useState(new Date().toISOString().split("T")[0]);
+  const [fecha, setFecha] = useState(fechaLocalISO());
   const [metodoPagoId, setMetodoPagoId] = useState<string | null>(null);
   const [referencia, setReferencia] = useState("");
   const [observaciones, setObservaciones] = useState("");

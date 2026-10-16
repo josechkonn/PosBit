@@ -7,7 +7,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Field } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
-import { fmt } from "@/lib/format";
+import { fmt, fechaLocalISO } from "@/lib/format";
 
 interface ItemOriginal {
   producto_id: number;
@@ -132,7 +132,7 @@ export function RetornoDirectoModal({
     try {
       const body: any = {
         tipo,
-        fecha: new Date().toISOString().split("T")[0],
+        fecha: fechaLocalISO(),
         motivo: motivo || null,
         items: itemsSeleccionados.map((i) => ({
           producto_id: i.producto_id,

@@ -3,6 +3,7 @@ export const dynamic = 'force-dynamic';
 import { NextResponse } from "next/server";
 import { requireSession } from "@/lib/auth-server";
 import { query, queryOne, execute, transaction } from "@/lib/db";
+import { fechaLocalISO } from "@/lib/format";
 import { aBase, convertir, redondear, tasaUsd, tasaUsdDocumento, monedaDeProducto, monedaCostoDeProducto, tasaMostrada, tasaPar, desdeBase } from "@/lib/money";
 
 function generarNumero() {
@@ -123,6 +124,12 @@ export async function POST(request: Request) {
     if (!moneda_id || !items || items.length === 0) {
       return NextResponse.json({ error: "Campos requeridos: moneda_id, items" }, { status: 400 });
     }
+
+    // La fecha la manda el cliente (es el día de SU reloj: el POS la envía para
+    // que una venta de las 8pm no quede con la fecha del día siguiente por UTC).
+    // Si viene vacía o mal formada se usa la del servidor, que es lo local de
+    // esta máquina, en vez de romper el INSERT con un valor inválido.
+    const fechaVenta = /^\d{4}-\d{2}-\d{2}$/.test(String(fecha ?? "")) ? fecha : fechaLocalISO();
 
     // `pagos` (opcional): líneas de pago mixto, cada una con su método/moneda.
     // Sin `pagos` se comporta como antes: `monto_pagado` si viene; si no,
@@ -441,7 +448,7 @@ export async function POST(request: Request) {
         `INSERT INTO ventas (numero, cliente, cliente_id, tipo_pago, fecha, moneda_id, metodo_pago_id, caja_id, subtotal, descuento, impuesto, cobros_extra, total, total_base, descuento_base, cobros_extra_base, tasa, estado, observaciones) 
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19) 
          RETURNING *`,
-         [generarNumero(), clienteNombre, cliente_id || null, esCredito ? "Credito" : "Contado", fecha || new Date().toISOString().split("T")[0], moneda_id, metodoVentaId, cajaVentaId, subtotalTotal, descuentoVenta, impuestoTotal, cobrosExtraVenta, total, totalBase, descuentoBase, cobrosExtraBase, tasaAplicada, estadoVenta, observaciones || null]
+         [generarNumero(), clienteNombre, cliente_id || null, esCredito ? "Credito" : "Contado", fechaVenta, moneda_id, metodoVentaId, cajaVentaId, subtotalTotal, descuentoVenta, impuestoTotal, cobrosExtraVenta, total, totalBase, descuentoBase, cobrosExtraBase, tasaAplicada, estadoVenta, observaciones || null]
       );
 
       const venta = ventaRes.rows[0];

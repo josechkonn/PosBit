@@ -3,6 +3,7 @@ export const dynamic = 'force-dynamic';
 import { NextResponse } from "next/server";
 import { requireSession } from "@/lib/auth-server";
 import { query, queryOne, transaction } from "@/lib/db";
+import { fechaLocalISO } from "@/lib/format";
 import { aBase, convertirConMetodo, redondear, tasaUsdDocumento } from "@/lib/money";
 import { getConfiguracionGlobal } from "@/lib/global-config";
 
@@ -55,7 +56,7 @@ export async function POST(
     const body = await request.json();
     const { fecha, monto, moneda_id, metodo_pago_id, caja_id, observaciones, lineas } = body;
 
-    const fechaAbono = fecha || new Date().toISOString().split("T")[0];
+    const fechaAbono = fecha || fechaLocalISO();
 
     // Normalizar líneas de pago: si viene array de lineas (pago mixto) usarlo, de lo contrario línea única
     let itemsAbono: Array<{

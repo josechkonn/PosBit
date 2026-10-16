@@ -3,6 +3,7 @@ export const dynamic = 'force-dynamic';
 import { NextResponse } from "next/server";
 import { requireSession } from "@/lib/auth-server";
 import { query, queryOne, transaction } from "@/lib/db";
+import { fechaLocalISO } from "@/lib/format";
 import { aBase, desdeBase, tasaUsd, tasaUsdDocumento, monedaDeProducto, monedaCostoDeProducto } from "@/lib/money";
 
 function generarNumero(tipo: string) {
@@ -209,7 +210,7 @@ export async function POST(request: Request) {
         `INSERT INTO retornos (numero, tipo, venta_id, compra_id, cliente_id, proveedor_id, fecha, motivo, estado)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'Procesado')
          RETURNING *`,
-        [numero, tipo, venta_id || null, compra_id || null, clienteId, proveedorId, fecha || new Date().toISOString().split("T")[0], motivo || null]
+        [numero, tipo, venta_id || null, compra_id || null, clienteId, proveedorId, fecha || fechaLocalISO(), motivo || null]
       );
       const retorno = retornoRes.rows[0];
 

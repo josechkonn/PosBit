@@ -3,6 +3,7 @@ export const dynamic = 'force-dynamic';
 import { NextResponse } from "next/server";
 import { requireSession } from "@/lib/auth-server";
 import { query, queryOne, execute, transaction } from "@/lib/db";
+import { fechaLocalISO } from "@/lib/format";
 import {
   aBase,
   redondear,
@@ -275,7 +276,7 @@ export async function POST(request: Request) {
         [
           generarNumero(),
           proveedor_id,
-          fecha || new Date().toISOString().split("T")[0],
+          fecha || fechaLocalISO(),
           moneda_id,
           metodo_pago_id || null,
           caja_id || null,
@@ -305,7 +306,7 @@ export async function POST(request: Request) {
         await client.query(
           `INSERT INTO compra_abonos (compra_id, fecha, monto, moneda_id, tasa_cambio, monto_base, metodo_pago_id, caja_id, observaciones)
            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
-          [compra.id, fecha || new Date().toISOString().split("T")[0], Number(abono_inicial), abonoMonedaId, tasaAbono, abonoBase, metodo_pago_id || null, caja_id || null, `Abono inicial de compra ${compra.numero}`]
+          [compra.id, fecha || fechaLocalISO(), Number(abono_inicial), abonoMonedaId, tasaAbono, abonoBase, metodo_pago_id || null, caja_id || null, `Abono inicial de compra ${compra.numero}`]
         );
       }
 
