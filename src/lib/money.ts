@@ -192,9 +192,15 @@ export type MetodoConversionPrecio = "directa" | "triangulacion";
 /**
  * Convierte `monto` de `desde` a `hasta` respetando el método global:
  *   directa       → par directo (regla `tasaPar`).
- *   triangulacion → dos saltos explícitos: desde → tránsito → hasta.
+ *   triangulacion → dos saltos: desde → tránsito → hasta (el PRODUCTO de los
+ *                   dos factores, que es el mismo factor del par).
  * Si se pide triangulación sin moneda de tránsito configurada, cae a directa
  * (decisión a prueba de errores: nunca bloquea la operación).
+ *
+ * El monto se redondea UNA sola vez, al final. Redondear el paso intermedio no
+ * era una segunda conversión real sino ruido: los dos saltos multiplican sus
+ * factores y el último los amplificaba (error de hasta 0,5 × factor_final, que
+ * con tasas altas llegó a 0,02 en una sola conversión de costo).
  *
  * `efectivas` propaga la tasa personalizada del documento por id de moneda.
  * Vive aquí (no en `costing.ts`) para compartir EXACTA la misma regla con el
@@ -215,9 +221,11 @@ export function convertirConMetodo(
   const { metodo = "directa", monedaTransito = null, catalogo = [], efectivas = null } = opts;
   if (!Number.isFinite(monto) || !desde || !hasta) return 0;
   if (metodo === "triangulacion" && monedaTransito) {
-    const decTransito = Number((monedaTransito as { decimales?: number | null }).decimales ?? 2);
-    const paso = redondear(monto * tasaPar(desde, monedaTransito, catalogo, efectivas), decTransito);
-    return redondear(paso * tasaPar(monedaTransito, hasta, catalogo, efectivas), decimales);
+    // Un solo redondeo: el paso intermedio viaja sin redondear (ver nota arriba).
+    const factor =
+      tasaPar(desde, monedaTransito, catalogo, efectivas) *
+      tasaPar(monedaTransito, hasta, catalogo, efectivas);
+    return redondear(monto * factor, decimales);
   }
   return redondear(monto * tasaPar(desde, hasta, catalogo, efectivas), decimales);
 }
@@ -305,8 +313,15 @@ export function tasaUsdDocumento(
   return custom * (ref ? tasaUsd(ref, catalogo) : 1);
 }
 
-/** Monto en la moneda del documento → USD (columnas `*_base`). */
-export function aBase(monto: number, tasaDocUsd: number, decimales = 2): number {
+/**
+ * Monto en la moneda del documento → USD (columnas `*_base`).
+ *
+ * El default es 6 decimales porque es la precisión con la que se guardan esas
+ * columnas (`DECIMAL(18,6)`): con 2 se perdía hasta 0,005 USD por línea, que en
+ * una moneda como el bolívar (892,2342 por USD) son varios Bs en cada línea de
+ * reporte o retorno.
+ */
+export function aBase(monto: number, tasaDocUsd: number, decimales = 6): number {
   if (!Number.isFinite(monto) || !Number.isFinite(tasaDocUsd) || tasaDocUsd <= 0) {
     return redondear(monto, decimales);
   }
@@ -314,7 +329,7 @@ export function aBase(monto: number, tasaDocUsd: number, decimales = 2): number 
 }
 
 /** Monto en USD (columnas `*_base`) → moneda del documento. */
-export function desdeBase(montoBase: number, tasaDocUsd: number, decimales = 2): number {
+export function desdeBase(montoBase: number, tasaDocUsd: number, decimales = 6): number {
   if (!Number.isFinite(montoBase) || !Number.isFinite(tasaDocUsd) || tasaDocUsd <= 0) {
     return redondear(montoBase, decimales);
   }
@@ -467,6 +482,33 @@ export function precioUnidadDesdePresentacion(precioPresentacion: number, unidad
   const u = Number(unidades);
   if (!Number.isFinite(p) || !Number.isFinite(u) || u <= 0 || p <= 0) return 0;
   return redondear(p / u, decimales);
+}
+
+/**
+ * Precio de UNA presentación (caja, bolsa...) expresado en otra moneda.
+ *
+ * `precioPresentacion` ya viene resuelto en la moneda del producto y con su
+ * modo aplicado (derivado / fijo / margen), así que basta convertirlo una sola
+ * vez y redondear una sola vez.
+ *
+ * Lo que NO se debe hacer (y era un error real en el POS) es deducirlo del
+ * COCIENTE entre el precio unitario ya redondeado en la moneda destino y el
+ * precio unitario en la moneda del producto: ese cociente arrastra el redondeo
+ * del precio unitario y las unidades de la caja lo multiplican. Con una caja
+ * de 3 unidades a 4.000 COP, el precio en Bs daba 3.999,99 en vez de 4.000
+ * (con 12 unidades el desvío ya era de 0,04).
+ */
+export function precioPresentacionEnMoneda<T extends MonedaConversion>(
+  precioPresentacion: number,
+  desde: T | null | undefined,
+  hasta: T | null | undefined,
+  catalogo: T[] = [],
+  efectivas?: Record<string, number> | null,
+  decimales = 2
+): number {
+  const p = Number(precioPresentacion);
+  if (!Number.isFinite(p) || !desde || !hasta) return 0;
+  return redondear(p * tasaPar(desde, hasta, catalogo, efectivas), decimales);
 }
 
 // ============================================================================

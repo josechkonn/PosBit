@@ -1,6 +1,6 @@
 // Pruebas numéricas de src/lib/money.ts (la fuente de verdad de las fórmulas).
 // Correr con: npm run test:money   (Node ≥ 22.6 con strip-types, o ≥ 23)
-import { tasaUsd, convertir, tasaUsdDocumento, aBase, desdeBase, redondear, tasaPar, preciosDeProducto, reglasConversion, precioPresentacion, precioUnidadDesdePresentacion, presentacionesDeProducto, margenSobreCosto, aplicarDescuentosLinea, calcularTotalConDescuentos, precioPresentacionSegunModo } from "../src/lib/money.ts";
+import { tasaUsd, convertir, convertirConMetodo, tasaUsdDocumento, aBase, desdeBase, redondear, tasaPar, preciosDeProducto, reglasConversion, precioPresentacion, precioPresentacionEnMoneda, precioUnidadDesdePresentacion, presentacionesDeProducto, margenSobreCosto, aplicarDescuentosLinea, calcularTotalConDescuentos, precioPresentacionSegunModo } from "../src/lib/money.ts";
 
 const catalogo: any[] = [
   { id: 1, codigo: "USD", simbolo: "$", tasa: 1, decimales: 2, es_base: true, tasa_ref_moneda_id: null },
@@ -46,8 +46,10 @@ console.log("\n── aBase / desdeBase (ida y vuelta a USD) ──");
 const tasaUsdDoc = tasaUsdDocumento(COP, null, catalogo);
 const ida = aBase(100000, tasaUsdDoc);
 check("100.000 COP → USD", ida, 35.02);
-// El ida y vuelta pierde ~0.01% porque USD se guarda con 2 decimales
-check("y de vuelta → COP", desdeBase(ida, tasaUsdDoc), 100000, 15);
+// Ida y vuelta: las columnas `*_base` se guardan con 6 decimales (DECIMAL(18,6)),
+// así que el default de aBase/desdeBase es 6 y el round-trip ya no pierde centavos.
+checkTrue("aBase guarda 6 decimales por defecto", /^\d+\.\d{6}$/.test(String(ida)));
+check("y de vuelta → COP", desdeBase(ida, tasaUsdDoc), 100000, 0.01);
 
 console.log("\n── conversión directa a USD (COP ↔ USD) ──");
 const catalogoDirecto: any[] = [
@@ -159,6 +161,31 @@ const preciosDir = preciosDeProducto(prodTri, catalogoDirecto, USD);
 const dirUSD = preciosDir.find((p) => p.moneda_codigo === "USD");
 check("directa: precio COP→USD por par directo (≈892.23)", dirUSD?.precio ?? 0, 2855149.44 / 3200, 0.05);
 
+console.log("\n── triangulación: un SOLO redondeo (el del resultado) ──");
+// Catálogo que reproduce el caso real reported (USD 4 decimales, VES, COP con
+// tasa directa a USD y arista directa a su referencia).
+const catalogoPesos: any[] = [
+  { id: "u", codigo: "USD", simbolo: "$", tasa: 1, decimales: 4, es_base: true, tasa_ref_moneda_id: null },
+  { id: "v", codigo: "VES", simbolo: "Bs.", tasa: 892.2342, decimales: 2, es_base: false, tasa_ref_moneda_id: null },
+  { id: "c", codigo: "COP", simbolo: "$", tasa: 3, decimales: 2, es_base: false, tasa_ref_moneda_id: "v", usa_tasa_usd_directa: true, tasa_usd_directa: 2900 },
+];
+const [U, V, C] = catalogoPesos;
+const triUSD_COP = convertirConMetodo(8, U, C, { metodo: "triangulacion", monedaTransito: V, catalogo: catalogoPesos }, 2);
+// Factor exacto del par vía tránsito: 892.2342 × 3 = 2676.7026 → 21.413,6208
+check("tri USD→COP: 8 USD redondea UNA vez (8×2676.7026)", triUSD_COP, redondear(8 * 892.2342 * 3, 2), 1e-9);
+// El paso intermedio redondeado a 2 daba 7137.87 × 3 = 21413.61 (un centavo menos).
+checkTrue("tri: el paso intermedio ya no se redondea", triUSD_COP !== redondear(redondear(8 * 892.2342, 2) * 3, 2));
+// Idempotencia: convertir con三角ulación debe dar el producto de factores en
+// cualquier monto (antes dependía de dónde cayera el redondeo del paso).
+let maxDerivaTri = 0;
+for (let i = 1; i <= 500; i++) {
+  const m = i * 13.77;
+  const f1 = tasaPar(U, V, catalogoPesos);
+  const f2 = tasaPar(V, C, catalogoPesos);
+  maxDerivaTri = Math.max(maxDerivaTri, Math.abs(convertirConMetodo(m, U, C, { metodo: "triangulacion", monedaTransito: V, catalogo: catalogoPesos }, 2) - redondear(m * f1 * f2, 2)));
+}
+checkTrue("tri: coincide con el producto de factores en 500 montos", maxDerivaTri === 0);
+
 
 console.log("\n── presentaciones (derivación precio unitario ⇄ presentación) ──");
 // Caja de 24 con precio unitario 100 → caja = 2400
@@ -190,6 +217,43 @@ check("caja: precio derivado 80000×24", caja?.precio ?? 0, 80000 * 24, 1e-9);
 check("caja: costo derivado 64000×24", caja?.costo ?? 0, 64000 * 24, 1e-9);
 check("bolsa: se incluye con activo=false", Number(bolsa?.activo ?? true), 0, 1e-9);
 check("bolsa: precio derivado 80000×12", bolsa?.precio ?? 0, 80000 * 12, 1e-9);
+
+console.log("\n── precio de una CAJA expresada en otra moneda (regresión 3.999,99) ──");
+// Caso real: caja de 3 unidades a 4.000 COP → 12.000 COP, que en Bs son 4.000.
+// El precio de la caja llega en la moneda del producto y se convierte UNA vez.
+check("caja 12.000 COP en Bs", precioPresentacionEnMoneda(12000, C, V, catalogoPesos), 4000, 1e-9);
+// Lo que hacía el POS (cociente de dos precios unitarios YA redondeados):
+//   (redondear(4000/3,2) / 4000) × 12000 = (1333.33/4000) × 12000 = 3999.99
+const unitDocRedondeado = redondear(4000 * tasaPar(C, V, catalogoPesos), 2);
+check("el cociente de precios redondeados daba 3999.99", redondear((unitDocRedondeado / 4000) * 12000, 2), 3999.99, 1e-9);
+checkTrue("el precio de la caja NO arrastra ese centavo", precioPresentacionEnMoneda(12000, C, V, catalogoPesos) !== 3999.99);
+// El desvío crecía con las unidades de la caja: ahora no hay ninguno.
+check("caja de 12 (11.200×12) en Bs", precioPresentacionEnMoneda(11200 * 12, C, V, catalogoPesos), 44800, 1e-9);
+check("caja de 20 (400×20) en Bs", precioPresentacionEnMoneda(400 * 20, C, V, catalogoPesos), redondear(8000 / 3, 2), 1e-9);
+check("caja de 20 redondeada a 2 decimales de Bs", precioPresentacionEnMoneda(400 * 20, C, V, catalogoPesos), 2666.67, 1e-9);
+// Misma moneda: se devuelve tal cual (sin conversión ni redondeo extra).
+check("caja en la moneda del producto = tal cual", precioPresentacionEnMoneda(12000, C, C, catalogoPesos), 12000, 1e-9);
+// Respeta la tasa efectiva del documento (`efectivas`). Se usa el catálogo sin
+// tasa directa a USD para que la personalizada sea la que manda (con COP en modo
+// directo la arista COP↔VES manda sobre ella, por diseño).
+check("caja 12.000 COP → USD con tasa custom 2900", precioPresentacionEnMoneda(12000, COP, USD, catalogo, { [String(COP.id)]: 2900 }), 4.14, 1e-9);
+// Decimales de la moneda destino.
+check("caja en USD con 4 decimales", precioPresentacionEnMoneda(12000, C, U, catalogoPesos, null, 4), 4.1379, 1e-9);
+
+console.log("\n── el total de la LÍNEA se redondea una vez (no el precio × cantidad) ──");
+// El POS envía el precio unitario SIN redondear y el servidor redondea al final
+// (cantidad × precio_unit). Redondear el unitario antes de multiplicar hacía que
+// el error creciera con la cantidad: 3 × 1.333,33 = 3.999,99 en vez de 4.000.
+const unitExacto = 4000 * tasaPar(C, V, catalogoPesos); // 1.333,3333… Bs por unidad
+for (const [cantidad, esperado] of [[1, 1333.33], [2, 2666.67], [3, 4000], [5, 6666.67], [20, 26666.67]] as const) {
+  const antes = redondear(unitExacto, 2) * cantidad;               // lo que hacía el POS
+  const ahora = redondear(unitExacto * cantidad, 2);                // una sola conversión
+  check(`${cantidad} und x 4.000 COP = ${esperado} Bs en total`, ahora, esperado, 1e-9);
+  if (cantidad > 1) checkTrue(`${cantidad} und: el precio unitario redondeado daba ${antes} (no)`, antes !== ahora);
+}
+// El precio unitario redondeado es correcto como PRECIO (lo que se muestra y se
+// guarda en la columna); lo que no debe hacer es definir el total de la línea.
+check("el precio unitario sigue siendo 1.333,33", redondear(unitExacto, 2), 1333.33, 1e-9);
 
 console.log("\n── margenSobreCosto (margen real = markup sobre costo) ──");
 check("costo 100 → precio 120 = 20 %", margenSobreCosto(120, 100) ?? NaN, 20, 1e-9);

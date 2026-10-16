@@ -304,7 +304,8 @@ export async function POST(request: Request) {
       let deuda = total; // en moneda de la venta
 
       if (lineasPagoReq) {
-        let restante = redondear(total);
+        // El saldo se lleva con los decimales de la moneda de la venta (no 2 fijos).
+        let restante = redondear(total, Number(monedaVenta.decimales ?? 2));
         for (const p of lineasPagoReq) {
           const montoLinea = redondear(Number(p?.monto));
           if (!p?.metodo_pago_id || !Number.isFinite(montoLinea) || montoLinea <= 0) continue;
@@ -342,10 +343,13 @@ export async function POST(request: Request) {
             ? montoLinea
             : redondear(montoLinea * factorPago, Number(monedaVenta.decimales ?? 2));
           const aplicado = Math.min(montoVenta, restante);
-          // Lo aplicado → moneda del método, para saber el vuelto y lo que entra a la caja
-          const aplicadoLinea = esMonedaVenta
-            ? aplicado
-            : redondear(aplicado / (factorPago || 1), Number(monedaLinea.decimales ?? 2));
+          // Lo que cubre la línea se mide sobre el SALDO (sin redondear) llevado a
+          // la moneda del método, no dividiendo `aplicado` —que ya viene redondeado
+          // en la moneda de la venta— porque eso reintroducía el error de centavos
+          // en el vuelto (misma regla que aplica el POS).
+          const decLineaPago = Number(monedaLinea.decimales ?? 2);
+          const restanteLinea = esMonedaVenta ? restante : restante / (factorPago || 1);
+          const aplicadoLinea = Math.min(montoLinea, redondear(restanteLinea, decLineaPago));
           const vuelto = redondear(Math.max(0, montoLinea - aplicadoLinea));
 
           restante = redondear(restante - aplicado);

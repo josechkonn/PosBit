@@ -13,7 +13,7 @@ import { MetodoPagoSelect, ordenarMetodosPorMoneda } from "@/components/ui/metod
 import { Combobox } from "@/components/ui/combobox";
 import { useToast } from "@/components/ui/toast";
 import { fmt, fmtDateTime, fmtNumber } from "@/lib/format";
-import { redondear, tasaUsd, tasaUsdDocumento, tasaMostrada, tasaPar } from "@/lib/money";
+import { redondear, tasaUsd, tasaUsdDocumento, tasaMostrada, tasaPar, precioPresentacionEnMoneda } from "@/lib/money";
 import { ReceiptPrinter } from "@/components/pos/receipt-printer";
 import { ClienteModal } from "@/components/cliente/cliente-modal";
 
@@ -540,6 +540,27 @@ export default function PuntoDeVentaPage() {
   // solo se ocultan los productos sin existencias.
   const filtered = useMemo(() => productos.filter((p) => p.stock > 0), [productos]);
 
+  /**
+   * Tasa personalizada que aplica a una moneda concreta: solo a la del
+   * documento (en cualquier otra moneda manda la tasa por defecto).
+   */
+  const tasaDocDe = (moneda: Moneda): number | null => {
+    const n = parseFloat(tasaCustomStr);
+    return moneda.codigo === monedaSeleccionada && Number.isFinite(n) && n > 0 ? n : null;
+  };
+
+  /**
+   * Factor de conversión de un precio entre dos monedas, con la tasa
+   * personalizada del documento cuando la moneda destino es la del documento.
+   * Se expone sin redondear: el redondeo se aplica una sola vez, sobre el monto.
+   */
+  const factorPrecio = (prodMoneda: Moneda, targetMoneda: Moneda): number => {
+    const tasaDocUsd = tasaUsdDocumento(targetMoneda, tasaDocDe(targetMoneda), monedas);
+    // Factor par a par: respeta la tasa personalizada para USD pero mantiene el
+    // par con la referencia (COP ↔ BS = 3.2) aunque COP use tasa directa a USD.
+    return tasaPar(prodMoneda, targetMoneda, monedas, { [String(targetMoneda.id)]: tasaDocUsd });
+  };
+
   // Precio de un producto en una moneda concreta. Replica exactamente la misma
   // regla que usa el selector de fuera: si hay un precio guardado para esa
   // moneda se devuelve tal cual (sin conversiones ni redondeos extra), de modo
@@ -547,34 +568,28 @@ export default function PuntoDeVentaPage() {
   const getPrecioEnMoneda = (producto: Producto, codMoneda: string): number => {
     if (!codMoneda) return parseFloat(String(producto.precio_base)) || 0;
 
+    const targetMoneda = monedas.find((m) => m.codigo === codMoneda);
+    if (!targetMoneda) return parseFloat(String(producto.precio_base)) || 0;
+
     // La tasa personalizada solo aplica a la moneda del documento; el resto de
     // monedas usa su tasa por defecto.
-    const tasaCustomNum = parseFloat(tasaCustomStr);
-    const esMonedaDoc = codMoneda === monedaSeleccionada;
-    const conTasaCustom = esMonedaDoc && Number.isFinite(tasaCustomNum) && tasaCustomNum > 0;
+    const tasaCustomNum = tasaDocDe(targetMoneda);
 
-    if (!conTasaCustom && producto.precios && producto.precios.length > 0) {
+    if (tasaCustomNum === null && producto.precios && producto.precios.length > 0) {
       const exact = producto.precios.find((p) => p.moneda_codigo === codMoneda);
       if (exact && parseFloat(String(exact.precio)) > 0) return parseFloat(String(exact.precio));
     }
 
-    const targetMoneda = monedas.find((m) => m.codigo === codMoneda);
-    if (!targetMoneda) return parseFloat(String(producto.precio_base)) || 0;
     // Moneda propia del producto (sin moneda propia = moneda base del sistema)
     const prodMoneda =
       monedas.find((m) => m.id === producto.moneda_base_id) || monedas.find((m) => m.es_base) || targetMoneda;
 
     const precioBaseNum = parseFloat(String(producto.precio_base)) || 0;
-    const tasaProdUsd = tasaUsd(prodMoneda, monedas);
-    const tasaDocUsd = tasaUsdDocumento(targetMoneda, conTasaCustom ? tasaCustomNum : null, monedas);
-    const dec = Number(targetMoneda.decimales ?? 2);
-    if (tasaProdUsd <= 0) return precioBaseNum;
-    // Factor par a par: respeta la tasa personalizada para USD pero mantiene el
-    // par con la referencia (COP ↔ BS = 3.2) aunque COP use tasa directa a USD.
-    const factor = tasaPar(prodMoneda, targetMoneda, monedas, {
-      [String(targetMoneda.id)]: tasaDocUsd,
-    });
-    return redondear(precioBaseNum * factor, dec);
+    if (tasaUsd(prodMoneda, monedas) <= 0) return precioBaseNum;
+    return redondear(
+      precioBaseNum * factorPrecio(prodMoneda, targetMoneda),
+      Number(targetMoneda.decimales ?? 2)
+    );
   };
 
   const getPrecio = (producto: Producto): number => getPrecioEnMoneda(producto, monedaSeleccionada);
@@ -589,27 +604,60 @@ export default function PuntoDeVentaPage() {
   /**
    * Precio de UNA línea del carrito, ya en la moneda del documento.
    *
-   * La presentación trae su precio en la moneda de venta del PRODUCTO (ya
-   * resuelto por su modo). Para llevarlo a la moneda del documento aplicamos el
-   * MISMO factor que usa el precio unitario, de modo que la caja nunca se
-   * desvía del producto por un redondeo distinto.
+   * Sin presentación es el precio unitario del producto. Con presentación, el
+   * precio de la caja llega YA resuelto en la moneda del producto (con su modo
+   * derivado/fijo/margén), así que se convierte ese importe directamente, una
+   * sola vez y con un solo redondeo.
+   *
+   * Antes se derivaba del cociente `precioUnitDoc / precioUnitProd ×
+   * pres.precio`: ese cociente arrastraba el redondeo del precio unitario (Bs
+   * 1.333,33 en vez de 1.333,3333) y las unidades de la caja lo multiplicaban,
+   * de modo que una caja de 12.000 COP se cobraba 3.999,99 Bs en vez de 4.000.
    */
   const getPrecioLinea = (item: CartItem, codMoneda: string = monedaSeleccionada): number => {
     const pres = item.presentacion;
     if (!pres) return getPrecioEnMoneda(item.product, codMoneda);
 
-    const precioUnitDoc = getPrecioEnMoneda(item.product, codMoneda);
-    const precioUnitProd = getPrecioEnMoneda(item.product, codMonedaProducto(item.product));
-    if (precioUnitProd <= 0) return redondear(precioUnitDoc * pres.unidades, decMoneda(codMoneda));
-    return redondear((precioUnitDoc / precioUnitProd) * pres.precio, decMoneda(codMoneda));
+    const desde = monedas.find((m) => m.codigo === codMonedaProducto(item.product));
+    const hasta = monedas.find((m) => m.codigo === codMoneda);
+    const dec = decMoneda(codMoneda);
+    // Sin alguna de las dos monedas no hay conversión posible: se usa el número.
+    if (!desde || !hasta) return redondear(pres.precio, dec);
+    return precioPresentacionEnMoneda(pres.precio, desde, hasta, monedas, {
+      [String(hasta.id)]: tasaUsdDocumento(hasta, tasaDocDe(hasta), monedas),
+    }, dec);
   };
 
   /** UNIDADES que representa esta línea (el inventario siempre es en unidades). */
   const unidadesDeLinea = (item: CartItem): number => item.qty * (item.presentacion?.unidades ?? 1);
 
+  /**
+   * Importe BRUTO de la línea (unidad de venta × cantidad) SIN redondear.
+   *
+   * El redondeo va una sola vez, sobre el importe COMPLETO de la línea. La regla
+   * anterior redondeaba primero el precio unitario y multiplicaba después por la
+   * cantidad, de modo que el error del redondeo se multiplicaba: 3 unidades a
+   * 4.000 COP daban 3 × 1.333,33 = 3.999,99 Bs en vez de 4.000, y a 20
+   * unidades el desvío ya era de 0,07 Bs.
+   */
+  const importeLineaEnMoneda = (item: CartItem, codMoneda: string): number => {
+    const desde = monedas.find((m) => m.codigo === codMonedaProducto(item.product));
+    const hasta = monedas.find((m) => m.codigo === codMoneda);
+    // Sin alguna de las dos monedas no hay conversión posible: se usa el precio
+    // unitario tal cual (mismo fallback que getPrecioLinea).
+    if (!desde || !hasta) return getPrecioLinea(item, codMoneda) * item.qty;
+    // La presentación trae su precio en la moneda del producto; sin ella manda
+    // el precio base del producto (misma fuente que getPrecioEnMoneda, cuyo
+    // precio por moneda es exactamente precio_base × factor).
+    const unitario = item.presentacion
+      ? item.presentacion.precio
+      : parseFloat(String(item.product.precio_base)) || 0;
+    return unitario * item.qty * factorPrecio(desde, hasta);
+  };
+
   /** Subtotal BRUTO de la línea (sin descontar) en la moneda dada. */
   const totalLineaEnMoneda = (item: CartItem, codMoneda: string): number =>
-    getPrecioLinea(item, codMoneda) * item.qty;
+    redondear(importeLineaEnMoneda(item, codMoneda), decMoneda(codMoneda));
 
   /** Subtotal de la línea = precio de venta × cantidad de su unidad de venta. */
   const totalLinea = (item: CartItem): number => totalLineaEnMoneda(item, monedaSeleccionada);
@@ -872,9 +920,10 @@ export default function PuntoDeVentaPage() {
   const tax = useMemo(() => {
     return cart.reduce((s, c) => {
       if (c.product.iva_incluido) return s;
-      // El IVA se calcula sobre el PRECIO DE LA LÍNEA (caja o unidad) para que
-      // coincida con lo que ve el cliente en el ticket.
-      return s + Math.round(getPrecioLinea(c) * 0.16 * c.qty * 100) / 100;
+      // El IVA se calcula sobre el IMPORTE DE LA LÍNEA (caja o unidad × cantidad,
+      // ya redondeado una sola vez) para que coincida con lo que ve el cliente en
+      // el ticket y con lo que guarda el servidor.
+      return s + Math.round(totalLinea(c) * 0.16 * 100) / 100;
     }, 0);
   }, [cart, monedaSeleccionada, monedas, tasaCustomStr]);
 
@@ -900,9 +949,10 @@ export default function PuntoDeVentaPage() {
     let sub = 0;
     let taxMoneda = 0;
     for (const c of cart) {
-      const p = getPrecioLinea(c, codMoneda);
-      sub += p * c.qty;
-      if (!c.product.iva_incluido) taxMoneda += Math.round(p * 0.16 * c.qty * 100) / 100;
+      // Importe de la línea ya redondeado UNA vez (no precio unitario × cantidad).
+      const importe = totalLineaEnMoneda(c, codMoneda);
+      sub += importe;
+      if (!c.product.iva_incluido) taxMoneda += Math.round(importe * 0.16 * 100) / 100;
     }
     // El descuento (global + líneas) vive en la moneda de la venta: se escala por
     // la misma razón que el subtotal en vez de convertirlo con otra tasa.
@@ -941,7 +991,9 @@ export default function PuntoDeVentaPage() {
       ? tasaUsdDocumento(monedaVenta, Number.isFinite(tasaCustomNum) && tasaCustomNum > 0 ? tasaCustomNum : null, monedas)
       : 1;
 
-    let restante = redondear(total);
+    // El saldo se lleva con los decimales de la MONEDA DE LA VENTA: con 2 fijos
+    // se perdía precisión en monedas de 4 decimales (el USD del sistema).
+    let restante = redondear(total, Number(monedaVenta?.decimales ?? 2));
     return lineasPago.map((l) => {
       const metodo = metodosPago.find((m) => m.id === (l.metodoId ?? metodoPagoSeleccionado)) || null;
       const monedaLinea = monedas.find((m) => m.codigo === metodo?.moneda_codigo) || null;
@@ -981,7 +1033,12 @@ export default function PuntoDeVentaPage() {
         : 1;
       const montoVenta = esMonedaVenta ? monto : redondear(monto * factor, Number(monedaVentaObj?.decimales ?? 2));
       const aplicado = Math.min(montoVenta, restante);
-      const aplicadoLinea = esMonedaVenta ? aplicado : redondear(aplicado / (factor || 1), decLinea);
+      // Lo que cubre esta línea se mide sobre el SALDO (sin redondear) levado a
+      // la moneda de la línea, no dividiendo `aplicado` —que ya viene redondeado
+      // en la moneda de la venta— porque eso reintroducía el error de centavos
+      // (4.500,55 COP → 1.500,18 Bs volvían como 4.500,54 COP).
+      const restanteLinea = esMonedaVenta ? restante : restante / (factor || 1);
+      const aplicadoLinea = Math.min(monto, redondear(restanteLinea, decLinea));
       const vuelto = redondear(Math.max(0, monto - aplicadoLinea));
       restante = redondear(restante - aplicado);
 
@@ -1184,14 +1241,19 @@ export default function PuntoDeVentaPage() {
       // viaja como snapshot para que el reporte muestre "Caja x20" aunque luego
       // se renombre o se dé de baja.
       const items = cart.map((c) => {
-        const precio = getPrecioLinea(c);
         const unidades = unidadesDeLinea(c);
+        // El precio de la unidad de venta viaja SIN redondear: el servidor
+        // multiplica cantidad × precio_unit y redondea al final, así que si el
+        // cliente lo redondeara antes el total guardado no cuadraría con el que ve
+        // el cliente (3 × 1.333,33 = 3.999,99 en vez de 4.000). El redondeo a los
+        // decimales de la moneda lo aplica el servidor al guardar la columna.
+        const precioExacto = importeLineaEnMoneda(c, monedaSeleccionada) / (c.qty || 1);
         return {
           producto_id: c.product.id,
           producto_nombre: c.product.nombre,
           cantidad: unidades, // ← SIEMPRE unidades
-          precio_unit: precio, // ← precio de la línea (caja o unidad)
-          subtotal: precio * c.qty, // ← BRUTO de la línea (sin descuento)
+          precio_unit: precioExacto, // ← precio de la línea (caja o unidad), sin redondear
+          subtotal: totalLinea(c), // ← BRUTO de la línea (sin descuento)
           descuento: descuentoDeLinea(c), // ← monto plano en la moneda de la venta
           ...(c.presentacion
             ? {
@@ -1199,7 +1261,7 @@ export default function PuntoDeVentaPage() {
                 presentacion_nombre: c.presentacion.nombre,
                 presentacion_unidades: c.presentacion.unidades,
                 cantidad_presentaciones: c.qty,
-                precio_presentacion: precio,
+                precio_presentacion: precioExacto,
               }
             : {}),
         };
