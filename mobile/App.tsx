@@ -240,6 +240,10 @@ export default function App() {
   const [clienteId, setClienteId] = useState<string | null>(null);
   const [showClientePickerModal, setShowClientePickerModal] = useState(false);
   const [clientePickerSearch, setClientePickerSearch] = useState("");
+  const [checkoutClientSearch, setCheckoutClientSearch] = useState("");
+  const [checkoutClientDropdownOpen, setCheckoutClientDropdownOpen] = useState(false);
+  const [cartClientSearch, setCartClientSearch] = useState("");
+  const [cartClientDropdownOpen, setCartClientDropdownOpen] = useState(false);
 
   // POS Checkout Modal State
   const [showCheckoutModal, setShowCheckoutModal] = useState(false);
@@ -866,6 +870,32 @@ export default function App() {
     [clientes, clienteId]
   );
 
+  const filteredCheckoutClientes = useMemo(() => {
+    const q = checkoutClientSearch.toLowerCase().trim();
+    if (!q) return clientes.slice(0, 20);
+    return clientes
+      .filter(
+        (c) =>
+          c.nombre.toLowerCase().includes(q) ||
+          (c.documento && c.documento.toLowerCase().includes(q)) ||
+          (c.telefono && c.telefono.toLowerCase().includes(q))
+      )
+      .slice(0, 30);
+  }, [clientes, checkoutClientSearch]);
+
+  const filteredCartClientes = useMemo(() => {
+    const q = cartClientSearch.toLowerCase().trim();
+    if (!q) return clientes.slice(0, 20);
+    return clientes
+      .filter(
+        (c) =>
+          c.nombre.toLowerCase().includes(q) ||
+          (c.documento && c.documento.toLowerCase().includes(q)) ||
+          (c.telefono && c.telefono.toLowerCase().includes(q))
+      )
+      .slice(0, 30);
+  }, [clientes, cartClientSearch]);
+
   // Cálculos de Pago Simple / Mixto en el Modal de Checkout
   const totalPagadoEnMonedaVenta = useMemo(() => {
     return lineasPago.reduce((acc, lp) => {
@@ -932,6 +962,8 @@ export default function App() {
     if (infoCreditoCliente) {
       setLimiteInputStr(String(infoCreditoCliente.limite || 0));
     }
+    setCheckoutClientSearch("");
+    setCheckoutClientDropdownOpen(false);
     setShowCheckoutModal(true);
   }, [
     cart.length,
@@ -2715,60 +2747,225 @@ export default function App() {
                   </View>
                 </View>
 
-                {/* Selector de Cliente (idéntico a la web + botón Nuevo Cliente) */}
+                {/* Selector Interactivo de Cliente en Carrito */}
                 <View style={styles.clienteSelectorBox}>
                   <View style={styles.clienteSelectorHeader}>
                     <Text style={styles.fieldLabelSmall}>CLIENTE</Text>
                     <TouchableOpacity
                       style={styles.newClientInlineBtn}
-                      onPress={() => openCreateClienteModal(null)}
+                      onPress={() => {
+                        setCartClientDropdownOpen(false);
+                        openCreateClienteModal(null, cartClientSearch);
+                      }}
                     >
                       <Feather name="user-plus" size={12} color={THEME.primary} />
                       <Text style={styles.newClientInlineBtnText}>+ Nuevo Cliente</Text>
                     </TouchableOpacity>
                   </View>
 
-                  <TouchableOpacity
-                    style={styles.clienteSearchTrigger}
-                    onPress={() => {
-                      setClientePickerSearch("");
-                      setShowClientePickerModal(true);
-                    }}
-                  >
-                    <Feather
-                      name={clienteSeleccionadoObj ? "user-check" : "search"}
-                      size={15}
-                      color={clienteSeleccionadoObj ? THEME.primary : THEME.mutedForeground}
-                    />
-                    <Text
-                      style={[
-                        styles.clienteSearchTriggerText,
-                        clienteSeleccionadoObj && { color: THEME.foreground, fontWeight: "700" },
-                      ]}
-                      numberOfLines={1}
-                    >
-                      {clienteSeleccionadoObj
-                        ? `${clienteSeleccionadoObj.nombre}${
-                            clienteSeleccionadoObj.documento
-                              ? ` (${clienteSeleccionadoObj.documento})`
-                              : ""
-                          }`
-                        : "Buscar cliente o Consumidor Final..."}
-                    </Text>
-                    {clienteId ? (
+                  {clienteSeleccionadoObj ? (
+                    <View style={styles.clienteSelectedCard}>
+                      <View style={styles.clienteAvatarIcon}>
+                        <Feather name="user-check" size={18} color={THEME.primary} />
+                      </View>
+                      <View style={{ flex: 1, minWidth: 0 }}>
+                        <Text style={styles.clienteSelectedName} numberOfLines={1}>
+                          {clienteSeleccionadoObj.nombre}
+                        </Text>
+                        <Text style={styles.clienteSelectedMeta} numberOfLines={1}>
+                          {clienteSeleccionadoObj.documento
+                            ? `Doc: ${clienteSeleccionadoObj.documento}`
+                            : "Sin doc"}
+                          {clienteSeleccionadoObj.telefono
+                            ? ` · Tel: ${clienteSeleccionadoObj.telefono}`
+                            : ""}
+                        </Text>
+                      </View>
                       <TouchableOpacity
-                        onPress={(e) => {
-                          e.stopPropagation();
+                        style={styles.clienteChangeBtn}
+                        onPress={() => {
                           setClienteId(null);
+                          setCartClientSearch("");
+                          setCartClientDropdownOpen(true);
                         }}
-                        hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
                       >
-                        <Feather name="x-circle" size={16} color={THEME.mutedForeground} />
+                        <Feather name="edit-2" size={12} color={THEME.mutedForeground} />
+                        <Text style={styles.clienteChangeBtnText}>Cambiar</Text>
                       </TouchableOpacity>
-                    ) : (
-                      <Feather name="chevron-down" size={16} color={THEME.mutedForeground} />
-                    )}
-                  </TouchableOpacity>
+                    </View>
+                  ) : (
+                    <View style={{ position: "relative", zIndex: 100 }}>
+                      <View
+                        style={[
+                          styles.searchBox,
+                          {
+                            height: 44,
+                            paddingHorizontal: 12,
+                            backgroundColor: THEME.inputBg,
+                            borderWidth: 1.5,
+                            borderColor: cartClientDropdownOpen ? THEME.primary : THEME.border,
+                          },
+                        ]}
+                      >
+                        <Feather
+                          name="search"
+                          size={16}
+                          color={cartClientDropdownOpen ? THEME.primary : THEME.mutedForeground}
+                        />
+                        <TextInput
+                          style={[styles.searchBoxInput, { fontSize: 13.5 }]}
+                          placeholder="Buscar cliente por nombre, doc o tel..."
+                          placeholderTextColor={THEME.mutedForeground}
+                          value={cartClientSearch}
+                          onChangeText={(t) => {
+                            setCartClientSearch(t);
+                            setCartClientDropdownOpen(true);
+                          }}
+                          onFocus={() => setCartClientDropdownOpen(true)}
+                        />
+                        {cartClientSearch.length > 0 ? (
+                          <TouchableOpacity
+                            onPress={() => setCartClientSearch("")}
+                            hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                          >
+                            <Feather name="x-circle" size={16} color={THEME.mutedForeground} />
+                          </TouchableOpacity>
+                        ) : (
+                          <TouchableOpacity
+                            onPress={() => setCartClientDropdownOpen(!cartClientDropdownOpen)}
+                          >
+                            <Feather
+                              name={cartClientDropdownOpen ? "chevron-up" : "chevron-down"}
+                              size={16}
+                              color={THEME.mutedForeground}
+                            />
+                          </TouchableOpacity>
+                        )}
+                      </View>
+
+                      {/* Dropdown de Clientes en Carrito */}
+                      {cartClientDropdownOpen && (
+                        <View style={styles.checkoutClientDropdownList}>
+                          <ScrollView
+                            style={{ maxHeight: 220 }}
+                            nestedScrollEnabled={true}
+                            keyboardShouldPersistTaps="handled"
+                          >
+                            {/* Opción rápida Consumidor Final */}
+                            <TouchableOpacity
+                              style={[
+                                styles.checkoutClientDropdownRow,
+                                !clienteId && { backgroundColor: THEME.secondary },
+                              ]}
+                              onPress={() => {
+                                setClienteId(null);
+                                setCartClientDropdownOpen(false);
+                                setCartClientSearch("");
+                              }}
+                            >
+                              <Feather name="user" size={15} color={THEME.mutedForeground} />
+                              <View style={{ flex: 1 }}>
+                                <Text
+                                  style={{
+                                    fontSize: 13,
+                                    fontWeight: "700",
+                                    color: THEME.foreground,
+                                  }}
+                                >
+                                  Consumidor Final
+                                </Text>
+                                <Text style={{ fontSize: 11, color: THEME.mutedForeground }}>
+                                  Venta rápida sin registrar cliente
+                                </Text>
+                              </View>
+                              {!clienteId && (
+                                <Feather name="check" size={16} color={THEME.primary} />
+                              )}
+                            </TouchableOpacity>
+
+                            {/* Resultados filtrados */}
+                            {filteredCartClientes.map((c) => {
+                              const tieneD =
+                                c.deuda_total && c.deuda_total.some((d) => Number(d.monto) > 0);
+                              return (
+                                <TouchableOpacity
+                                  key={c.id}
+                                  style={[
+                                    styles.checkoutClientDropdownRow,
+                                    clienteId === c.id && { backgroundColor: THEME.secondary },
+                                  ]}
+                                  onPress={() => {
+                                    setClienteId(c.id);
+                                    setCartClientDropdownOpen(false);
+                                    setCartClientSearch("");
+                                  }}
+                                >
+                                  <Feather name="user-check" size={15} color={THEME.primary} />
+                                  <View style={{ flex: 1, minWidth: 0 }}>
+                                    <Text
+                                      style={{
+                                        fontSize: 13,
+                                        fontWeight: "700",
+                                        color: THEME.foreground,
+                                      }}
+                                      numberOfLines={1}
+                                    >
+                                      {c.nombre}
+                                    </Text>
+                                    <Text
+                                      style={{ fontSize: 11, color: THEME.mutedForeground }}
+                                      numberOfLines={1}
+                                    >
+                                      {c.documento ? `Doc: ${c.documento}` : "Sin doc"}
+                                      {c.telefono ? ` · Tel: ${c.telefono}` : ""}
+                                    </Text>
+                                  </View>
+                                  {tieneD && (
+                                    <View style={styles.deudaChipMini}>
+                                      <Text style={styles.deudaChipMiniText}>Con deuda</Text>
+                                    </View>
+                                  )}
+                                  {clienteId === c.id && (
+                                    <Feather name="check" size={16} color={THEME.primary} />
+                                  )}
+                                </TouchableOpacity>
+                              );
+                            })}
+
+                            {filteredCartClientes.length === 0 &&
+                              cartClientSearch.trim().length > 0 && (
+                                <View style={{ padding: 14, alignItems: "center", gap: 8 }}>
+                                  <Text style={{ fontSize: 12.5, color: THEME.mutedForeground }}>
+                                    No se encontró "{cartClientSearch}"
+                                  </Text>
+                                  <TouchableOpacity
+                                    style={[
+                                      styles.primarySmallBtn,
+                                      { paddingHorizontal: 14, paddingVertical: 7 },
+                                    ]}
+                                    onPress={() => {
+                                      setCartClientDropdownOpen(false);
+                                      openCreateClienteModal(null, cartClientSearch);
+                                    }}
+                                  >
+                                    <Feather name="user-plus" size={13} color="#fff" />
+                                    <Text
+                                      style={{
+                                        color: "#fff",
+                                        fontWeight: "700",
+                                        fontSize: 12,
+                                      }}
+                                    >
+                                      + Crear cliente "{cartClientSearch}"
+                                    </Text>
+                                  </TouchableOpacity>
+                                </View>
+                              )}
+                          </ScrollView>
+                        </View>
+                      )}
+                    </View>
+                  )}
 
                   {/* Alerta de Deuda Registrada (idéntica a la web en ámbar/rojo) */}
                   {clienteSeleccionadoObj &&
@@ -4868,60 +5065,225 @@ export default function App() {
                   contentContainerStyle={{ gap: 12, paddingBottom: 16 }}
                   keyboardShouldPersistTaps="handled"
                 >
-                  {/* Selector de Cliente dentro del Checkout */}
+                  {/* Selector Interactivo de Cliente con Buscador Integrado */}
                   <View style={styles.clienteSelectorBox}>
                     <View style={styles.clienteSelectorHeader}>
                       <Text style={styles.fieldLabelSmall}>CLIENTE DE LA VENTA</Text>
                       <TouchableOpacity
                         style={styles.newClientInlineBtn}
-                        onPress={() => openCreateClienteModal(null)}
+                        onPress={() => {
+                          setCheckoutClientDropdownOpen(false);
+                          openCreateClienteModal(null, checkoutClientSearch);
+                        }}
                       >
                         <Feather name="user-plus" size={12} color={THEME.primary} />
                         <Text style={styles.newClientInlineBtnText}>+ Nuevo</Text>
                       </TouchableOpacity>
                     </View>
 
-                    <TouchableOpacity
-                      style={styles.clienteSearchTrigger}
-                      onPress={() => {
-                        setClientePickerSearch("");
-                        setShowClientePickerModal(true);
-                      }}
-                    >
-                      <Feather
-                        name={clienteSeleccionadoObj ? "user-check" : "search"}
-                        size={15}
-                        color={clienteSeleccionadoObj ? THEME.primary : THEME.mutedForeground}
-                      />
-                      <Text
-                        style={[
-                          styles.clienteSearchTriggerText,
-                          clienteSeleccionadoObj && { color: THEME.foreground, fontWeight: "700" },
-                        ]}
-                        numberOfLines={1}
-                      >
-                        {clienteSeleccionadoObj
-                          ? `${clienteSeleccionadoObj.nombre}${
-                              clienteSeleccionadoObj.documento
-                                ? ` (${clienteSeleccionadoObj.documento})`
-                                : ""
-                            }`
-                          : "Buscar cliente o Consumidor Final..."}
-                      </Text>
-                      {clienteId ? (
+                    {clienteSeleccionadoObj ? (
+                      <View style={styles.clienteSelectedCard}>
+                        <View style={styles.clienteAvatarIcon}>
+                          <Feather name="user-check" size={18} color={THEME.primary} />
+                        </View>
+                        <View style={{ flex: 1, minWidth: 0 }}>
+                          <Text style={styles.clienteSelectedName} numberOfLines={1}>
+                            {clienteSeleccionadoObj.nombre}
+                          </Text>
+                          <Text style={styles.clienteSelectedMeta} numberOfLines={1}>
+                            {clienteSeleccionadoObj.documento
+                              ? `Doc: ${clienteSeleccionadoObj.documento}`
+                              : "Sin doc"}
+                            {clienteSeleccionadoObj.telefono
+                              ? ` · Tel: ${clienteSeleccionadoObj.telefono}`
+                              : ""}
+                          </Text>
+                        </View>
                         <TouchableOpacity
-                          onPress={(e) => {
-                            e.stopPropagation();
+                          style={styles.clienteChangeBtn}
+                          onPress={() => {
                             setClienteId(null);
+                            setCheckoutClientSearch("");
+                            setCheckoutClientDropdownOpen(true);
                           }}
-                          hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
                         >
-                          <Feather name="x-circle" size={16} color={THEME.mutedForeground} />
+                          <Feather name="edit-2" size={12} color={THEME.mutedForeground} />
+                          <Text style={styles.clienteChangeBtnText}>Cambiar</Text>
                         </TouchableOpacity>
-                      ) : (
-                        <Feather name="chevron-down" size={16} color={THEME.mutedForeground} />
-                      )}
-                    </TouchableOpacity>
+                      </View>
+                    ) : (
+                      <View style={{ position: "relative", zIndex: 100 }}>
+                        <View
+                          style={[
+                            styles.searchBox,
+                            {
+                              height: 44,
+                              paddingHorizontal: 12,
+                              backgroundColor: THEME.inputBg,
+                              borderWidth: 1.5,
+                              borderColor: checkoutClientDropdownOpen ? THEME.primary : THEME.border,
+                            },
+                          ]}
+                        >
+                          <Feather
+                            name="search"
+                            size={16}
+                            color={checkoutClientDropdownOpen ? THEME.primary : THEME.mutedForeground}
+                          />
+                          <TextInput
+                            style={[styles.searchBoxInput, { fontSize: 13.5 }]}
+                            placeholder="Buscar cliente por nombre, doc o tel..."
+                            placeholderTextColor={THEME.mutedForeground}
+                            value={checkoutClientSearch}
+                            onChangeText={(t) => {
+                              setCheckoutClientSearch(t);
+                              setCheckoutClientDropdownOpen(true);
+                            }}
+                            onFocus={() => setCheckoutClientDropdownOpen(true)}
+                          />
+                          {checkoutClientSearch.length > 0 ? (
+                            <TouchableOpacity
+                              onPress={() => setCheckoutClientSearch("")}
+                              hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                            >
+                              <Feather name="x-circle" size={16} color={THEME.mutedForeground} />
+                            </TouchableOpacity>
+                          ) : (
+                            <TouchableOpacity
+                              onPress={() => setCheckoutClientDropdownOpen(!checkoutClientDropdownOpen)}
+                            >
+                              <Feather
+                                name={checkoutClientDropdownOpen ? "chevron-up" : "chevron-down"}
+                                size={16}
+                                color={THEME.mutedForeground}
+                              />
+                            </TouchableOpacity>
+                          )}
+                        </View>
+
+                        {/* Dropdown de Clientes en Vivo */}
+                        {checkoutClientDropdownOpen && (
+                          <View style={styles.checkoutClientDropdownList}>
+                            <ScrollView
+                              style={{ maxHeight: 220 }}
+                              nestedScrollEnabled={true}
+                              keyboardShouldPersistTaps="handled"
+                            >
+                              {/* Opción rápida Consumidor Final */}
+                              <TouchableOpacity
+                                style={[
+                                  styles.checkoutClientDropdownRow,
+                                  !clienteId && { backgroundColor: THEME.secondary },
+                                ]}
+                                onPress={() => {
+                                  setClienteId(null);
+                                  setCheckoutClientDropdownOpen(false);
+                                  setCheckoutClientSearch("");
+                                }}
+                              >
+                                <Feather name="user" size={15} color={THEME.mutedForeground} />
+                                <View style={{ flex: 1 }}>
+                                  <Text
+                                    style={{
+                                      fontSize: 13,
+                                      fontWeight: "700",
+                                      color: THEME.foreground,
+                                    }}
+                                  >
+                                    Consumidor Final
+                                  </Text>
+                                  <Text style={{ fontSize: 11, color: THEME.mutedForeground }}>
+                                    Venta rápida sin registrar cliente
+                                  </Text>
+                                </View>
+                                {!clienteId && (
+                                  <Feather name="check" size={16} color={THEME.primary} />
+                                )}
+                              </TouchableOpacity>
+
+                              {/* Clientes filtrados */}
+                              {filteredCheckoutClientes.map((c) => {
+                                const tieneD =
+                                  c.deuda_total && c.deuda_total.some((d) => Number(d.monto) > 0);
+                                return (
+                                  <TouchableOpacity
+                                    key={c.id}
+                                    style={[
+                                      styles.checkoutClientDropdownRow,
+                                      clienteId === c.id && { backgroundColor: THEME.secondary },
+                                    ]}
+                                    onPress={() => {
+                                      setClienteId(c.id);
+                                      setCheckoutClientDropdownOpen(false);
+                                      setCheckoutClientSearch("");
+                                    }}
+                                  >
+                                    <Feather name="user-check" size={15} color={THEME.primary} />
+                                    <View style={{ flex: 1, minWidth: 0 }}>
+                                      <Text
+                                        style={{
+                                          fontSize: 13,
+                                          fontWeight: "700",
+                                          color: THEME.foreground,
+                                        }}
+                                        numberOfLines={1}
+                                      >
+                                        {c.nombre}
+                                      </Text>
+                                      <Text
+                                        style={{ fontSize: 11, color: THEME.mutedForeground }}
+                                        numberOfLines={1}
+                                      >
+                                        {c.documento ? `Doc: ${c.documento}` : "Sin doc"}
+                                        {c.telefono ? ` · Tel: ${c.telefono}` : ""}
+                                      </Text>
+                                    </View>
+                                    {tieneD && (
+                                      <View style={styles.deudaChipMini}>
+                                        <Text style={styles.deudaChipMiniText}>Con deuda</Text>
+                                      </View>
+                                    )}
+                                    {clienteId === c.id && (
+                                      <Feather name="check" size={16} color={THEME.primary} />
+                                    )}
+                                  </TouchableOpacity>
+                                );
+                              })}
+
+                              {filteredCheckoutClientes.length === 0 &&
+                                checkoutClientSearch.trim().length > 0 && (
+                                  <View style={{ padding: 14, alignItems: "center", gap: 8 }}>
+                                    <Text style={{ fontSize: 12.5, color: THEME.mutedForeground }}>
+                                      No se encontró "{checkoutClientSearch}"
+                                    </Text>
+                                    <TouchableOpacity
+                                      style={[
+                                        styles.primarySmallBtn,
+                                        { paddingHorizontal: 14, paddingVertical: 7 },
+                                      ]}
+                                      onPress={() => {
+                                        setCheckoutClientDropdownOpen(false);
+                                        openCreateClienteModal(null, checkoutClientSearch);
+                                      }}
+                                    >
+                                      <Feather name="user-plus" size={13} color="#fff" />
+                                      <Text
+                                        style={{
+                                          color: "#fff",
+                                          fontWeight: "700",
+                                          fontSize: 12,
+                                        }}
+                                      >
+                                        + Crear cliente "{checkoutClientSearch}"
+                                      </Text>
+                                    </TouchableOpacity>
+                                  </View>
+                                )}
+                            </ScrollView>
+                          </View>
+                        )}
+                      </View>
+                    )}
 
                     {/* Alerta de Deuda Pendiente del Cliente si tiene */}
                     {clienteSeleccionadoObj &&
@@ -7443,6 +7805,88 @@ const styles = StyleSheet.create({
     fontSize: 13,
     fontWeight: "600",
     color: THEME.foreground,
+  },
+  clienteSelectedCard: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+    backgroundColor: THEME.secondary,
+    borderWidth: 1.5,
+    borderColor: THEME.primary,
+    borderRadius: 8,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+  },
+  clienteAvatarIcon: {
+    width: 34,
+    height: 34,
+    borderRadius: 17,
+    backgroundColor: THEME.card,
+    alignItems: "center",
+    justifyContent: "center",
+    borderWidth: 1,
+    borderColor: THEME.primary,
+  },
+  clienteSelectedName: {
+    fontSize: 13.5,
+    fontWeight: "800",
+    color: THEME.foreground,
+  },
+  clienteSelectedMeta: {
+    fontSize: 11.5,
+    color: THEME.mutedForeground,
+    marginTop: 1,
+  },
+  clienteChangeBtn: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 4,
+    backgroundColor: THEME.card,
+    borderWidth: 1,
+    borderColor: THEME.border,
+    borderRadius: 6,
+    paddingHorizontal: 8,
+    paddingVertical: 5,
+  },
+  clienteChangeBtnText: {
+    fontSize: 11,
+    fontWeight: "700",
+    color: THEME.mutedForeground,
+  },
+  checkoutClientDropdownList: {
+    marginTop: 4,
+    backgroundColor: THEME.card,
+    borderWidth: 1.5,
+    borderColor: THEME.primary,
+    borderRadius: 8,
+    overflow: "hidden",
+    shadowColor: "#000",
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.15,
+    shadowRadius: 8,
+    elevation: 6,
+  },
+  checkoutClientDropdownRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    borderBottomWidth: 1,
+    borderBottomColor: THEME.border,
+  },
+  deudaChipMini: {
+    backgroundColor: THEME.dangerSoft,
+    borderWidth: 1,
+    borderColor: THEME.dangerBorder,
+    borderRadius: 4,
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+  },
+  deudaChipMiniText: {
+    fontSize: 10,
+    fontWeight: "700",
+    color: THEME.dangerStrong,
   },
   deudaAlertBox: {
     marginTop: 8,

@@ -284,9 +284,13 @@ export default function PuntoDeVentaPage() {
   const fetchClientes = async () => {
     try {
       const res = await fetch("/api/clientes?limit=500&activos=true");
+      if (res.status === 401) {
+        window.location.href = "/login";
+        return;
+      }
       if (res.ok) {
         const data = await res.json();
-        setClientes(data.data || []);
+        setClientes(Array.isArray(data?.data) ? data.data : []);
       }
     } catch (error) {
       console.error("Error fetching clientes:", error);
@@ -304,6 +308,10 @@ export default function PuntoDeVentaPage() {
 
       try {
         const res = await fetch(`/api/productos?${params.toString()}`);
+        if (res.status === 401) {
+          window.location.href = "/login";
+          return null;
+        }
         if (!res.ok) return null;
         const data = await res.json();
         const lista: Producto[] = data.productos || [];
@@ -336,15 +344,22 @@ export default function PuntoDeVentaPage() {
           fetch("/api/cajas"),
         ]);
 
+        if (metodosRes.status === 401 || cajasRes.status === 401) {
+          window.location.href = "/login";
+          return;
+        }
+
         await fetchClientes();
         const prodData = await cargarProductos(1);
 
-        const metodosData = await metodosRes.json();
-        const activeMetodos = (metodosData || []).filter((m: MetodoPago) => m.activo !== false && m.caja_id);
+        const metodosData = await metodosRes.json().catch(() => []);
+        const activeMetodos = (Array.isArray(metodosData) ? metodosData : []).filter(
+          (m: MetodoPago) => m.activo !== false && m.caja_id
+        );
         setMetodosPago(activeMetodos);
 
-        const cajasData = await cajasRes.json();
-        setCajas(cajasData);
+        const cajasData = await cajasRes.json().catch(() => []);
+        setCajas(Array.isArray(cajasData) ? cajasData : []);
 
         if (activeMetodos.length > 0) {
           const defaultMetodo = activeMetodos[0];

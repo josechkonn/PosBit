@@ -210,6 +210,10 @@ export default function ProductosPage() {
         params.append("basurero", "true");
       }
       const res = await fetch(`/api/productos?${params.toString()}`);
+      if (res.status === 401) {
+        window.location.href = "/login";
+        return;
+      }
       if (res.ok) {
         const data = await res.json();
         setProductos(data.productos || []);
@@ -218,6 +222,9 @@ export default function ProductosPage() {
         if (typeof data.basureroCount === "number") {
           setBasureroCount(data.basureroCount);
         }
+      } else {
+        const err = await res.json().catch(() => ({}));
+        toast(err.error || "Error al obtener productos", "error");
       }
     } catch (error) {
       console.error("Error al obtener productos:", error);

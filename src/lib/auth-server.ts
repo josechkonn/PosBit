@@ -206,9 +206,25 @@ export async function getSessionOrBearer(): Promise<Session | null> {
   return null;
 }
 
+export class AuthError extends Error {
+  status: number;
+  constructor(message = "No autorizado", status = 401) {
+    super(message);
+    this.name = "AuthError";
+    this.status = status;
+  }
+}
+
 export async function requireSession(): Promise<Session> {
   const session = await getSessionOrBearer();
-  if (!session) redirect("/login");
+  if (!session) {
+    const reqHeaders = await headers();
+    const accept = reqHeaders.get("accept") || "";
+    if (accept.includes("text/html")) {
+      redirect("/login");
+    }
+    throw new AuthError("No autorizado", 401);
+  }
   return session;
 }
 
@@ -216,6 +232,13 @@ export async function requireRole(roles: string | string[]): Promise<Session> {
   const session = await requireSession();
   const userRole = (session.user as { role?: string }).role;
   const requiredRoles = Array.isArray(roles) ? roles : [roles];
-  if (!requiredRoles.includes(userRole ?? "")) redirect("/dashboard");
+  if (!requiredRoles.includes(userRole ?? "")) {
+    const reqHeaders = await headers();
+    const accept = reqHeaders.get("accept") || "";
+    if (accept.includes("text/html")) {
+      redirect("/dashboard");
+    }
+    throw new AuthError("Acceso prohibido", 403);
+  }
   return session;
 }

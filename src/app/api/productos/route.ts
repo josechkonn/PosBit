@@ -346,6 +346,9 @@ export async function GET(request: Request) {
       facetas,
     });
   } catch (error: unknown) {
+    if ((error as any)?.status === 401 || (error as any)?.name === "AuthError") {
+      return NextResponse.json({ error: "No autorizado" }, { status: 401 });
+    }
     console.error("Error al obtener productos:", error);
     const err = error as { message?: string };
     return NextResponse.json({ error: err.message || "Error al obtener productos" }, { status: 500 });
