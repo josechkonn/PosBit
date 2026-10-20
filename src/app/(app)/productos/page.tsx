@@ -653,23 +653,77 @@ export default function ProductosPage() {
 
       <div className="overflow-x-auto">
         <Table
-          headers={headers}
+          headers={tableHeaders}
           sortKey={sortKey}
           sortOrder={sortOrder}
           onSort={handleSort}
         >
           {loading ? (
             <Tr>
-              <Td colSpan={headers.length} className="text-center py-8 text-muted-foreground">
+              <Td colSpan={tableHeaders.length} className="text-center py-8 text-muted-foreground">
                 Cargando...
               </Td>
             </Tr>
           ) : filteredProductos.length === 0 ? (
             <Tr>
-              <Td colSpan={headers.length} className="text-center py-8 text-muted-foreground">
-                {search || activeFiltersCount > 0 ? "No se encontraron resultados para el filtro" : "No hay productos registrados"}
+              <Td colSpan={tableHeaders.length} className="text-center py-8 text-muted-foreground">
+                {tab === "basurero"
+                  ? "El basurero está vacío. No hay productos archivados."
+                  : search || activeFiltersCount > 0
+                  ? "No se encontraron resultados para el filtro"
+                  : "No hay productos registrados"}
               </Td>
             </Tr>
+          ) : tab === "basurero" ? (
+            filteredProductos.map((p) => (
+              <Tr key={p.id}>
+                <Td>
+                  {p.imagen ? (
+                    <img
+                      src={p.imagen}
+                      alt={p.nombre}
+                      className="h-10 w-10 rounded-md border border-border object-cover opacity-75"
+                    />
+                  ) : (
+                    <div className="flex h-10 w-10 items-center justify-center rounded-md border border-border bg-muted text-xs text-muted-foreground">
+                      —
+                    </div>
+                  )}
+                </Td>
+                <Td mono>{p.codigo}</Td>
+                <Td>
+                  <span className="font-medium text-foreground">{p.nombre}</span>
+                </Td>
+                <Td mono>{p.stock}</Td>
+                <Td>{p.categoria_nombre || "—"}</Td>
+                <Td>{p.marca_nombre || "—"}</Td>
+                <Td>{p.proveedor_nombre || "—"}</Td>
+                <Td className="text-xs text-muted-foreground">
+                  {p.eliminado_en
+                    ? new Date(p.eliminado_en).toLocaleString("es-VE", {
+                        dateStyle: "short",
+                        timeStyle: "short",
+                      })
+                    : "—"}
+                </Td>
+                <Td>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    disabled={restoringId === p.id}
+                    onClick={() => handleRestaurar(p)}
+                    className="h-8 gap-1.5 text-xs text-primary hover:text-primary-foreground hover:bg-primary"
+                  >
+                    {restoringId === p.id ? (
+                      <Loader2 size={13} className="animate-spin" />
+                    ) : (
+                      <RotateCcw size={13} />
+                    )}
+                    Restaurar
+                  </Button>
+                </Td>
+              </Tr>
+            ))
           ) : (
             filteredProductos.map((p) => {
               const precios = p.precios?.filter((pr) => pr.moneda_id !== null) || [];
@@ -784,7 +838,7 @@ export default function ProductosPage() {
         totalPages={pagination.totalPages}
         totalItems={pagination.total}
         pageSize={pagination.limit}
-        noun="productos"
+        noun={tab === "basurero" ? "productos archivados" : "productos"}
         onPageChange={setCurrentPage}
       />
 
