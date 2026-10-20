@@ -1249,6 +1249,11 @@ export default function App() {
       if (saved?.id && route === "pos") {
         setClienteId(String(saved.id));
       }
+      if (perfilClienteId) {
+        fetchClientePerfilCloud(perfilClienteId).then((res) => {
+          if (res) setPerfilCloudData(res);
+        });
+      }
       setClienteModalOpen(false);
       showToast(editingCliente ? "Cliente actualizado" : "Cliente creado", "success");
     } catch (e: any) {
@@ -1392,10 +1397,47 @@ export default function App() {
     }
   }, []);
 
-  const perfilClienteObj = useMemo(
-    () => (perfilClienteId ? clientes.find((c) => String(c.id) === String(perfilClienteId)) || null : null),
-    [clientes, perfilClienteId]
-  );
+  const perfilClienteObj = useMemo(() => {
+    if (!perfilClienteId) return null;
+    const local = clientes.find((c) => String(c.id) === String(perfilClienteId));
+    if (local) return local;
+    if (perfilCloudData?.detalle?.cliente) {
+      const cl = perfilCloudData.detalle.cliente;
+      return {
+        id: String(cl.id),
+        nombre: String(cl.nombre),
+        tipo: String(cl.tipo || "Persona Natural"),
+        documento: cl.documento || null,
+        email: cl.email || null,
+        telefono: cl.telefono || null,
+        ciudad: cl.ciudad || null,
+        direccion: cl.direccion || null,
+        recibe_credito: cl.recibe_credito ? 1 : 0,
+        limite_credito: Number(cl.limite_credito) || 0,
+        activo: cl.activo ? 1 : 0,
+        limites_credito: Array.isArray(cl.monedas)
+          ? cl.monedas.map((m: any) => ({
+              moneda_id: String(m.moneda_id),
+              codigo: String(m.codigo),
+              simbolo: String(m.simbolo || "$"),
+              es_base: Boolean(m.es_base),
+              limite: Number(m.limite) || 0,
+            }))
+          : [],
+        deuda_total: Array.isArray(cl.monedas)
+          ? cl.monedas
+              .filter((m: any) => Number(m.deuda) > 0.005)
+              .map((m: any) => ({
+                codigo: String(m.codigo),
+                simbolo: String(m.simbolo || "$"),
+                monto: Number(m.deuda) || 0,
+              }))
+          : [],
+        ventas_count: Number(cl.ventas_count) || 0,
+      } as LocalCliente;
+    }
+    return null;
+  }, [clientes, perfilClienteId, perfilCloudData]);
 
   // Monedas del perfil con límite y deuda en cada moneda activa (igual que en /clientes/[id])
   const perfilMonedas = useMemo<PerfilMoneda[]>(() => {
@@ -1685,16 +1727,17 @@ export default function App() {
   // Facturas pendientes del cliente ordenadas desde la más antigua (FIFO, igual que el backend)
   const pagoDeudaPendientesFifo = useMemo(() => {
     if (!pagoDeudaCliente) return [];
-    const list = creditosData.creditos.filter(
+    const fuente = creditosData.creditos.length > 0 ? creditosData.creditos : perfilCreditos;
+    const list = fuente.filter(
       (cr) =>
         String(cr.cliente_id) === String(pagoDeudaCliente.id) &&
         cr.estado !== "Pagado" &&
-        cr.saldo > 0.009
+        Number(cr.saldo) > 0.009
     );
     return [...list].sort((a, b) =>
       a.fecha === b.fecha ? String(b.id).localeCompare(String(a.id)) : a.fecha < b.fecha ? -1 : 1
     );
-  }, [pagoDeudaCliente, creditosData.creditos]);
+  }, [pagoDeudaCliente, creditosData.creditos, perfilCreditos]);
 
   const pagoDeudaMonedaObj = useMemo(
     () => monedas.find((m) => String(m.id) === String(pdMonedaId)) || baseMonedaSistema,
@@ -1798,7 +1841,7 @@ export default function App() {
         .filter((l) => l.monto > 0.0005)
         .map((l) => ({
           credito_id: l.credito.id,
-          moneda_id: l.credito.moneda_id,
+          moneda_id: l.credito.moneda_id || pagoDeudaMonedaObj.id,
           monto_aplicado: l.monto,
         }));
 
@@ -1980,7 +2023,10 @@ export default function App() {
   const routeTitle: Record<AppRoute, string> = {
     dashboard: "Panel de control",
     pos: "Punto de Venta",
-    clientes: "Clientes",
+    clientes:
+      perfilClienteId && perfilClienteObj
+        ? `Perfil: ${perfilClienteObj.nombre}`
+        : "Clientes",
     creditos: "Créditos / Deudores",
     ventas: "Historial de Ventas",
     productos: "Productos",
@@ -3505,6 +3551,26 @@ export default function App() {
                 </View>
               )}
             </ScrollView>
+          ) : perfilClienteId ? (
+            <View style={[styles.emptyBox, { marginTop: 40 }]}>
+              {perfilLoadingCloud ? (
+                <>
+                  <ActivityIndicator size="large" color={THEME.primary} />
+                  <Text style={[styles.emptyBoxTitle, { marginTop: 12 }]}>Cargando perfil...</Text>
+                </>
+              ) : (
+                <>
+                  <Feather name="alert-circle" size={32} color={THEME.danger} />
+                  <Text style={styles.emptyBoxTitle}>Cliente no encontrado</Text>
+                  <TouchableOpacity
+                    style={[styles.primarySmallBtn, { marginTop: 12 }]}
+                    onPress={() => setPerfilClienteId(null)}
+                  >
+                    <Text style={styles.primarySmallBtnText}>Volver a clientes</Text>
+                  </TouchableOpacity>
+                </>
+              )}
+            </View>
           ) : (
             /* ── DIRECTORIO DE CLIENTES ── */
             <>
@@ -4423,7 +4489,13 @@ export default function App() {
           </Text>
         </TouchableOpacity>
 
-        <TouchableOpacity style={styles.bottomNavItem} onPress={() => setRoute("clientes")}>
+        <TouchableOpacity
+          style={styles.bottomNavItem}
+          onPress={() => {
+            setPerfilClienteId(null);
+            setRoute("clientes");
+          }}
+        >
           <Feather
             name="users"
             size={18}
@@ -4544,6 +4616,7 @@ export default function App() {
                         key={it.id}
                         style={[styles.sidebarItem, active && styles.sidebarItemActive]}
                         onPress={() => {
+                          if (it.id === "clientes") setPerfilClienteId(null);
                           setRoute(it.id);
                           setDrawerOpen(false);
                         }}
