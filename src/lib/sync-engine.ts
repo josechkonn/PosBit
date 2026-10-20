@@ -97,7 +97,16 @@ export const MOBILE_SYNC_TABLES = [
   "monedas",
   "cajas",
   "metodos_pago",
+  "categorias",
+  "marcas",
+  "clientes",
+  "cliente_limites_credito",
   "productos",
+  "producto_presentaciones",
+  "ventas",
+  "venta_items",
+  "creditos",
+  "abonos",
 ] as const;
 
 export type SyncTableName = (typeof SYNC_TABLES_ORDER)[number];

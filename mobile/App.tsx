@@ -1,654 +1,5158 @@
-import React, { useState, useEffect, useCallback, useRef } from "react";
+import React, { useEffect, useState, useMemo, useCallback, useRef } from "react";
 import {
-  SafeAreaView,
-  View,
+  StyleSheet,
   Text,
+  View,
   TextInput,
   TouchableOpacity,
   FlatList,
-  StyleSheet,
+  ScrollView,
   ActivityIndicator,
-  Alert,
   StatusBar,
+  KeyboardAvoidingView,
+  Platform,
+  Modal,
   AppState,
+  Share,
 } from "react-native";
-import NetInfo from "@react-native-community/netinfo";
+import { Feather } from "@expo/vector-icons";
 import {
-  getLocalProductos,
+  LocalMoneda,
+  LocalCaja,
+  LocalMetodoPago,
+  LocalCategoria,
+  LocalProducto,
+  LocalPresentacion,
+  LocalCliente,
+  LocalCredito,
+  LocalAbono,
+  LocalVentaPendiente,
+  LocalVentaRemota,
   getLocalMonedas,
-  createOfflineSale,
+  getLocalCajas,
+  getLocalMetodosPago,
+  getLocalCategorias,
+  getLocalProductos,
+  getLocalClientes,
+  getLocalCreditos,
+  getLocalAbonosByCredito,
+  getLocalVentasRemotas,
   getVentasLocales,
-  type LocalProducto,
-  type LocalMoneda,
-  type LocalVentaPendiente,
+  getAbonosLocalesPendientes,
+  createOfflineSale,
+  getMeta,
 } from "./src/lib/local-db";
 import {
   getStoredSession,
+  clearStoredSession,
   loginMobile,
   syncMobileWithCloud,
-  clearStoredSession,
+  saveClienteCloud,
+  patchClienteLimiteCloud,
+  registrarAbonoMobile,
 } from "./src/lib/sync-client";
 
-type TabType = "catalogo" | "pos" | "sincronizacion" | "ajustes";
+const DEFAULT_CLOUD_URL = "https://pos-bit-pi.vercel.app";
+const AUTO_SYNC_INTERVAL_MS = 10_000;
+
+/**
+ * Paleta oficial PosBit v2.6 "Con Alma" (idéntica a src/app/globals.css)
+ */
+const THEME = {
+  background: "#eae9e7",
+  foreground: "#1c1917",
+  card: "#ffffff",
+  border: "#d6d3ce",
+  inputBg: "#f5f4f2",
+  primary: "#f97316",
+  primary600: "#ea580c",
+  primary700: "#c2410c",
+  accent: "#fff7ed",
+  secondary: "#fef3e8",
+  muted: "#e5e2de",
+  mutedForeground: "#6b6560",
+  sidebar: "#1c1917",
+  sidebarForeground: "#a8a29e",
+  sidebarAccent: "#292524",
+  sidebarBorder: "#292524",
+  success: "#10b981",
+  successStrong: "#047857",
+  successSoft: "#ecfdf5",
+  successBorder: "#a7f3d0",
+  warning: "#f59e0b",
+  warningStrong: "#b45309",
+  warningSoft: "#fffbeb",
+  warningBorder: "#fde68a",
+  danger: "#ef4444",
+  dangerStrong: "#b91c1c",
+  dangerSoft: "#fef2f2",
+  dangerBorder: "#fecaca",
+  info: "#3b82f6",
+  infoStrong: "#1d4ed8",
+  infoSoft: "#eff6ff",
+  infoBorder: "#bfdbfe",
+  rose: "#f43f5e",
+  sky: "#0ea5e9",
+};
+
+type AppRoute = "dashboard" | "pos" | "clientes" | "creditos" | "ventas" | "productos" | "config";
 
 interface CartItem {
-  producto: LocalProducto;
-  cantidad: number;
+  product: LocalProducto;
+  qty: number;
+  presentacion: LocalPresentacion | null;
+  descuentoStr?: string;
+}
+
+interface HeldCart {
+  id: number;
+  items: CartItem[];
+  clienteId: number | null;
+  hora: string;
+}
+
+interface LineaPago {
+  key: number;
+  metodoId: string;
+  montoStr: string;
+}
+
+interface CobroExtra {
+  key: number;
+  concepto: string;
+  montoStr: string;
+  monedaCodigo: string;
+}
+
+const PRESETS_COBRO_EXTRA = ["Delivery", "Envío", "Bolsa", "Propina", "Servicio"];
+
+function claveLinea(productoId: number, presentacionId?: string | null): string {
+  return `${productoId}::${presentacionId ?? "unit"}`;
+}
+
+function claveDe(item: CartItem): string {
+  return claveLinea(item.product.id, item.presentacion?.id);
+}
+
+function unidadesDeLinea(item: CartItem): number {
+  return item.qty * (item.presentacion?.unidades ?? 1);
+}
+
+function maxQtyDeLinea(item: CartItem): number {
+  const factor = item.presentacion?.unidades ?? 1;
+  return Math.max(0, Math.floor(item.product.stock / factor));
+}
+
+function userInitials(name?: string | null): string {
+  if (!name) return "PB";
+  const parts = name.trim().split(/\s+/);
+  if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase();
+  return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase();
+}
+
+function getMetodoEmoji(tipo?: string, nombre?: string): string {
+  const t = `${tipo || ""} ${nombre || ""}`.toLowerCase();
+  if (t.includes("efectivo") || t.includes("cash")) return "💵";
+  if (t.includes("punto") || t.includes("tarjeta") || t.includes("card")) return "💳";
+  if (t.includes("pago móvil") || t.includes("pago movil") || t.includes("movil")) return "📱";
+  if (t.includes("zelle") || t.includes("binance") || t.includes("zinli")) return "⚡";
+  if (t.includes("transferencia") || t.includes("banco") || t.includes("banesco")) return "🏦";
+  return "💰";
 }
 
 export default function App() {
-  const [initializing, setInitializing] = useState(true);
-  const [user, setUser] = useState<{ id: string; name: string; email: string; role: string } | null>(
-    null
-  );
-  const [serverUrl, setServerUrl] = useState("https://pos-bit-pi.vercel.app");
-  const [email, setEmail] = useState("admin@admin.com");
-  const [password, setPassword] = useState("123123123");
-  const [authLoading, setAuthLoading] = useState(false);
+  const [booting, setBooting] = useState(true);
+  const [session, setSession] = useState<{
+    serverUrl: string;
+    token: string;
+    user: { id: string; name: string; email: string; role: string };
+  } | null>(null);
 
-  const [activeTab, setActiveTab] = useState<TabType>("catalogo");
-  const [isOnline, setIsOnline] = useState(true);
-  const [syncing, setSyncing] = useState(false);
+  // Login Form
+  const [serverUrlInput, setServerUrlInput] = useState(DEFAULT_CLOUD_URL);
+  const [showAdvancedServer, setShowAdvancedServer] = useState(false);
+  const [emailInput, setEmailInput] = useState("");
+  const [passwordInput, setPasswordInput] = useState("");
+  const [loginLoading, setLoginLoading] = useState(false);
+  const [loginError, setLoginError] = useState<string | null>(null);
 
-  const [productos, setProductos] = useState<LocalProducto[]>([]);
+  // Navigation & Drawer
+  const [route, setRoute] = useState<AppRoute>("pos");
+  const [drawerOpen, setDrawerOpen] = useState(false);
+  const [toastMsg, setToastMsg] = useState<{ text: string; type: "success" | "error" | "info" } | null>(null);
+
+  // Catalog & Data State
   const [monedas, setMonedas] = useState<LocalMoneda[]>([]);
+  const [cajas, setCajas] = useState<LocalCaja[]>([]);
+  const [metodosPago, setMetodosPago] = useState<LocalMetodoPago[]>([]);
+  const [categorias, setCategorias] = useState<LocalCategoria[]>([]);
+  const [productos, setProductos] = useState<LocalProducto[]>([]);
+  const [clientes, setClientes] = useState<LocalCliente[]>([]);
+  const [creditosData, setCreditosData] = useState<{
+    creditos: LocalCredito[];
+    por_cobrar: Array<{ codigo: string; simbolo: string; monto: number }>;
+    pendientes: number;
+    pagados: number;
+  }>({ creditos: [], por_cobrar: [], pendientes: 0, pagados: 0 });
   const [ventasLocales, setVentasLocales] = useState<LocalVentaPendiente[]>([]);
-  const [search, setSearch] = useState("");
+  const [ventasRemotas, setVentasRemotas] = useState<LocalVentaRemota[]>([]);
+  const [abonosPendCount, setAbonosPendCount] = useState(0);
 
+  // Sync Status
+  const [syncing, setSyncing] = useState(false);
+  const [lastSyncIso, setLastSyncIso] = useState<string | null>(null);
+  const [syncOnline, setSyncOnline] = useState(true);
+  const syncInFlightRef = useRef(false);
+
+  // POS State
+  const [posSubView, setPosSubView] = useState<"catalogo" | "carrito">("catalogo");
+  const [posSearch, setPosSearch] = useState("");
+  const [posCategoriaId, setPosCategoriaId] = useState<number | null>(null);
+  const [monedaSeleccionada, setMonedaSeleccionada] = useState<string>("USD");
+  const [metodoPagoSeleccionado, setMetodoPagoSeleccionado] = useState<string>("");
+  const [cajaSeleccionada, setCajaSeleccionada] = useState<string>("");
   const [cart, setCart] = useState<CartItem[]>([]);
-  const [clienteNombre, setClienteNombre] = useState("Consumidor Final");
-  const syncingRef = useRef(false);
-  const searchRef = useRef("");
-  searchRef.current = search;
+  const [heldCarts, setHeldCarts] = useState<HeldCart[]>([]);
+  const [showHeldModal, setShowHeldModal] = useState(false);
+  const [clienteId, setClienteId] = useState<number | null>(null);
+  const [showClientePickerModal, setShowClientePickerModal] = useState(false);
+  const [clientePickerSearch, setClientePickerSearch] = useState("");
 
-  const loadLocalData = useCallback(async (searchQuery = "") => {
-    const [prods, mons, vtas] = await Promise.all([
-      getLocalProductos(searchQuery),
-      getLocalMonedas(),
-      getVentasLocales(),
-    ]);
-    setProductos(prods);
-    setMonedas(mons);
-    setVentasLocales(vtas);
+  // POS Checkout Modal State
+  const [showCheckoutModal, setShowCheckoutModal] = useState(false);
+  const [modoMixto, setModoMixto] = useState(false);
+  const [lineasPago, setLineasPago] = useState<LineaPago[]>([]);
+  const [cobrosExtra, setCobrosExtra] = useState<CobroExtra[]>([]);
+  const [showCobrosExtra, setShowCobrosExtra] = useState(false);
+  const [descuentoGlobalStr, setDescuentoGlobalStr] = useState("");
+  const [observacionesVenta, setObservacionesVenta] = useState("");
+  const [submittingSale, setSubmittingSale] = useState(false);
+  const [grantingCredit, setGrantingCredit] = useState(false);
+  const [limiteInputStr, setLimiteInputStr] = useState("");
+  const [receiptModal, setReceiptModal] = useState<any | null>(null);
+
+  // Clientes Module State
+  const [clientesSearch, setClientesSearch] = useState("");
+  const [clienteModalOpen, setClienteModalOpen] = useState(false);
+  const [editingCliente, setEditingCliente] = useState<LocalCliente | null>(null);
+  const [clFormNombre, setClFormNombre] = useState("");
+  const [clFormTipo, setClFormTipo] = useState<"Persona Natural" | "Empresa">("Persona Natural");
+  const [clFormDoc, setClFormDoc] = useState("");
+  const [clFormTel, setClFormTel] = useState("");
+  const [clFormEmail, setClFormEmail] = useState("");
+  const [clFormCiudad, setClFormCiudad] = useState("");
+  const [clFormDir, setClFormDir] = useState("");
+  const [clFormRecibeCredito, setClFormRecibeCredito] = useState(false);
+  const [clFormLimites, setClFormLimites] = useState<Record<string, string>>({});
+  const [savingCliente, setSavingCliente] = useState(false);
+
+  // Créditos / Deudores Module State
+  const [creditosEstadoFilter, setCreditosEstadoFilter] = useState<"Todos" | "Pendiente" | "Parcial" | "Pagado">("Todos");
+  const [creditosSearch, setCreditosSearch] = useState("");
+  const [abonoModalCredito, setAbonoModalCredito] = useState<LocalCredito | null>(null);
+  const [abonoModoMixto, setAbonoModoMixto] = useState(false);
+  const [abonoMontoStr, setAbonoMontoStr] = useState("");
+  const [abonoMetodoId, setAbonoMetodoId] = useState("");
+  const [abonoLineas, setAbonoLineas] = useState<LineaPago[]>([]);
+  const [abonoObs, setAbonoObs] = useState("");
+  const [savingAbono, setSavingAbono] = useState(false);
+  const [historialCredito, setHistorialCredito] = useState<LocalCredito | null>(null);
+  const [historialAbonos, setHistorialAbonos] = useState<LocalAbono[]>([]);
+
+  // Productos & Ventas Search
+  const [productosSearch, setProductosSearch] = useState("");
+  const [ventasSearch, setVentasSearch] = useState("");
+
+  const showToast = useCallback((text: string, type: "success" | "error" | "info" = "success") => {
+    setToastMsg({ text, type });
+    setTimeout(() => {
+      setToastMsg((prev) => (prev?.text === text ? null : prev));
+    }, 3200);
   }, []);
 
-  const handleSync = useCallback(
-    async (silent = true) => {
-      if (syncingRef.current) return;
-      syncingRef.current = true;
-      setSyncing(true);
-      try {
-        const res = await syncMobileWithCloud();
-        await loadLocalData(searchRef.current);
-        if (!silent) {
-          Alert.alert(
-            "Sincronización exitosa",
-            `Ventas subidas: ${res.ventasSubidas}\nProductos actualizados: ${res.productosActualizados}`
-          );
-        }
-      } catch (err: any) {
-        if (!silent) {
-          Alert.alert("Modo Offline", err?.message || "Trabajando con datos locales.");
-        }
-      } finally {
-        syncingRef.current = false;
-        setSyncing(false);
-      }
-    },
-    [loadLocalData]
-  );
+  const refreshLocalState = useCallback(async (search = "") => {
+    const [m, c, mp, cats, p, cls, creds, vl, vr, abPend, lastIso] = await Promise.all([
+      getLocalMonedas(),
+      getLocalCajas(),
+      getLocalMetodosPago(),
+      getLocalCategorias(),
+      getLocalProductos(search),
+      getLocalClientes(),
+      getLocalCreditos(),
+      getVentasLocales(),
+      getLocalVentasRemotas(),
+      getAbonosLocalesPendientes(),
+      getMeta("last_pull_iso"),
+    ]);
 
-  // 1. Al abrir la app: cargar base local al instante y lanzar sync automático en segundo plano
+    setMonedas(m);
+    setCajas(c);
+    setMetodosPago(mp);
+    setCategorias(cats);
+    setProductos(p);
+    setClientes(cls);
+    setCreditosData(creds);
+    setVentasLocales(vl);
+    setVentasRemotas(vr);
+    setAbonosPendCount(abPend.length);
+    setLastSyncIso(lastIso);
+
+    if (m.length > 0) {
+      setMonedaSeleccionada((prev) => {
+        if (prev && m.some((x) => x.codigo === prev)) return prev;
+        const base = m.find((x) => x.es_base === 1) || m[0];
+        return base.codigo;
+      });
+    }
+    if (mp.length > 0) {
+      setMetodoPagoSeleccionado((prev) => {
+        if (prev && mp.some((x) => String(x.id) === String(prev))) return prev;
+        return String(mp[0].id);
+      });
+      setCajaSeleccionada((prev) => {
+        if (prev) return prev;
+        return mp[0].caja_id ? String(mp[0].caja_id) : c[0]?.id ? String(c[0].id) : "";
+      });
+    }
+  }, []);
+
   useEffect(() => {
     (async () => {
       try {
-        const session = await getStoredSession();
-        if (session.serverUrl) setServerUrl(session.serverUrl);
-        if (session.user && session.token) {
-          setUser(session.user);
-          await loadLocalData();
-          handleSync(true);
+        const stored = await getStoredSession();
+        if (stored.serverUrl) setServerUrlInput(stored.serverUrl);
+        if (stored.serverUrl && stored.token && stored.user) {
+          setSession({
+            serverUrl: stored.serverUrl,
+            token: stored.token,
+            user: stored.user,
+          });
+          await refreshLocalState();
         }
       } catch (e) {
-        console.warn("Error cargando sesión móvil:", e);
+        console.warn("Boot error:", e);
       } finally {
-        setInitializing(false);
+        setBooting(false);
       }
     })();
-  }, [loadLocalData, handleSync]);
+  }, [refreshLocalState]);
 
-  // 2. Escuchar cambios de conectividad: al recuperar internet se sincroniza sola sin tocar nada
-  useEffect(() => {
-    const unsubscribe = NetInfo.addEventListener((state) => {
-      const connected = Boolean(state.isConnected);
-      setIsOnline(connected);
-      if (connected && user) {
-        handleSync(true);
-      }
-    });
-    return () => unsubscribe();
-  }, [user, handleSync]);
-
-  // 3. Auto-sync periódico cada 12 segundos en segundo plano mientras haya sesión e internet
-  useEffect(() => {
-    if (!user || !isOnline) return;
-    const interval = setInterval(() => {
-      handleSync(true);
-    }, 12000);
-    return () => clearInterval(interval);
-  }, [user, isOnline, handleSync]);
-
-  // 4. Sincronizar automáticamente cuando la app vuelve a primer plano (desbloquear celular / cambiar de app)
-  useEffect(() => {
-    if (!user) return;
-    const sub = AppState.addEventListener("change", (nextState) => {
-      if (nextState === "active") {
-        handleSync(true);
-      }
-    });
-    return () => sub.remove();
-  }, [user, handleSync]);
-
-  useEffect(() => {
-    if (user) {
-      loadLocalData(search);
-    }
-  }, [search, user, loadLocalData]);
-
-  const handleLogin = async () => {
-    if (!serverUrl || serverUrl === "https://") {
-      Alert.alert("URL requerida", "Ingresa la URL de tu servidor PosBit Cloud o IP local.");
-      return;
-    }
-    setAuthLoading(true);
+  const runSilentSync = useCallback(async () => {
+    if (!session || syncInFlightRef.current) return;
+    syncInFlightRef.current = true;
+    setSyncing(true);
     try {
-      const data = await loginMobile(serverUrl, email, password);
-      setUser(data.user);
-      await handleSync(true);
-      await loadLocalData();
-    } catch (err: any) {
-      Alert.alert("Error de acceso", err?.message || "No se pudo conectar al servidor");
+      await syncMobileWithCloud();
+      setSyncOnline(true);
+      await refreshLocalState(posSearch);
+    } catch {
+      setSyncOnline(false);
     } finally {
-      setAuthLoading(false);
+      syncInFlightRef.current = false;
+      setSyncing(false);
     }
-  };
+  }, [session, refreshLocalState, posSearch]);
 
-  const addToCart = (producto: LocalProducto) => {
-    setCart((prev) => {
-      const existing = prev.find((i) => i.producto.id === producto.id);
-      if (existing) {
-        return prev.map((i) =>
-          i.producto.id === producto.id ? { ...i, cantidad: i.cantidad + 1 } : i
-        );
-      }
-      return [...prev, { producto, cantidad: 1 }];
+  useEffect(() => {
+    if (!session) return;
+    runSilentSync();
+    const interval = setInterval(runSilentSync, AUTO_SYNC_INTERVAL_MS);
+    const sub = AppState.addEventListener("change", (nextState) => {
+      if (nextState === "active") runSilentSync();
     });
-  };
+    return () => {
+      clearInterval(interval);
+      sub.remove();
+    };
+  }, [session, runSilentSync]);
 
-  const updateCartQty = (productoId: number, delta: number) => {
-    setCart((prev) =>
-      prev
-        .map((i) =>
-          i.producto.id === productoId ? { ...i, cantidad: i.cantidad + delta } : i
-        )
-        .filter((i) => i.cantidad > 0)
-    );
-  };
+  useEffect(() => {
+    if (!session) return;
+    getLocalProductos(posSearch).then(setProductos);
+  }, [posSearch, session]);
 
-  const totalUsd = cart.reduce(
-    (acc, item) => acc + item.producto.precio_base * item.cantidad,
-    0
+  // ── Helpers de Moneda y Conversión (idénticos a la Web) ──
+  const activeMonedaObj = useMemo(
+    () => monedas.find((m) => m.codigo === monedaSeleccionada) || monedas[0] || null,
+    [monedas, monedaSeleccionada]
   );
 
-  const monedaBase = monedas.find((m) => m.es_base === 1) || monedas[0];
-  const monedaVes = monedas.find((m) => m.codigo === "VES");
+  const decMoneda = useCallback(
+    (cod?: string) => {
+      const m = monedas.find((x) => x.codigo === (cod || monedaSeleccionada));
+      return Number(m?.decimales ?? 2);
+    },
+    [monedas, monedaSeleccionada]
+  );
 
-  const handleCobrar = async () => {
-    if (cart.length === 0) return;
-    try {
-      const monedaId = monedaBase ? String(monedaBase.id) : "1";
-      await createOfflineSale({
-        cliente_nombre: clienteNombre,
-        moneda_id: monedaId,
-        metodo_pago_id: null,
-        caja_id: null,
-        total: Number(totalUsd.toFixed(2)),
-        items: cart.map((c) => ({
-          producto_id: c.producto.id,
-          nombre: c.producto.nombre,
-          cantidad: c.cantidad,
-          precio_unit: c.producto.precio_base,
-          subtotal: Number((c.producto.precio_base * c.cantidad).toFixed(2)),
-        })),
-      });
-
-      setCart([]);
-      setClienteNombre("Consumidor Final");
-      await loadLocalData(search);
-
-      if (isOnline) {
-        handleSync(true);
-        Alert.alert("Venta registrada", "La venta se guardó y se sincronizó con la nube.");
-      } else {
-        Alert.alert(
-          "Venta guardada (Modo Offline)",
-          "La venta quedó guardada en el teléfono y se subirá automáticamente cuando vuelva el internet."
-        );
+  const convertirMonto = useCallback(
+    (monto: number, origenIdOrCod: string | null | undefined, destinoCod: string): number => {
+      if (!monto || !Number.isFinite(monto)) return 0;
+      const origen =
+        monedas.find((m) => String(m.id) === String(origenIdOrCod) || m.codigo === origenIdOrCod) ||
+        monedas.find((m) => m.es_base === 1) ||
+        monedas[0];
+      const destino =
+        monedas.find((m) => m.codigo === destinoCod || String(m.id) === String(destinoCod)) ||
+        activeMonedaObj;
+      if (!origen || !destino || String(origen.id) === String(destino.id)) {
+        return monto;
       }
-    } catch (err: any) {
-      Alert.alert("Error", err?.message || "No se pudo guardar la venta");
+      const tasaOrigen = Number(origen.tasa) || 1;
+      const tasaDestino = Number(destino.tasa) || 1;
+      const enBase = origen.es_base ? monto : monto / tasaOrigen;
+      const convertido = destino.es_base ? enBase : enBase * tasaDestino;
+      const dec = Number(destino.decimales ?? 2);
+      const factor = Math.pow(10, dec);
+      return Math.round((convertido + Number.EPSILON) * factor) / factor;
+    },
+    [monedas, activeMonedaObj]
+  );
+
+  const fmt = useCallback(
+    (val: number, codMoneda?: string) => {
+      const cod = codMoneda || monedaSeleccionada;
+      const m = monedas.find((x) => x.codigo === cod) || activeMonedaObj;
+      const sym = m?.simbolo || "$";
+      const dec = Number(m?.decimales ?? 2);
+      return `${sym} ${ (Number(val) || 0).toLocaleString("es-VE", {
+        minimumFractionDigits: dec,
+        maximumFractionDigits: dec,
+      })}`;
+    },
+    [monedas, monedaSeleccionada, activeMonedaObj]
+  );
+
+  const precioUnitarioEnMoneda = useCallback(
+    (p: LocalProducto, codMoneda = monedaSeleccionada): number => {
+      return convertirMonto(Number(p.precio_base) || 0, p.moneda_base_id, codMoneda);
+    },
+    [convertirMonto, monedaSeleccionada]
+  );
+
+  const precioDeLineaEnMoneda = useCallback(
+    (item: CartItem, codMoneda = monedaSeleccionada): number => {
+      const pres = item.presentacion;
+      if (!pres) return precioUnitarioEnMoneda(item.product, codMoneda);
+      if (pres.modo_venta === "fijo" && pres.precio_override != null && pres.precio_override > 0) {
+        return convertirMonto(Number(pres.precio_override), item.product.moneda_base_id, codMoneda);
+      }
+      return precioUnitarioEnMoneda(item.product, codMoneda) * (pres.unidades || 1);
+    },
+    [precioUnitarioEnMoneda, convertirMonto, monedaSeleccionada]
+  );
+
+  const totalLineaEnMoneda = useCallback(
+    (item: CartItem, codMoneda = monedaSeleccionada): number => {
+      const dec = decMoneda(codMoneda);
+      const factor = Math.pow(10, dec);
+      return Math.round(precioDeLineaEnMoneda(item, codMoneda) * item.qty * factor) / factor;
+    },
+    [precioDeLineaEnMoneda, decMoneda, monedaSeleccionada]
+  );
+
+  const descuentoDeLinea = useCallback(
+    (item: CartItem, codMoneda = monedaSeleccionada): number => {
+      const raw = (item.descuentoStr ?? "").trim();
+      if (!raw) return 0;
+      const bruto = totalLineaEnMoneda(item, codMoneda);
+      if (bruto <= 0) return 0;
+      const esPct = raw.endsWith("%");
+      const numStr = (esPct ? raw.slice(0, -1) : raw).replace(",", ".");
+      const val = parseFloat(numStr);
+      if (!Number.isFinite(val) || val <= 0) return 0;
+      const monto = esPct ? bruto * (Math.min(100, val) / 100) : val;
+      const dec = decMoneda(codMoneda);
+      const factor = Math.pow(10, dec);
+      return Math.min(bruto, Math.round(monto * factor) / factor);
+    },
+    [totalLineaEnMoneda, decMoneda, monedaSeleccionada]
+  );
+
+  // ── Selección de Método de Pago (cambia moneda igual que en la web) ──
+  const handleSelectMetodoPago = useCallback(
+    (metodoId: string) => {
+      setMetodoPagoSeleccionado(metodoId);
+      const mp = metodosPago.find((m) => String(m.id) === String(metodoId));
+      if (mp) {
+        if (mp.caja_id) setCajaSeleccionada(String(mp.caja_id));
+        if (mp.moneda_codigo) {
+          setMonedaSeleccionada(mp.moneda_codigo);
+        } else if (mp.moneda_id) {
+          const mon = monedas.find((x) => String(x.id) === String(mp.moneda_id));
+          if (mon) setMonedaSeleccionada(mon.codigo);
+        }
+      }
+    },
+    [metodosPago, monedas]
+  );
+
+  // ── Funciones del Carrito POS ──
+  const addToCart = useCallback(
+    (p: LocalProducto, pres: LocalPresentacion | null = null) => {
+      if (p.stock <= 0) {
+        showToast(`Sin existencias de ${p.nombre}`, "error");
+        return;
+      }
+      const targetKey = claveLinea(p.id, pres?.id);
+      setCart((prev) => {
+        const existing = prev.find((c) => claveDe(c) === targetKey);
+        if (existing) {
+          const maxQty = maxQtyDeLinea({ ...existing, product: p });
+          if (existing.qty + 1 > maxQty) {
+            showToast(`Solo hay ${p.stock} unidades disponibles de ${p.nombre}`, "error");
+            return prev;
+          }
+          return prev.map((c) => (claveDe(c) === targetKey ? { ...c, qty: c.qty + 1 } : c));
+        }
+        const nueva: CartItem = { product: p, qty: 1, presentacion: pres };
+        if (maxQtyDeLinea(nueva) < 1) {
+          showToast(`Stock insuficiente para ${pres?.nombre || p.nombre}`, "error");
+          return prev;
+        }
+        return [...prev, nueva];
+      });
+    },
+    [showToast]
+  );
+
+  const updateCartQty = useCallback(
+    (clave: string, delta: number) => {
+      setCart((prev) => {
+        const item = prev.find((c) => claveDe(c) === clave);
+        if (!item) return prev;
+        const nextQty = item.qty + delta;
+        if (nextQty <= 0) {
+          return prev.filter((c) => claveDe(c) !== clave);
+        }
+        const maxQty = maxQtyDeLinea(item);
+        if (nextQty > maxQty) {
+          showToast(`Solo hay ${item.product.stock} unidades de ${item.product.nombre}`, "error");
+          return prev;
+        }
+        return prev.map((c) => (claveDe(c) === clave ? { ...c, qty: nextQty } : c));
+      });
+    },
+    [showToast]
+  );
+
+  const cambiarPresentacionLinea = useCallback((clave: string, pres: LocalPresentacion | null) => {
+    setCart((prev) => {
+      const item = prev.find((c) => claveDe(c) === clave);
+      if (!item) return prev;
+      const maxQty = Math.max(1, Math.floor(item.product.stock / (pres?.unidades ?? 1)));
+      return prev.map((c) =>
+        claveDe(c) === clave ? { ...c, presentacion: pres, qty: Math.min(maxQty, c.qty) } : c
+      );
+    });
+  }, []);
+
+  const setDescuentoLinea = useCallback((clave: string, val: string) => {
+    const limpio = val.replace(/[^0-9.,%]/g, "").slice(0, 10);
+    setCart((prev) =>
+      prev.map((c) => (claveDe(c) === clave ? { ...c, descuentoStr: limpio } : c))
+    );
+  }, []);
+
+  const handlePauseCart = useCallback(() => {
+    if (cart.length === 0) return;
+    const now = new Date();
+    const hora = now.toTimeString().slice(0, 5);
+    setHeldCarts((prev) => [
+      ...prev,
+      { id: Date.now(), items: cart, clienteId, hora },
+    ]);
+    setCart([]);
+    setClienteId(null);
+    showToast("Venta puesta en espera", "info");
+  }, [cart, clienteId, showToast]);
+
+  const handleResumeCart = useCallback(
+    (held: HeldCart) => {
+      setCart(held.items);
+      setClienteId(held.clienteId);
+      setHeldCarts((prev) => prev.filter((h) => h.id !== held.id));
+      setShowHeldModal(false);
+      setPosSubView("carrito");
+    },
+    []
+  );
+
+  // ── Totales del Carrito ──
+  const subtotal = useMemo(
+    () => cart.reduce((acc, c) => acc + totalLineaEnMoneda(c, monedaSeleccionada), 0),
+    [cart, totalLineaEnMoneda, monedaSeleccionada]
+  );
+
+  const tax = useMemo(
+    () =>
+      cart.reduce((acc, c) => {
+        if (c.product.iva_incluido !== 0) return acc;
+        return acc + Math.round(totalLineaEnMoneda(c, monedaSeleccionada) * 0.16 * 100) / 100;
+      }, 0),
+    [cart, totalLineaEnMoneda, monedaSeleccionada]
+  );
+
+  const descuentoLineas = useMemo(
+    () => cart.reduce((acc, c) => acc + descuentoDeLinea(c, monedaSeleccionada), 0),
+    [cart, descuentoDeLinea, monedaSeleccionada]
+  );
+
+  const descuentoGlobal = useMemo(() => {
+    const n = parseFloat(descuentoGlobalStr.replace(",", "."));
+    return Number.isFinite(n) && n > 0 ? n : 0;
+  }, [descuentoGlobalStr]);
+
+  const descuentoTotal = descuentoLineas + descuentoGlobal;
+
+  const totalCobrosExtraEnMoneda = useCallback(
+    (codDestino = monedaSeleccionada) => {
+      return cobrosExtra.reduce((acc, ce) => {
+        const m = parseFloat(ce.montoStr.replace(",", "."));
+        if (!Number.isFinite(m) || m <= 0) return acc;
+        return acc + convertirMonto(m, ce.monedaCodigo, codDestino);
+      }, 0);
+    },
+    [cobrosExtra, convertirMonto, monedaSeleccionada]
+  );
+
+  const total = useMemo(
+    () => Math.max(0, subtotal - descuentoTotal + tax + totalCobrosExtraEnMoneda(monedaSeleccionada)),
+    [subtotal, descuentoTotal, tax, totalCobrosExtraEnMoneda, monedaSeleccionada]
+  );
+
+  const clienteSeleccionadoObj = useMemo(
+    () => (clienteId ? clientes.find((c) => c.id === clienteId) || null : null),
+    [clientes, clienteId]
+  );
+
+  // Cálculos de Pago Simple / Mixto en el Modal de Checkout
+  const totalPagadoEnMonedaVenta = useMemo(() => {
+    return lineasPago.reduce((acc, lp) => {
+      const m = parseFloat(lp.montoStr.replace(",", "."));
+      if (!Number.isFinite(m) || m <= 0) return acc;
+      const mp = metodosPago.find((x) => String(x.id) === String(lp.metodoId));
+      const codLinea = mp?.moneda_codigo || monedaSeleccionada;
+      return acc + convertirMonto(m, codLinea, monedaSeleccionada);
+    }, 0);
+  }, [lineasPago, metodosPago, monedaSeleccionada, convertirMonto]);
+
+  const faltaPorPagar = Math.max(0, Math.round((total - totalPagadoEnMonedaVenta) * 100) / 100);
+  const vueltoEnMonedaVenta = Math.max(0, Math.round((totalPagadoEnMonedaVenta - total) * 100) / 100);
+
+  // Información de Crédito del Cliente Seleccionado en la Moneda de la Venta
+  const infoCreditoCliente = useMemo(() => {
+    if (!clienteSeleccionadoObj) return null;
+    const limRow = clienteSeleccionadoObj.limites_credito.find(
+      (l) => l.codigo === monedaSeleccionada
+    );
+    const deudaRow = clienteSeleccionadoObj.deuda_total.find(
+      (d) => d.codigo === monedaSeleccionada
+    );
+    const limite = Number(limRow?.limite ?? 0);
+    const deuda = Number(deudaRow?.monto ?? 0);
+    const disponible = Math.max(0, limite - deuda);
+    return {
+      recibe: clienteSeleccionadoObj.recibe_credito === 1,
+      limite,
+      deuda,
+      disponible,
+    };
+  }, [clienteSeleccionadoObj, monedaSeleccionada]);
+
+  // Abrir Modal de Checkout inicializando la línea de pago
+  const handleOpenCheckout = useCallback(() => {
+    if (cart.length === 0) {
+      showToast("Agrega al menos un producto al carrito", "error");
+      return;
+    }
+    const mpDefault = metodoPagoSeleccionado || (metodosPago[0] ? String(metodosPago[0].id) : "");
+    setModoMixto(false);
+    setLineasPago([{ key: 1, metodoId: mpDefault, montoStr: total.toFixed(decMoneda()) }]);
+    if (infoCreditoCliente) {
+      setLimiteInputStr(String(infoCreditoCliente.limite || 0));
+    }
+    setShowCheckoutModal(true);
+  }, [cart.length, metodoPagoSeleccionado, metodosPago, total, decMoneda, infoCreditoCliente, showToast]);
+
+  // Otorgar o ajustar límite de crédito directamente desde el Checkout
+  const handleAjustarLimiteCheckout = useCallback(
+    async (nuevoLimite: number) => {
+      if (!clienteSeleccionadoObj || !activeMonedaObj) return;
+      setGrantingCredit(true);
+      try {
+        await patchClienteLimiteCloud({
+          id: clienteSeleccionadoObj.id,
+          moneda_id: activeMonedaObj.id,
+          limite: Math.max(0, nuevoLimite),
+          recibe_credito: true,
+        });
+        await refreshLocalState(posSearch);
+        setLimiteInputStr(String(Math.max(0, nuevoLimite)));
+        showToast(`Límite en ${monedaSeleccionada} actualizado a ${fmt(nuevoLimite)}`, "success");
+      } catch (e: any) {
+        showToast(e?.message || "Error al actualizar límite", "error");
+      } finally {
+        setGrantingCredit(false);
+      }
+    },
+    [clienteSeleccionadoObj, activeMonedaObj, refreshLocalState, posSearch, monedaSeleccionada, fmt, showToast]
+  );
+
+  // Procesar Venta (Contado, Todo a Crédito o Parcial / Mixto)
+  const handleConfirmSale = useCallback(
+    async (modeOverride?: "completo" | "credito" | "personalizado") => {
+      if (cart.length === 0 || !activeMonedaObj) return;
+
+      const isCreditoTotal = modeOverride === "credito";
+      const isPagoCompleto = modeOverride === "completo";
+
+      const montoPagadoFinal = isCreditoTotal
+        ? 0
+        : isPagoCompleto
+        ? total
+        : Math.min(total, totalPagadoEnMonedaVenta);
+
+      const saldoACredito = Math.max(0, Math.round((total - montoPagadoFinal) * 100) / 100);
+      const usaCredito = isCreditoTotal || saldoACredito > 0.009;
+
+      if (usaCredito && !clienteSeleccionadoObj) {
+        showToast("Selecciona un cliente para registrar una venta a crédito", "error");
+        return;
+      }
+
+      if (usaCredito && infoCreditoCliente) {
+        if (!infoCreditoCliente.recibe || infoCreditoCliente.limite <= 0) {
+          showToast(
+            `${clienteSeleccionadoObj?.nombre} no tiene crédito habilitado en ${monedaSeleccionada}. Usa el botón Otorgar Crédito abajo.`,
+            "error"
+          );
+          return;
+        }
+        if (saldoACredito > infoCreditoCliente.disponible + 0.01) {
+          showToast(
+            `El monto a crédito (${fmt(saldoACredito)}) supera el disponible (${fmt(infoCreditoCliente.disponible)})`,
+            "error"
+          );
+          return;
+        }
+      }
+
+      setSubmittingSale(true);
+      try {
+        const metodoObj =
+          metodosPago.find((m) => String(m.id) === String(metodoPagoSeleccionado)) ||
+          metodosPago[0] ||
+          null;
+
+        const itemsPayload = cart.map((c) => {
+          const unidades = unidadesDeLinea(c);
+          const importeBruto = totalLineaEnMoneda(c, monedaSeleccionada);
+          const precioExacto = importeBruto / (c.qty || 1);
+          return {
+            producto_id: c.product.id,
+            nombre: c.presentacion
+              ? `${c.product.nombre} (${c.presentacion.nombre} x${c.presentacion.unidades})`
+              : c.product.nombre,
+            cantidad: unidades,
+            precio_unit: precioExacto,
+            subtotal: importeBruto,
+            descuento: descuentoDeLinea(c, monedaSeleccionada),
+            presentacion_id: c.presentacion?.id || null,
+            presentacion_nombre: c.presentacion?.nombre || null,
+            presentacion_unidades: c.presentacion?.unidades || null,
+            cantidad_presentaciones: c.presentacion ? c.qty : null,
+            precio_presentacion: c.presentacion ? precioDeLineaEnMoneda(c, monedaSeleccionada) : null,
+          };
+        });
+
+        const pagosPayload =
+          !isCreditoTotal && (modoMixto || lineasPago.length > 1)
+            ? lineasPago
+                .map((lp) => {
+                  const m = parseFloat(lp.montoStr.replace(",", "."));
+                  const mp = metodosPago.find((x) => String(x.id) === String(lp.metodoId));
+                  const mon = monedas.find((x) => x.codigo === (mp?.moneda_codigo || monedaSeleccionada));
+                  return {
+                    metodo_pago_id: lp.metodoId,
+                    caja_id: mp?.caja_id || cajaSeleccionada || null,
+                    moneda_id: mon?.id || activeMonedaObj.id,
+                    monto: Number.isFinite(m) && m > 0 ? m : 0,
+                  };
+                })
+                .filter((p) => p.monto > 0)
+            : undefined;
+
+        const cobrosExtraPayload = cobrosExtra
+          .map((ce) => {
+            const m = parseFloat(ce.montoStr.replace(",", "."));
+            const mon = monedas.find((x) => x.codigo === ce.monedaCodigo) || activeMonedaObj;
+            return {
+              descripcion: ce.concepto.trim() || "Cobro extra",
+              monto: Number.isFinite(m) && m > 0 ? m : 0,
+              moneda_id: mon.id,
+            };
+          })
+          .filter((c) => c.monto > 0);
+
+        const ventaCreada = await createOfflineSale({
+          cliente_id: clienteSeleccionadoObj?.id || null,
+          cliente_nombre: clienteSeleccionadoObj?.nombre || "Consumidor Final",
+          moneda_id: activeMonedaObj.id,
+          tipo_pago: usaCredito ? "Credito" : "Contado",
+          metodo_pago_id: metodoObj ? String(metodoObj.id) : null,
+          caja_id: metodoObj?.caja_id ? String(metodoObj.caja_id) : cajaSeleccionada || null,
+          subtotal,
+          impuesto: tax,
+          descuento: descuentoTotal,
+          total,
+          monto_pagado: montoPagadoFinal,
+          observaciones: observacionesVenta.trim() || undefined,
+          pagos: pagosPayload,
+          cobros_extra: cobrosExtraPayload.length > 0 ? cobrosExtraPayload : undefined,
+          items: itemsPayload,
+        });
+
+        setShowCheckoutModal(false);
+        setReceiptModal({
+          numero: ventaCreada.numero,
+          fecha: ventaCreada.fecha,
+          cliente: ventaCreada.cliente_nombre,
+          moneda: monedaSeleccionada,
+          tipo_pago: usaCredito
+            ? montoPagadoFinal > 0
+              ? "Crédito Parcial"
+              : "Crédito"
+            : modoMixto
+            ? "Pago Mixto"
+            : metodoObj?.nombre || "Contado",
+          subtotal,
+          impuesto: tax,
+          descuento: descuentoTotal,
+          cobrosExtra: totalCobrosExtraEnMoneda(monedaSeleccionada),
+          total,
+          montoPagado: montoPagadoFinal,
+          saldoCredito: saldoACredito,
+          vuelto: isPagoCompleto || isCreditoTotal ? 0 : vueltoEnMonedaVenta,
+          items: itemsPayload,
+        });
+
+        setCart([]);
+        setClienteId(null);
+        setDescuentoGlobalStr("");
+        setObservacionesVenta("");
+        setCobrosExtra([]);
+        setPosSubView("catalogo");
+
+        await refreshLocalState(posSearch);
+        runSilentSync();
+      } catch (e: any) {
+        showToast(e?.message || "No se pudo registrar la venta", "error");
+      } finally {
+        setSubmittingSale(false);
+      }
+    },
+    [
+      cart,
+      activeMonedaObj,
+      total,
+      totalPagadoEnMonedaVenta,
+      clienteSeleccionadoObj,
+      infoCreditoCliente,
+      monedaSeleccionada,
+      fmt,
+      metodosPago,
+      metodoPagoSeleccionado,
+      cajaSeleccionada,
+      modoMixto,
+      lineasPago,
+      monedas,
+      cobrosExtra,
+      subtotal,
+      tax,
+      descuentoTotal,
+      observacionesVenta,
+      totalLineaEnMoneda,
+      descuentoDeLinea,
+      precioDeLineaEnMoneda,
+      totalCobrosExtraEnMoneda,
+      vueltoEnMonedaVenta,
+      refreshLocalState,
+      posSearch,
+      runSilentSync,
+      showToast,
+    ]
+  );
+
+  // ── Login & Logout ──
+  const handleLogin = async () => {
+    setLoginError(null);
+    if (!emailInput.trim() || !passwordInput) {
+      setLoginError("Ingresa tu correo electrónico y contraseña.");
+      return;
+    }
+    setLoginLoading(true);
+    try {
+      const targetUrl = serverUrlInput.trim() || DEFAULT_CLOUD_URL;
+      const data = await loginMobile(targetUrl, emailInput.trim(), passwordInput);
+      setSession({
+        serverUrl: targetUrl.replace(/\/+$/, ""),
+        token: data.token,
+        user: data.user,
+      });
+      await refreshLocalState();
+    } catch (e: any) {
+      setLoginError(e?.message || "Error al iniciar sesión");
+    } finally {
+      setLoginLoading(false);
     }
   };
 
-  if (initializing) {
+  const handleLogout = async () => {
+    await clearStoredSession();
+    setDrawerOpen(false);
+    setSession(null);
+    setCart([]);
+  };
+
+  // ── Modal Crear / Editar Cliente ──
+  const openCreateClienteModal = useCallback(
+    (cli?: LocalCliente | null) => {
+      if (cli) {
+        setEditingCliente(cli);
+        setClFormNombre(cli.nombre);
+        setClFormTipo(cli.tipo === "Empresa" ? "Empresa" : "Persona Natural");
+        setClFormDoc(cli.documento || "");
+        setClFormTel(cli.telefono || "");
+        setClFormEmail(cli.email || "");
+        setClFormCiudad(cli.ciudad || "");
+        setClFormDir(cli.direccion || "");
+        setClFormRecibeCredito(cli.recibe_credito === 1);
+        const map: Record<string, string> = {};
+        for (const m of monedas) {
+          const found = cli.limites_credito.find((l) => String(l.moneda_id) === String(m.id) || l.codigo === m.codigo);
+          map[m.id] = String(found?.limite ?? 0);
+        }
+        setClFormLimites(map);
+      } else {
+        setEditingCliente(null);
+        setClFormNombre("");
+        setClFormTipo("Persona Natural");
+        setClFormDoc("");
+        setClFormTel("");
+        setClFormEmail("");
+        setClFormCiudad("");
+        setClFormDir("");
+        setClFormRecibeCredito(true);
+        const map: Record<string, string> = {};
+        for (const m of monedas) {
+          map[m.id] = m.es_base ? "100" : "0";
+        }
+        setClFormLimites(map);
+      }
+      setClienteModalOpen(true);
+    },
+    [monedas]
+  );
+
+  const handleSaveCliente = async () => {
+    if (!clFormNombre.trim()) {
+      showToast("El nombre del cliente es obligatorio", "error");
+      return;
+    }
+    setSavingCliente(true);
+    try {
+      const limitesArr = monedas.map((m) => ({
+        moneda_id: m.id,
+        limite: Math.max(0, parseFloat((clFormLimites[m.id] || "0").replace(",", ".")) || 0),
+      }));
+      const saved = await saveClienteCloud({
+        id: editingCliente?.id || undefined,
+        nombre: clFormNombre.trim(),
+        tipo: clFormTipo,
+        documento: clFormDoc.trim() || null,
+        telefono: clFormTel.trim() || null,
+        email: clFormEmail.trim() || null,
+        ciudad: clFormCiudad.trim() || null,
+        direccion: clFormDir.trim() || null,
+        recibe_credito: clFormRecibeCredito,
+        limites_credito: limitesArr,
+        activo: true,
+      });
+      await refreshLocalState(posSearch);
+      if (saved?.id && route === "pos") {
+        setClienteId(Number(saved.id));
+      }
+      setClienteModalOpen(false);
+      showToast(editingCliente ? "Cliente actualizado" : "Cliente creado", "success");
+    } catch (e: any) {
+      showToast(e?.message || "Error al guardar cliente", "error");
+    } finally {
+      setSavingCliente(false);
+    }
+  };
+
+  // ── Modal Registrar Abono a Crédito ──
+  const openAbonoModal = useCallback(
+    (cr: LocalCredito) => {
+      setAbonoModalCredito(cr);
+      setAbonoModoMixto(false);
+      // Buscar método de pago de la misma moneda del crédito si existe
+      const mpMatch =
+        metodosPago.find((m) => m.moneda_codigo === cr.moneda_codigo) || metodosPago[0];
+      const mpId = mpMatch ? String(mpMatch.id) : "";
+      setAbonoMetodoId(mpId);
+      setAbonoMontoStr(cr.saldo.toFixed(decMoneda(cr.moneda_codigo)));
+      setAbonoLineas([{ key: 1, metodoId: mpId, montoStr: cr.saldo.toFixed(decMoneda(cr.moneda_codigo)) }]);
+      setAbonoObs("");
+    },
+    [metodosPago, decMoneda]
+  );
+
+  const handleConfirmAbono = async () => {
+    if (!abonoModalCredito) return;
+    setSavingAbono(true);
+    try {
+      const fechaHoy = new Date().toISOString().split("T")[0];
+      if (!abonoModoMixto) {
+        const montoNum = parseFloat(abonoMontoStr.replace(",", "."));
+        if (!Number.isFinite(montoNum) || montoNum <= 0) {
+          showToast("Ingresa un monto válido mayor a 0", "error");
+          setSavingAbono(false);
+          return;
+        }
+        const mp = metodosPago.find((m) => String(m.id) === String(abonoMetodoId)) || metodosPago[0];
+        const codAbono = mp?.moneda_codigo || abonoModalCredito.moneda_codigo;
+        const monAbono =
+          monedas.find((m) => m.codigo === codAbono) ||
+          monedas.find((m) => String(m.id) === String(abonoModalCredito.moneda_id)) ||
+          monedas[0];
+        const equivCredito = convertirMonto(montoNum, monAbono?.codigo, abonoModalCredito.moneda_codigo);
+
+        if (equivCredito > abonoModalCredito.saldo + 0.05) {
+          showToast(
+            `El abono (${fmt(equivCredito, abonoModalCredito.moneda_codigo)}) supera el saldo pendiente (${fmt(abonoModalCredito.saldo, abonoModalCredito.moneda_codigo)})`,
+            "error"
+          );
+          setSavingAbono(false);
+          return;
+        }
+
+        await registrarAbonoMobile({
+          credito_id: abonoModalCredito.id,
+          cliente_id: abonoModalCredito.cliente_id,
+          fecha: fechaHoy,
+          monto: montoNum,
+          moneda_id: monAbono.id,
+          monto_en_moneda_credito: equivCredito,
+          metodo_pago_id: mp ? String(mp.id) : null,
+          caja_id: mp?.caja_id ? String(mp.caja_id) : null,
+          observaciones: abonoObs.trim() || null,
+        });
+      } else {
+        let totalEquiv = 0;
+        const lineasPayload = [];
+        for (const l of abonoLineas) {
+          const m = parseFloat(l.montoStr.replace(",", "."));
+          if (!Number.isFinite(m) || m <= 0) continue;
+          const mp = metodosPago.find((x) => String(x.id) === String(l.metodoId)) || metodosPago[0];
+          const mon =
+            monedas.find((x) => x.codigo === mp?.moneda_codigo) ||
+            monedas.find((x) => String(x.id) === String(abonoModalCredito.moneda_id)) ||
+            monedas[0];
+          totalEquiv += convertirMonto(m, mon.codigo, abonoModalCredito.moneda_codigo);
+          lineasPayload.push({
+            monto: m,
+            moneda_id: mon.id,
+            metodo_pago_id: mp ? String(mp.id) : null,
+            caja_id: mp?.caja_id ? String(mp.caja_id) : null,
+          });
+        }
+        if (lineasPayload.length === 0) {
+          showToast("Agrega al menos una línea de abono válida", "error");
+          setSavingAbono(false);
+          return;
+        }
+        await registrarAbonoMobile({
+          credito_id: abonoModalCredito.id,
+          cliente_id: abonoModalCredito.cliente_id,
+          fecha: fechaHoy,
+          monto: totalEquiv,
+          moneda_id: abonoModalCredito.moneda_id,
+          monto_en_moneda_credito: totalEquiv,
+          metodo_pago_id: lineasPayload[0].metodo_pago_id,
+          caja_id: lineasPayload[0].caja_id,
+          lineas: lineasPayload,
+          observaciones: abonoObs.trim() || null,
+        });
+      }
+
+      setAbonoModalCredito(null);
+      await refreshLocalState(posSearch);
+      runSilentSync();
+      showToast("Abono registrado correctamente", "success");
+    } catch (e: any) {
+      showToast(e?.message || "Error al registrar abono", "error");
+    } finally {
+      setSavingAbono(false);
+    }
+  };
+
+  const openHistorialAbonos = async (cr: LocalCredito) => {
+    setHistorialCredito(cr);
+    const list = await getLocalAbonosByCredito(cr.id);
+    setHistorialAbonos(list);
+  };
+
+  // ── Filtros de Pantallas ──
+  const posProductosFiltrados = useMemo(() => {
+    if (!posCategoriaId) return productos;
+    return productos.filter((p) => Number(p.categoria_id) === Number(posCategoriaId));
+  }, [productos, posCategoriaId]);
+
+  const clientesFiltrados = useMemo(() => {
+    const q = clientesSearch.trim().toLowerCase();
+    if (!q) return clientes;
+    return clientes.filter(
+      (c) =>
+        c.nombre.toLowerCase().includes(q) ||
+        (c.documento && c.documento.toLowerCase().includes(q)) ||
+        (c.telefono && c.telefono.toLowerCase().includes(q))
+    );
+  }, [clientes, clientesSearch]);
+
+  const creditosFiltrados = useMemo(() => {
+    const q = creditosSearch.trim().toLowerCase();
+    return creditosData.creditos.filter((cr) => {
+      if (creditosEstadoFilter !== "Todos" && cr.estado !== creditosEstadoFilter) return false;
+      if (!q) return true;
+      return (
+        cr.cliente_nombre.toLowerCase().includes(q) ||
+        cr.numero.toLowerCase().includes(q) ||
+        (cr.cliente_documento && cr.cliente_documento.toLowerCase().includes(q)) ||
+        (cr.venta_numero && cr.venta_numero.toLowerCase().includes(q))
+      );
+    });
+  }, [creditosData.creditos, creditosEstadoFilter, creditosSearch]);
+
+  const pendingSyncCount = useMemo(
+    () => ventasLocales.filter((v) => v.sincronizado === 0).length + abonosPendCount,
+    [ventasLocales, abonosPendCount]
+  );
+
+  // ── Loading Screen ──
+  if (booting) {
     return (
-      <SafeAreaView style={styles.centered}>
-        <ActivityIndicator size="large" color="#3b82f6" />
-      </SafeAreaView>
+      <View style={styles.centerScreen}>
+        <StatusBar barStyle="dark-content" backgroundColor={THEME.background} />
+        <ActivityIndicator size="large" color={THEME.primary} />
+      </View>
     );
   }
 
-  if (!user) {
+  // ── Login Screen (Estética idéntica al Login de PosBit v2.6 "Con Alma") ──
+  if (!session) {
     return (
-      <SafeAreaView style={styles.container}>
-        <StatusBar barStyle="light-content" />
-        <View style={styles.loginBox}>
-          <Text style={styles.brandTitle}>PosBit Mobile</Text>
-          <Text style={styles.brandSub}>
-            Punto de Venta y Catálogo Offline-First sincronizado con tu Nube
-          </Text>
+      <KeyboardAvoidingView
+        style={styles.loginContainer}
+        behavior={Platform.OS === "ios" ? "padding" : undefined}
+      >
+        <StatusBar barStyle="dark-content" backgroundColor={THEME.background} />
+        <ScrollView contentContainerStyle={styles.loginScroll} keyboardShouldPersistTaps="handled">
+          <View style={styles.loginCard}>
+            <View style={styles.loginAccentBar} />
+            <View style={styles.loginBrandRow}>
+              <View style={styles.brandLogoBox}>
+                <Text style={styles.brandLogoLetter}>P</Text>
+              </View>
+              <View>
+                <Text style={styles.loginTitle}>PosBit</Text>
+                <Text style={styles.loginSubtitle}>Punto de Venta e Inventario</Text>
+              </View>
+            </View>
 
-          <Text style={styles.label}>URL del Servidor PosBit Cloud (o IP local)</Text>
-          <TextInput
-            style={styles.input}
-            value={serverUrl}
-            onChangeText={setServerUrl}
-            autoCapitalize="none"
-            placeholder="https://tu-posbit.up.railway.app"
-            placeholderTextColor="#64748b"
-          />
+            <Text style={styles.fieldLabel}>CORREO ELECTRÓNICO</Text>
+            <TextInput
+              style={styles.input}
+              placeholder="admin@admin.com"
+              placeholderTextColor={THEME.mutedForeground}
+              autoCapitalize="none"
+              keyboardType="email-address"
+              value={emailInput}
+              onChangeText={setEmailInput}
+            />
 
-          <Text style={styles.label}>Correo Electrónico</Text>
-          <TextInput
-            style={styles.input}
-            value={email}
-            onChangeText={setEmail}
-            autoCapitalize="none"
-            keyboardType="email-address"
-            placeholder="admin@admin.com"
-            placeholderTextColor="#64748b"
-          />
+            <Text style={styles.fieldLabel}>CONTRASEÑA</Text>
+            <TextInput
+              style={styles.input}
+              placeholder="••••••••"
+              placeholderTextColor={THEME.mutedForeground}
+              secureTextEntry
+              value={passwordInput}
+              onChangeText={setPasswordInput}
+            />
 
-          <Text style={styles.label}>Contraseña</Text>
-          <TextInput
-            style={styles.input}
-            value={password}
-            onChangeText={setPassword}
-            secureTextEntry
-            placeholder="••••••••"
-            placeholderTextColor="#64748b"
-          />
+            <TouchableOpacity
+              style={styles.advancedToggle}
+              onPress={() => setShowAdvancedServer((v) => !v)}
+            >
+              <Feather
+                name={showAdvancedServer ? "chevron-up" : "chevron-down"}
+                size={14}
+                color={THEME.mutedForeground}
+              />
+              <Text style={styles.advancedToggleText}>
+                {showAdvancedServer ? "Ocultar servidor" : "Servidor Nube: PosBit Cloud"}
+              </Text>
+            </TouchableOpacity>
 
-          <TouchableOpacity
-            style={styles.primaryBtn}
-            onPress={handleLogin}
-            disabled={authLoading}
-          >
-            {authLoading ? (
-              <ActivityIndicator color="#fff" />
-            ) : (
-              <Text style={styles.primaryBtnText}>Conectar y Descargar Catálogo</Text>
+            {showAdvancedServer && (
+              <View style={{ marginTop: 4 }}>
+                <Text style={styles.fieldLabel}>URL DEL SERVIDOR POSBIT</Text>
+                <TextInput
+                  style={styles.input}
+                  placeholder="https://pos-bit-pi.vercel.app"
+                  placeholderTextColor={THEME.mutedForeground}
+                  autoCapitalize="none"
+                  keyboardType="url"
+                  value={serverUrlInput}
+                  onChangeText={setServerUrlInput}
+                />
+              </View>
             )}
-          </TouchableOpacity>
-        </View>
-      </SafeAreaView>
+
+            {loginError ? (
+              <View style={styles.errorAlert}>
+                <Feather name="alert-circle" size={15} color={THEME.dangerStrong} />
+                <Text style={styles.errorAlertText}>{loginError}</Text>
+              </View>
+            ) : null}
+
+            <TouchableOpacity
+              style={[styles.primaryBtn, { marginTop: 18 }, loginLoading && { opacity: 0.7 }]}
+              onPress={handleLogin}
+              disabled={loginLoading}
+            >
+              {loginLoading ? (
+                <ActivityIndicator color="#fff" />
+              ) : (
+                <Text style={styles.primaryBtnText}>Iniciar Sesión</Text>
+              )}
+            </TouchableOpacity>
+          </View>
+        </ScrollView>
+      </KeyboardAvoidingView>
     );
   }
 
-  const pendientesCount = ventasLocales.filter((v) => v.sincronizado === 0).length;
+  // ── Títulos de Ruta (idénticos a Topbar de la web) ──
+  const routeTitle: Record<AppRoute, string> = {
+    dashboard: "Panel de control",
+    pos: "Punto de Venta",
+    clientes: "Clientes",
+    creditos: "Créditos / Deudores",
+    ventas: "Historial de Ventas",
+    productos: "Productos",
+    config: "Sincronización y Tasas",
+  };
 
   return (
-    <SafeAreaView style={styles.container}>
-      <StatusBar barStyle="light-content" />
+    <View style={styles.appContainer}>
+      <StatusBar barStyle="dark-content" backgroundColor={THEME.card} />
 
-      {/* Header Superior con Estado Online / Offline */}
-      <View style={styles.header}>
-        <View>
-          <Text style={styles.headerTitle}>PosBit Mobile</Text>
-          <Text style={styles.headerSub}>{user.name}</Text>
-        </View>
+      {/* ── Topbar idéntico a PosBit v2.6 Web ── */}
+      <View style={styles.topbar}>
+        <View style={styles.topbarOrangeLine} />
+        <TouchableOpacity
+          style={styles.menuIconBtn}
+          onPress={() => setDrawerOpen(true)}
+          accessibilityLabel="Abrir menú"
+        >
+          <Feather name="menu" size={20} color={THEME.foreground} />
+        </TouchableOpacity>
 
         <TouchableOpacity
-          onPress={() => handleSync(false)}
-          style={[
-            styles.statusBadge,
-            isOnline ? styles.badgeOnline : styles.badgeOffline,
-          ]}
+          style={styles.topbarBrand}
+          onPress={() => setRoute(route === "pos" ? "dashboard" : "pos")}
         >
-          <Text style={styles.statusBadgeText}>
+          <View style={styles.topbarLogoSmall}>
+            <Text style={styles.topbarLogoSmallText}>P</Text>
+          </View>
+          <View>
+            <Text style={styles.topbarTitle} numberOfLines={1}>
+              {routeTitle[route]}
+            </Text>
+            <Text style={styles.topbarSubtitle} numberOfLines={1}>
+              PosBit · {monedaSeleccionada}
+            </Text>
+          </View>
+        </TouchableOpacity>
+
+        <View style={{ flex: 1 }} />
+
+        {/* CloudSyncBadge idéntico a la web */}
+        <TouchableOpacity
+          style={[
+            styles.cloudBadge,
+            syncing
+              ? styles.cloudBadgeSyncing
+              : !syncOnline
+              ? styles.cloudBadgeOffline
+              : pendingSyncCount > 0
+              ? styles.cloudBadgePending
+              : styles.cloudBadgeOk,
+          ]}
+          onPress={runSilentSync}
+        >
+          <View
+            style={[
+              styles.cloudDot,
+              {
+                backgroundColor: syncing
+                  ? THEME.primary
+                  : !syncOnline
+                  ? THEME.danger
+                  : pendingSyncCount > 0
+                  ? THEME.warning
+                  : THEME.success,
+              },
+            ]}
+          />
+          <Text
+            style={[
+              styles.cloudBadgeText,
+              {
+                color: syncing
+                  ? THEME.primary600
+                  : !syncOnline
+                  ? THEME.dangerStrong
+                  : pendingSyncCount > 0
+                  ? THEME.warningStrong
+                  : THEME.successStrong,
+              },
+            ]}
+          >
             {syncing
-              ? "Sincronizando..."
-              : isOnline
-                ? pendientesCount > 0
-                  ? `Online (${pendientesCount} pend.)`
-                  : "Online · Al día"
-                : `Offline (${pendientesCount} en cola)`}
+              ? "Sinc..."
+              : !syncOnline
+              ? "Offline"
+              : pendingSyncCount > 0
+              ? `${pendingSyncCount} pend.`
+              : "En línea"}
           </Text>
         </TouchableOpacity>
+
+        {route !== "pos" && (
+          <TouchableOpacity
+            style={styles.topbarPosShortBtn}
+            onPress={() => setRoute("pos")}
+          >
+            <Feather name="shopping-cart" size={14} color="#fff" />
+            <Text style={styles.topbarPosShortBtnText}>POS</Text>
+          </TouchableOpacity>
+        )}
       </View>
 
-      {/* Contenido por Pestaña */}
-      <View style={styles.content}>
-        {activeTab === "catalogo" && (
-          <View style={{ flex: 1 }}>
-            <TextInput
-              style={styles.searchInput}
-              value={search}
-              onChangeText={setSearch}
-              placeholder="Buscar por nombre o código de barras..."
-              placeholderTextColor="#64748b"
-            />
-            <FlatList
-              data={productos}
-              keyExtractor={(item) => String(item.id)}
-              ListEmptyComponent={
-                <Text style={styles.emptyText}>
-                  No hay productos locales. Pulsa el botón de sincronización arriba.
-                </Text>
-              }
-              renderItem={({ item }) => {
-                const precioBs = monedaVes ? item.precio_base * monedaVes.tasa : null;
-                return (
-                  <View style={styles.cardRow}>
-                    <View style={{ flex: 1 }}>
-                      <Text style={styles.prodName}>{item.nombre}</Text>
-                      <Text style={styles.prodCode}>
-                        Cód: {item.codigo} · Stock: {item.stock}
-                      </Text>
-                    </View>
-                    <View style={{ alignItems: "flex-end", marginRight: 10 }}>
-                      <Text style={styles.prodPrice}>${item.precio_base.toFixed(2)}</Text>
-                      {precioBs !== null && (
-                        <Text style={styles.prodPriceSub}>Bs. {precioBs.toFixed(2)}</Text>
-                      )}
-                    </View>
+      {/* Toast flotante */}
+      {toastMsg && (
+        <View
+          style={[
+            styles.toastBanner,
+            toastMsg.type === "error"
+              ? { backgroundColor: THEME.dangerSoft, borderColor: THEME.dangerBorder }
+              : toastMsg.type === "info"
+              ? { backgroundColor: THEME.infoSoft, borderColor: THEME.infoBorder }
+              : { backgroundColor: THEME.successSoft, borderColor: THEME.successBorder },
+          ]}
+        >
+          <Feather
+            name={
+              toastMsg.type === "error"
+                ? "alert-circle"
+                : toastMsg.type === "info"
+                ? "info"
+                : "check-circle"
+            }
+            size={15}
+            color={
+              toastMsg.type === "error"
+                ? THEME.dangerStrong
+                : toastMsg.type === "info"
+                ? THEME.infoStrong
+                : THEME.successStrong
+            }
+          />
+          <Text
+            style={[
+              styles.toastBannerText,
+              {
+                color:
+                  toastMsg.type === "error"
+                    ? THEME.dangerStrong
+                    : toastMsg.type === "info"
+                    ? THEME.infoStrong
+                    : THEME.successStrong,
+              },
+            ]}
+          >
+            {toastMsg.text}
+          </Text>
+        </View>
+      )}
+
+      {/* ── CONTENIDO PRINCIPAL SEGÚN RUTA ── */}
+
+      {/* ==================== 1. PUNTO DE VENTA (/pos) ==================== */}
+      {route === "pos" && (
+        <View style={{ flex: 1 }}>
+          {/* Barra superior de controles del POS (Buscador + Método de Pago + Moneda + Sub-tabs Catálogo/Carrito) */}
+          <View style={styles.posControlHeader}>
+            <View style={styles.posSearchRow}>
+              <View style={styles.searchBox}>
+                <Feather name="search" size={16} color={THEME.mutedForeground} />
+                <TextInput
+                  style={styles.searchBoxInput}
+                  placeholder="Buscar por nombre o código..."
+                  placeholderTextColor={THEME.mutedForeground}
+                  value={posSearch}
+                  onChangeText={setPosSearch}
+                />
+                {posSearch.length > 0 && (
+                  <TouchableOpacity onPress={() => setPosSearch("")}>
+                    <Feather name="x-circle" size={16} color={THEME.mutedForeground} />
+                  </TouchableOpacity>
+                )}
+              </View>
+
+              {/* Moneda activa selector pill */}
+              <ScrollView
+                horizontal
+                showsHorizontalScrollIndicator={false}
+                style={{ flexGrow: 0 }}
+                contentContainerStyle={{ gap: 4 }}
+              >
+                {monedas.map((m) => {
+                  const active = m.codigo === monedaSeleccionada;
+                  return (
                     <TouchableOpacity
-                      style={styles.addBtn}
-                      onPress={() => addToCart(item)}
+                      key={m.id}
+                      style={[styles.currencyPill, active && styles.currencyPillActive]}
+                      onPress={() => setMonedaSeleccionada(m.codigo)}
                     >
-                      <Text style={styles.addBtnText}>+ POS</Text>
+                      <Text
+                        style={[
+                          styles.currencyPillText,
+                          active && styles.currencyPillTextActive,
+                        ]}
+                      >
+                        {m.codigo}
+                      </Text>
                     </TouchableOpacity>
-                  </View>
-                );
-              }}
-            />
-          </View>
-        )}
+                  );
+                })}
+              </ScrollView>
+            </View>
 
-        {activeTab === "pos" && (
-          <View style={{ flex: 1 }}>
-            <TextInput
-              style={styles.searchInput}
-              value={clienteNombre}
-              onChangeText={setClienteNombre}
-              placeholder="Nombre del Cliente"
-              placeholderTextColor="#64748b"
-            />
+            {/* Métodos de Pago horizontales (idénticos al selector del POS web: cambian la moneda automáticamente) */}
+            {metodosPago.length > 0 && (
+              <ScrollView
+                horizontal
+                showsHorizontalScrollIndicator={false}
+                contentContainerStyle={styles.posMetodosRow}
+              >
+                {metodosPago.map((mp) => {
+                  const isSel = String(mp.id) === String(metodoPagoSeleccionado);
+                  return (
+                    <TouchableOpacity
+                      key={mp.id}
+                      style={[styles.metodoChip, isSel && styles.metodoChipActive]}
+                      onPress={() => handleSelectMetodoPago(String(mp.id))}
+                    >
+                      <Text style={{ fontSize: 12 }}>{getMetodoEmoji(mp.tipo, mp.nombre)}</Text>
+                      <Text
+                        style={[styles.metodoChipText, isSel && styles.metodoChipTextActive]}
+                        numberOfLines={1}
+                      >
+                        {mp.nombre}
+                      </Text>
+                      {mp.moneda_codigo ? (
+                        <View
+                          style={[
+                            styles.metodoChipBadge,
+                            isSel && { backgroundColor: "rgba(255,255,255,0.22)" },
+                          ]}
+                        >
+                          <Text
+                            style={[
+                              styles.metodoChipBadgeText,
+                              isSel && { color: "#fff" },
+                            ]}
+                          >
+                            {mp.moneda_codigo}
+                          </Text>
+                        </View>
+                      ) : null}
+                    </TouchableOpacity>
+                  );
+                })}
+              </ScrollView>
+            )}
 
-            <FlatList
-              data={cart}
-              keyExtractor={(item) => String(item.producto.id)}
-              ListEmptyComponent={
-                <Text style={styles.emptyText}>
-                  El carrito está vacío. Agrega productos desde el Catálogo.
+            {/* Conmutador Responsive: Catálogo vs Carrito + En espera */}
+            <View style={styles.posModeSwitchRow}>
+              <TouchableOpacity
+                style={[
+                  styles.posModeTab,
+                  posSubView === "catalogo" && styles.posModeTabActive,
+                ]}
+                onPress={() => setPosSubView("catalogo")}
+              >
+                <Feather
+                  name="grid"
+                  size={14}
+                  color={posSubView === "catalogo" ? "#fff" : THEME.foreground}
+                />
+                <Text
+                  style={[
+                    styles.posModeTabText,
+                    posSubView === "catalogo" && styles.posModeTabTextActive,
+                  ]}
+                >
+                  Catálogo ({posProductosFiltrados.length})
                 </Text>
-              }
-              renderItem={({ item }) => (
-                <View style={styles.cardRow}>
-                  <View style={{ flex: 1 }}>
-                    <Text style={styles.prodName}>{item.producto.nombre}</Text>
-                    <Text style={styles.prodCode}>
-                      ${item.producto.precio_base.toFixed(2)} c/u
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                style={[
+                  styles.posModeTab,
+                  posSubView === "carrito" && styles.posModeTabActive,
+                ]}
+                onPress={() => setPosSubView("carrito")}
+              >
+                <Feather
+                  name="shopping-cart"
+                  size={14}
+                  color={posSubView === "carrito" ? "#fff" : THEME.foreground}
+                />
+                <Text
+                  style={[
+                    styles.posModeTabText,
+                    posSubView === "carrito" && styles.posModeTabTextActive,
+                  ]}
+                >
+                  Carrito ({cart.reduce((s, c) => s + c.qty, 0)})
+                </Text>
+              </TouchableOpacity>
+
+              {heldCarts.length > 0 && (
+                <TouchableOpacity
+                  style={styles.heldCartPill}
+                  onPress={() => setShowHeldModal(true)}
+                >
+                  <Feather name="pause-circle" size={14} color={THEME.warningStrong} />
+                  <Text style={styles.heldCartPillText}>En espera ({heldCarts.length})</Text>
+                </TouchableOpacity>
+              )}
+            </View>
+          </View>
+
+          {/* SUB-VISTA A: CATÁLOGO DE PRODUCTOS */}
+          {posSubView === "catalogo" ? (
+            <View style={{ flex: 1 }}>
+              {/* Filtro de Categorías */}
+              {categorias.length > 0 && (
+                <View style={styles.catFilterContainer}>
+                  <ScrollView
+                    horizontal
+                    showsHorizontalScrollIndicator={false}
+                    contentContainerStyle={{ gap: 6, paddingHorizontal: 12 }}
+                  >
+                    <TouchableOpacity
+                      style={[
+                        styles.catChip,
+                        posCategoriaId === null && styles.catChipActive,
+                      ]}
+                      onPress={() => setPosCategoriaId(null)}
+                    >
+                      <Text
+                        style={[
+                          styles.catChipText,
+                          posCategoriaId === null && styles.catChipTextActive,
+                        ]}
+                      >
+                        Todas
+                      </Text>
+                    </TouchableOpacity>
+                    {categorias.map((cat) => {
+                      const active = posCategoriaId === cat.id;
+                      return (
+                        <TouchableOpacity
+                          key={cat.id}
+                          style={[styles.catChip, active && styles.catChipActive]}
+                          onPress={() => setPosCategoriaId(active ? null : cat.id)}
+                        >
+                          <Text
+                            style={[
+                              styles.catChipText,
+                              active && styles.catChipTextActive,
+                            ]}
+                          >
+                            {cat.nombre}
+                          </Text>
+                        </TouchableOpacity>
+                      );
+                    })}
+                  </ScrollView>
+                </View>
+              )}
+
+              <FlatList
+                data={posProductosFiltrados}
+                keyExtractor={(item) => String(item.id)}
+                numColumns={2}
+                columnWrapperStyle={{ gap: 10, paddingHorizontal: 12 }}
+                contentContainerStyle={{ paddingTop: 10, paddingBottom: 110, gap: 10 }}
+                renderItem={({ item }) => {
+                  const inCartQty = cart
+                    .filter((c) => c.product.id === item.id)
+                    .reduce((s, c) => s + unidadesDeLinea(c), 0);
+                  const sinStock = item.stock <= 0;
+                  const bajoStock = item.stock > 0 && item.stock <= (item.stock_minimo || 5);
+                  const precioMostrado = precioUnitarioEnMoneda(item, monedaSeleccionada);
+
+                  return (
+                    <TouchableOpacity
+                      style={[
+                        styles.posProdCard,
+                        inCartQty > 0 && styles.posProdCardInCart,
+                        sinStock && { opacity: 0.55 },
+                      ]}
+                      onPress={() => addToCart(item, null)}
+                      activeOpacity={0.75}
+                    >
+                      <View style={styles.posProdTopRow}>
+                        <View style={styles.posProdIconWrap}>
+                          <Feather name="package" size={18} color={THEME.primary} />
+                        </View>
+                        <View style={{ flexDirection: "row", alignItems: "center", gap: 4 }}>
+                          {item.iva_incluido === 0 && (
+                            <View style={styles.ivaBadge}>
+                              <Text style={styles.ivaBadgeText}>+IVA</Text>
+                            </View>
+                          )}
+                          {inCartQty > 0 && (
+                            <View style={styles.inCartCountBadge}>
+                              <Text style={styles.inCartCountBadgeText}>{inCartQty}</Text>
+                            </View>
+                          )}
+                        </View>
+                      </View>
+
+                      <Text style={styles.posProdName} numberOfLines={2}>
+                        {item.nombre}
+                      </Text>
+                      <Text style={styles.posProdCode} numberOfLines={1}>
+                        {item.codigo}
+                      </Text>
+
+                      {/* Presentaciones rápidas (ej. Caja x12) si el producto las tiene */}
+                      {item.presentaciones && item.presentaciones.length > 0 && (
+                        <View style={styles.posPresPillsRow}>
+                          {item.presentaciones.map((pr) => (
+                            <TouchableOpacity
+                              key={pr.id}
+                              style={styles.posPresMiniBtn}
+                              onPress={() => addToCart(item, pr)}
+                            >
+                              <Feather name="box" size={10} color={THEME.primary600} />
+                              <Text style={styles.posPresMiniBtnText}>
+                                {pr.nombre} x{pr.unidades}
+                              </Text>
+                            </TouchableOpacity>
+                          ))}
+                        </View>
+                      )}
+
+                      <View style={styles.posProdFooter}>
+                        <Text style={styles.posProdPrice}>
+                          {fmt(precioMostrado, monedaSeleccionada)}
+                        </Text>
+                        <View
+                          style={[
+                            styles.stockBadge,
+                            sinStock
+                              ? styles.stockBadgeDanger
+                              : bajoStock
+                              ? styles.stockBadgeWarning
+                              : styles.stockBadgeSuccess,
+                          ]}
+                        >
+                          <Text
+                            style={[
+                              styles.stockBadgeText,
+                              sinStock
+                                ? { color: THEME.dangerStrong }
+                                : bajoStock
+                                ? { color: THEME.warningStrong }
+                                : { color: THEME.successStrong },
+                            ]}
+                          >
+                            {sinStock ? "Agotado" : `Stock: ${item.stock}`}
+                          </Text>
+                        </View>
+                      </View>
+                    </TouchableOpacity>
+                  );
+                }}
+                ListEmptyComponent={
+                  <View style={styles.emptyBox}>
+                    <Feather name="package" size={36} color={THEME.mutedForeground} />
+                    <Text style={styles.emptyBoxTitle}>No se encontraron productos</Text>
+                    <Text style={styles.emptyBoxSub}>
+                      Prueba con otra búsqueda o sincroniza el catálogo.
                     </Text>
                   </View>
-                  <View style={styles.qtyControls}>
+                }
+              />
+
+              {/* Barra Flotante de Carrito / Cobro Rápido en parte inferior */}
+              {cart.length > 0 && (
+                <View style={styles.floatingCartBar}>
+                  <TouchableOpacity
+                    style={styles.floatingCartInfo}
+                    onPress={() => setPosSubView("carrito")}
+                  >
+                    <View style={styles.floatingCartBadge}>
+                      <Text style={styles.floatingCartBadgeText}>
+                        {cart.reduce((s, c) => s + c.qty, 0)}
+                      </Text>
+                    </View>
+                    <View>
+                      <Text style={styles.floatingCartLabel}>TOTAL CARRITO</Text>
+                      <Text style={styles.floatingCartTotal}>
+                        {fmt(total, monedaSeleccionada)}
+                      </Text>
+                    </View>
+                  </TouchableOpacity>
+
+                  <View style={{ flexDirection: "row", gap: 8 }}>
                     <TouchableOpacity
-                      style={styles.qtyBtn}
-                      onPress={() => updateCartQty(item.producto.id, -1)}
+                      style={styles.floatingViewCartBtn}
+                      onPress={() => setPosSubView("carrito")}
                     >
-                      <Text style={styles.qtyBtnText}>-</Text>
+                      <Text style={styles.floatingViewCartBtnText}>Editar</Text>
                     </TouchableOpacity>
-                    <Text style={styles.qtyVal}>{item.cantidad}</Text>
                     <TouchableOpacity
-                      style={styles.qtyBtn}
-                      onPress={() => updateCartQty(item.producto.id, 1)}
+                      style={styles.floatingCheckoutBtn}
+                      onPress={handleOpenCheckout}
                     >
-                      <Text style={styles.qtyBtnText}>+</Text>
+                      <Text style={styles.floatingCheckoutBtnText}>Cobrar</Text>
+                      <Feather name="arrow-right" size={16} color="#fff" />
                     </TouchableOpacity>
                   </View>
                 </View>
               )}
-            />
+            </View>
+          ) : (
+            /* SUB-VISTA B: PANEL COMPLETO DEL CARRITO (idéntico al panel derecho del POS Web) */
+            <ScrollView
+              style={{ flex: 1 }}
+              contentContainerStyle={{ padding: 12, paddingBottom: 40, gap: 12 }}
+              keyboardShouldPersistTaps="handled"
+            >
+              {/* Cabecera del Carrito + Pausar + Limpiar */}
+              <View style={styles.card}>
+                <View style={styles.cartHeaderRow}>
+                  <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+                    <Feather name="shopping-cart" size={16} color={THEME.primary} />
+                    <Text style={styles.cardSectionTitle}>
+                      Carrito ({cart.reduce((s, c) => s + c.qty, 0)} ítems)
+                    </Text>
+                  </View>
+                  <View style={{ flexDirection: "row", gap: 8 }}>
+                    {cart.length > 0 && (
+                      <>
+                        <TouchableOpacity style={styles.outlineSmallBtn} onPress={handlePauseCart}>
+                          <Feather name="pause" size={12} color={THEME.foreground} />
+                          <Text style={styles.outlineSmallBtnText}>Pausar</Text>
+                        </TouchableOpacity>
+                        <TouchableOpacity
+                          style={[styles.outlineSmallBtn, { borderColor: THEME.dangerBorder }]}
+                          onPress={() => setCart([])}
+                        >
+                          <Feather name="trash-2" size={12} color={THEME.dangerStrong} />
+                          <Text style={[styles.outlineSmallBtnText, { color: THEME.dangerStrong }]}>
+                            Limpiar
+                          </Text>
+                        </TouchableOpacity>
+                      </>
+                    )}
+                  </View>
+                </View>
 
-            <View style={styles.checkoutFooter}>
-              <View style={{ flexDirection: "row", justifyContent: "space-between", marginBottom: 10 }}>
-                <Text style={styles.totalLabel}>Total a Cobrar:</Text>
-                <Text style={styles.totalValue}>${totalUsd.toFixed(2)} USD</Text>
+                {/* Selector de Cliente (idéntico a la web + botón Nuevo Cliente) */}
+                <View style={styles.clienteSelectorBox}>
+                  <View style={styles.clienteSelectorHeader}>
+                    <Text style={styles.fieldLabelSmall}>CLIENTE</Text>
+                    <TouchableOpacity
+                      style={styles.newClientInlineBtn}
+                      onPress={() => openCreateClienteModal(null)}
+                    >
+                      <Feather name="user-plus" size={12} color={THEME.primary} />
+                      <Text style={styles.newClientInlineBtnText}>+ Nuevo Cliente</Text>
+                    </TouchableOpacity>
+                  </View>
+
+                  <TouchableOpacity
+                    style={styles.clienteDropdownBtn}
+                    onPress={() => {
+                      setClientePickerSearch("");
+                      setShowClientePickerModal(true);
+                    }}
+                  >
+                    <Feather name="user" size={15} color={THEME.mutedForeground} />
+                    <Text style={styles.clienteDropdownText} numberOfLines={1}>
+                      {clienteSeleccionadoObj
+                        ? `${clienteSeleccionadoObj.nombre}${
+                            clienteSeleccionadoObj.documento
+                              ? ` (${clienteSeleccionadoObj.documento})`
+                              : ""
+                          }`
+                        : "Consumidor Final (Sin registrar)"}
+                    </Text>
+                    {clienteId ? (
+                      <TouchableOpacity onPress={() => setClienteId(null)}>
+                        <Feather name="x" size={16} color={THEME.mutedForeground} />
+                      </TouchableOpacity>
+                    ) : (
+                      <Feather name="chevron-down" size={16} color={THEME.mutedForeground} />
+                    )}
+                  </TouchableOpacity>
+
+                  {/* Alerta de Deuda Registrada (idéntica a la web en ámbar/rojo) */}
+                  {clienteSeleccionadoObj &&
+                    clienteSeleccionadoObj.deuda_total &&
+                    clienteSeleccionadoObj.deuda_total.length > 0 && (
+                      <View style={styles.deudaAlertBox}>
+                        <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
+                          <Feather name="alert-triangle" size={14} color={THEME.warningStrong} />
+                          <Text style={styles.deudaAlertTitle}>
+                            Este cliente presenta deuda pendiente:
+                          </Text>
+                        </View>
+                        <View style={styles.deudaAlertAmountsRow}>
+                          {clienteSeleccionadoObj.deuda_total.map((d) => (
+                            <View key={d.codigo} style={styles.deudaChip}>
+                              <Text style={styles.deudaChipText}>
+                                {d.simbolo} {d.monto.toFixed(2)} {d.codigo}
+                              </Text>
+                            </View>
+                          ))}
+                        </View>
+                      </View>
+                    )}
+                </View>
               </View>
+
+              {/* Lista de Líneas del Carrito */}
+              {cart.length === 0 ? (
+                <View style={styles.card}>
+                  <View style={styles.emptyBox}>
+                    <Feather name="shopping-bag" size={34} color={THEME.mutedForeground} />
+                    <Text style={styles.emptyBoxTitle}>El carrito está vacío</Text>
+                    <Text style={styles.emptyBoxSub}>
+                      Toca cualquier producto en el Catálogo para agregarlo.
+                    </Text>
+                    <TouchableOpacity
+                      style={[styles.primaryBtn, { marginTop: 12, paddingHorizontal: 20 }]}
+                      onPress={() => setPosSubView("catalogo")}
+                    >
+                      <Text style={styles.primaryBtnText}>Ir al Catálogo</Text>
+                    </TouchableOpacity>
+                  </View>
+                </View>
+              ) : (
+                cart.map((item) => {
+                  const key = claveDe(item);
+                  const unitPrice = precioDeLineaEnMoneda(item, monedaSeleccionada);
+                  const lineBruto = totalLineaEnMoneda(item, monedaSeleccionada);
+                  const lineDesc = descuentoDeLinea(item, monedaSeleccionada);
+                  const lineNeto = Math.max(0, lineBruto - lineDesc);
+                  const presentaciones = item.product.presentaciones || [];
+
+                  return (
+                    <View key={key} style={styles.cartItemCard}>
+                      <View style={styles.cartItemTopRow}>
+                        <View style={{ flex: 1 }}>
+                          <Text style={styles.cartItemName}>{item.product.nombre}</Text>
+                          <Text style={styles.cartItemSub}>
+                            {fmt(unitPrice, monedaSeleccionada)} c/u · Stock: {item.product.stock}
+                          </Text>
+                        </View>
+                        <Text style={styles.cartItemNeto}>
+                          {fmt(lineNeto, monedaSeleccionada)}
+                        </Text>
+                      </View>
+
+                      {/* Selector de Presentación en la línea (si tiene cajas/paquetes) */}
+                      {presentaciones.length > 0 && (
+                        <ScrollView
+                          horizontal
+                          showsHorizontalScrollIndicator={false}
+                          contentContainerStyle={{ gap: 6, marginVertical: 6 }}
+                        >
+                          <TouchableOpacity
+                            style={[
+                              styles.presSelectChip,
+                              !item.presentacion && styles.presSelectChipActive,
+                            ]}
+                            onPress={() => cambiarPresentacionLinea(key, null)}
+                          >
+                            <Text
+                              style={[
+                                styles.presSelectChipText,
+                                !item.presentacion && styles.presSelectChipTextActive,
+                              ]}
+                            >
+                              Unidad (x1)
+                            </Text>
+                          </TouchableOpacity>
+                          {presentaciones.map((pr) => {
+                            const active = item.presentacion?.id === pr.id;
+                            return (
+                              <TouchableOpacity
+                                key={pr.id}
+                                style={[
+                                  styles.presSelectChip,
+                                  active && styles.presSelectChipActive,
+                                ]}
+                                onPress={() => cambiarPresentacionLinea(key, pr)}
+                              >
+                                <Text
+                                  style={[
+                                    styles.presSelectChipText,
+                                    active && styles.presSelectChipTextActive,
+                                  ]}
+                                >
+                                  {pr.nombre} (x{pr.unidades})
+                                </Text>
+                              </TouchableOpacity>
+                            );
+                          })}
+                        </ScrollView>
+                      )}
+
+                      <View style={styles.cartItemControlsRow}>
+                        {/* Cantidad - / + */}
+                        <View style={styles.qtyStepper}>
+                          <TouchableOpacity
+                            style={styles.qtyStepBtn}
+                            onPress={() => updateCartQty(key, -1)}
+                          >
+                            <Feather name="minus" size={14} color={THEME.foreground} />
+                          </TouchableOpacity>
+                          <Text style={styles.qtyStepValue}>{item.qty}</Text>
+                          <TouchableOpacity
+                            style={styles.qtyStepBtn}
+                            onPress={() => updateCartQty(key, 1)}
+                          >
+                            <Feather name="plus" size={14} color={THEME.foreground} />
+                          </TouchableOpacity>
+                        </View>
+
+                        {/* Descuento por línea ("10" o "10%") */}
+                        <View style={styles.lineDiscountBox}>
+                          <Text style={styles.lineDiscountLabel}>Desc:</Text>
+                          <TextInput
+                            style={styles.lineDiscountInput}
+                            placeholder="0 o %"
+                            placeholderTextColor={THEME.mutedForeground}
+                            value={item.descuentoStr || ""}
+                            onChangeText={(v) => setDescuentoLinea(key, v)}
+                          />
+                        </View>
+
+                        <TouchableOpacity
+                          style={styles.removeLineBtn}
+                          onPress={() => updateCartQty(key, -item.qty)}
+                        >
+                          <Feather name="trash-2" size={15} color={THEME.dangerStrong} />
+                        </TouchableOpacity>
+                      </View>
+                    </View>
+                  );
+                })
+              )}
+
+              {/* Resumen de Totales y Botón Proceder al Pago */}
+              {cart.length > 0 && (
+                <View style={styles.card}>
+                  <View style={styles.summaryRow}>
+                    <Text style={styles.summaryLabel}>Subtotal</Text>
+                    <Text style={styles.summaryVal}>{fmt(subtotal, monedaSeleccionada)}</Text>
+                  </View>
+                  {descuentoTotal > 0 && (
+                    <View style={styles.summaryRow}>
+                      <Text style={[styles.summaryLabel, { color: THEME.successStrong }]}>
+                        Descuento
+                      </Text>
+                      <Text style={[styles.summaryVal, { color: THEME.successStrong }]}>
+                        - {fmt(descuentoTotal, monedaSeleccionada)}
+                      </Text>
+                    </View>
+                  )}
+                  <View style={styles.summaryRow}>
+                    <Text style={styles.summaryLabel}>IVA (16%)</Text>
+                    <Text style={styles.summaryVal}>{fmt(tax, monedaSeleccionada)}</Text>
+                  </View>
+                  {totalCobrosExtraEnMoneda(monedaSeleccionada) > 0 && (
+                    <View style={styles.summaryRow}>
+                      <Text style={styles.summaryLabel}>Cobros extra</Text>
+                      <Text style={styles.summaryVal}>
+                        + {fmt(totalCobrosExtraEnMoneda(monedaSeleccionada), monedaSeleccionada)}
+                      </Text>
+                    </View>
+                  )}
+                  <View style={styles.summaryTotalRow}>
+                    <Text style={styles.summaryTotalLabel}>Total ({monedaSeleccionada})</Text>
+                    <Text style={styles.summaryTotalValue}>
+                      {fmt(total, monedaSeleccionada)}
+                    </Text>
+                  </View>
+
+                  <TouchableOpacity
+                    style={[styles.primaryBtn, { marginTop: 12 }]}
+                    onPress={handleOpenCheckout}
+                  >
+                    <Feather name="check-circle" size={17} color="#fff" />
+                    <Text style={styles.primaryBtnText}>Proceder al Pago</Text>
+                  </TouchableOpacity>
+                </View>
+              )}
+            </ScrollView>
+          )}
+        </View>
+      )}
+
+      {/* ==================== 2. CLIENTES (/clientes) ==================== */}
+      {route === "clientes" && (
+        <View style={{ flex: 1 }}>
+          <View style={styles.moduleHeaderBar}>
+            <View style={[styles.searchBox, { flex: 1 }]}>
+              <Feather name="search" size={16} color={THEME.mutedForeground} />
+              <TextInput
+                style={styles.searchBoxInput}
+                placeholder="Buscar cliente, documento o teléfono..."
+                placeholderTextColor={THEME.mutedForeground}
+                value={clientesSearch}
+                onChangeText={setClientesSearch}
+              />
+            </View>
+            <TouchableOpacity
+              style={styles.primarySmallBtn}
+              onPress={() => openCreateClienteModal(null)}
+            >
+              <Feather name="plus" size={15} color="#fff" />
+              <Text style={styles.primarySmallBtnText}>Nuevo Cliente</Text>
+            </TouchableOpacity>
+          </View>
+
+          <FlatList
+            data={clientesFiltrados}
+            keyExtractor={(item) => String(item.id)}
+            contentContainerStyle={{ padding: 12, paddingBottom: 90, gap: 10 }}
+            renderItem={({ item }) => (
               <TouchableOpacity
-                style={[styles.primaryBtn, cart.length === 0 && { opacity: 0.5 }]}
-                disabled={cart.length === 0}
-                onPress={handleCobrar}
+                style={styles.card}
+                onPress={() => openCreateClienteModal(item)}
+                activeOpacity={0.8}
               >
-                <Text style={styles.primaryBtnText}>
-                  {isOnline
-                    ? "Cobrar y Sincronizar con Nube"
-                    : "Cobrar en Modo Offline"}
+                <View style={styles.clientCardTop}>
+                  <View style={styles.avatarCircle}>
+                    <Text style={styles.avatarCircleText}>{userInitials(item.nombre)}</Text>
+                  </View>
+                  <View style={{ flex: 1 }}>
+                    <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
+                      <Text style={styles.clientCardName}>{item.nombre}</Text>
+                      <View
+                        style={[
+                          styles.statusBadge,
+                          item.tipo === "Empresa"
+                            ? { backgroundColor: THEME.infoSoft, borderColor: THEME.infoBorder }
+                            : { backgroundColor: THEME.muted, borderColor: THEME.border },
+                        ]}
+                      >
+                        <Text
+                          style={[
+                            styles.statusBadgeText,
+                            {
+                              color:
+                                item.tipo === "Empresa"
+                                  ? THEME.infoStrong
+                                  : THEME.mutedForeground,
+                            },
+                          ]}
+                        >
+                          {item.tipo}
+                        </Text>
+                      </View>
+                    </View>
+                    <Text style={styles.clientCardMeta}>
+                      {item.documento || "Sin documento"}
+                      {item.telefono ? ` · 📞 ${item.telefono}` : ""}
+                      {item.ciudad ? ` · 📍 ${item.ciudad}` : ""}
+                    </Text>
+                  </View>
+                  <Feather name="edit-2" size={15} color={THEME.mutedForeground} />
+                </View>
+
+                <View style={styles.clientCardFooter}>
+                  {/* Límites de crédito configurados */}
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.fieldLabelSmall}>CRÉDITO HABILITADO</Text>
+                    {item.recibe_credito === 1 ? (
+                      <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 4, marginTop: 2 }}>
+                        {item.limites_credito
+                          .filter((l) => l.limite > 0)
+                          .map((l) => (
+                            <View key={l.codigo} style={styles.creditLimitTag}>
+                              <Text style={styles.creditLimitTagText}>
+                                Lím {l.codigo}: {l.simbolo} {l.limite.toFixed(0)}
+                              </Text>
+                            </View>
+                          ))}
+                        {item.limites_credito.every((l) => l.limite <= 0) && (
+                          <Text style={styles.mutedSmallText}>Sin límite asignado</Text>
+                        )}
+                      </View>
+                    ) : (
+                      <Text style={styles.mutedSmallText}>Solo contado</Text>
+                    )}
+                  </View>
+
+                  {/* Deuda Total por moneda */}
+                  <View style={{ alignItems: "flex-end" }}>
+                    <Text style={styles.fieldLabelSmall}>DEUDA TOTAL</Text>
+                    {item.deuda_total && item.deuda_total.length > 0 ? (
+                      item.deuda_total.map((d) => (
+                        <Text key={d.codigo} style={styles.clientDebtAmount}>
+                          {d.simbolo} {d.monto.toFixed(2)} {d.codigo}
+                        </Text>
+                      ))
+                    ) : (
+                      <Text style={[styles.mutedSmallText, { color: THEME.successStrong }]}>
+                        Solvente
+                      </Text>
+                    )}
+                  </View>
+                </View>
+              </TouchableOpacity>
+            )}
+            ListEmptyComponent={
+              <View style={styles.emptyBox}>
+                <Feather name="users" size={34} color={THEME.mutedForeground} />
+                <Text style={styles.emptyBoxTitle}>Sin clientes registrados</Text>
+                <Text style={styles.emptyBoxSub}>
+                  Crea tu primer cliente con el botón "+ Nuevo Cliente".
                 </Text>
+              </View>
+            }
+          />
+        </View>
+      )}
+
+      {/* ==================== 3. CRÉDITOS / DEUDORES (/creditos) ==================== */}
+      {route === "creditos" && (
+        <View style={{ flex: 1 }}>
+          {/* 3 KPI Cards idénticas a src/app/(app)/creditos/page.tsx */}
+          <View style={styles.creditosKpiRow}>
+            <View style={[styles.kpiCard, { flex: 1.3 }]}>
+              <Text style={styles.kpiLabel}>POR COBRAR</Text>
+              {creditosData.por_cobrar.length === 0 ? (
+                <Text style={[styles.kpiValue, { color: THEME.successStrong }]}>$ 0,00</Text>
+              ) : (
+                creditosData.por_cobrar.map((r) => (
+                  <Text key={r.codigo} style={[styles.kpiValueSmall, { color: THEME.dangerStrong }]}>
+                    {r.simbolo} {r.monto.toFixed(2)} <Text style={{ fontSize: 10 }}>{r.codigo}</Text>
+                  </Text>
+                ))
+              )}
+            </View>
+            <View style={styles.kpiCard}>
+              <Text style={styles.kpiLabel}>PENDIENTES</Text>
+              <Text style={[styles.kpiValue, { color: THEME.warningStrong }]}>
+                {creditosData.pendientes}
+              </Text>
+            </View>
+            <View style={styles.kpiCard}>
+              <Text style={styles.kpiLabel}>PAGADOS</Text>
+              <Text style={[styles.kpiValue, { color: THEME.successStrong }]}>
+                {creditosData.pagados}
+              </Text>
+            </View>
+          </View>
+
+          {/* Filtros de Estado + Buscador */}
+          <View style={styles.creditosFilterBar}>
+            <ScrollView
+              horizontal
+              showsHorizontalScrollIndicator={false}
+              contentContainerStyle={{ gap: 6 }}
+            >
+              {(["Todos", "Pendiente", "Parcial", "Pagado"] as const).map((est) => {
+                const active = creditosEstadoFilter === est;
+                return (
+                  <TouchableOpacity
+                    key={est}
+                    style={[styles.catChip, active && styles.catChipActive]}
+                    onPress={() => setCreditosEstadoFilter(est)}
+                  >
+                    <Text style={[styles.catChipText, active && styles.catChipTextActive]}>
+                      {est}
+                    </Text>
+                  </TouchableOpacity>
+                );
+              })}
+            </ScrollView>
+
+            <View style={[styles.searchBox, { marginTop: 8 }]}>
+              <Feather name="search" size={15} color={THEME.mutedForeground} />
+              <TextInput
+                style={styles.searchBoxInput}
+                placeholder="Buscar deudor, documento o N° de crédito..."
+                placeholderTextColor={THEME.mutedForeground}
+                value={creditosSearch}
+                onChangeText={setCreditosSearch}
+              />
+            </View>
+          </View>
+
+          <FlatList
+            data={creditosFiltrados}
+            keyExtractor={(item) => String(item.id)}
+            contentContainerStyle={{ padding: 12, paddingBottom: 90, gap: 10 }}
+            renderItem={({ item }) => {
+              const isPagado = item.estado === "Pagado" || item.saldo <= 0.009;
+              const isParcial = item.estado === "Parcial";
+              return (
+                <View style={styles.card}>
+                  <View style={styles.creditoCardHeader}>
+                    <View style={{ flex: 1 }}>
+                      <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
+                        <Text style={styles.creditoNumero}>{item.numero}</Text>
+                        {item.venta_numero && (
+                          <Text style={styles.creditoVentaTag}>Venta {item.venta_numero}</Text>
+                        )}
+                      </View>
+                      <Text style={styles.creditoClienteName}>{item.cliente_nombre}</Text>
+                      <Text style={styles.clientCardMeta}>
+                        {item.fecha}
+                        {item.cliente_documento ? ` · ${item.cliente_documento}` : ""}
+                        {item.cliente_telefono ? ` · 📞 ${item.cliente_telefono}` : ""}
+                      </Text>
+                    </View>
+
+                    <View
+                      style={[
+                        styles.statusBadge,
+                        isPagado
+                          ? {
+                              backgroundColor: THEME.successSoft,
+                              borderColor: THEME.successBorder,
+                            }
+                          : isParcial
+                          ? {
+                              backgroundColor: THEME.warningSoft,
+                              borderColor: THEME.warningBorder,
+                            }
+                          : {
+                              backgroundColor: THEME.dangerSoft,
+                              borderColor: THEME.dangerBorder,
+                            },
+                      ]}
+                    >
+                      <Text
+                        style={[
+                          styles.statusBadgeText,
+                          {
+                            color: isPagado
+                              ? THEME.successStrong
+                              : isParcial
+                              ? THEME.warningStrong
+                              : THEME.dangerStrong,
+                          },
+                        ]}
+                      >
+                        {item.estado}
+                      </Text>
+                    </View>
+                  </View>
+
+                  <View style={styles.creditoAmountsGrid}>
+                    <View>
+                      <Text style={styles.fieldLabelSmall}>TOTAL</Text>
+                      <Text style={styles.creditoAmountTotal}>
+                        {item.moneda_simbolo} {item.monto_total.toFixed(2)} {item.moneda_codigo}
+                      </Text>
+                    </View>
+                    <View>
+                      <Text style={styles.fieldLabelSmall}>ABONADO</Text>
+                      <Text style={styles.creditoAmountAbonado}>
+                        {item.moneda_simbolo} {item.abonado.toFixed(2)}
+                      </Text>
+                    </View>
+                    <View style={{ alignItems: "flex-end" }}>
+                      <Text style={styles.fieldLabelSmall}>SALDO PENDIENTE</Text>
+                      <Text
+                        style={[
+                          styles.creditoAmountSaldo,
+                          isPagado && { color: THEME.successStrong },
+                        ]}
+                      >
+                        {item.moneda_simbolo} {item.saldo.toFixed(2)} {item.moneda_codigo}
+                      </Text>
+                    </View>
+                  </View>
+
+                  <View style={styles.creditoActionsRow}>
+                    <TouchableOpacity
+                      style={styles.outlineSmallBtn}
+                      onPress={() => openHistorialAbonos(item)}
+                    >
+                      <Feather name="list" size={13} color={THEME.foreground} />
+                      <Text style={styles.outlineSmallBtnText}>
+                        Abonos ({item.abonos_count || 0})
+                      </Text>
+                    </TouchableOpacity>
+
+                    {!isPagado && (
+                      <TouchableOpacity
+                        style={styles.primarySmallBtn}
+                        onPress={() => openAbonoModal(item)}
+                      >
+                        <Feather name="dollar-sign" size={13} color="#fff" />
+                        <Text style={styles.primarySmallBtnText}>Registrar Abono</Text>
+                      </TouchableOpacity>
+                    )}
+                  </View>
+                </View>
+              );
+            }}
+            ListEmptyComponent={
+              <View style={styles.emptyBox}>
+                <Feather name="credit-card" size={34} color={THEME.mutedForeground} />
+                <Text style={styles.emptyBoxTitle}>No hay créditos en este filtro</Text>
+                <Text style={styles.emptyBoxSub}>
+                  Las ventas a crédito o con pago parcial aparecerán aquí automáticamente.
+                </Text>
+              </View>
+            }
+          />
+        </View>
+      )}
+
+      {/* ==================== 4. HISTORIAL DE VENTAS (/ventas) ==================== */}
+      {route === "ventas" && (
+        <View style={{ flex: 1 }}>
+          <View style={styles.moduleHeaderBar}>
+            <View style={[styles.searchBox, { flex: 1 }]}>
+              <Feather name="search" size={16} color={THEME.mutedForeground} />
+              <TextInput
+                style={styles.searchBoxInput}
+                placeholder="Buscar por número o cliente..."
+                placeholderTextColor={THEME.mutedForeground}
+                value={ventasSearch}
+                onChangeText={setVentasSearch}
+              />
+            </View>
+          </View>
+
+          <ScrollView contentContainerStyle={{ padding: 12, paddingBottom: 90, gap: 10 }}>
+            {/* Ventas creadas en este dispositivo móvil */}
+            {ventasLocales.length > 0 && (
+              <View style={{ gap: 8 }}>
+                <Text style={styles.sectionGroupHeader}>VENTAS DESDE ESTE MÓVIL</Text>
+                {ventasLocales
+                  .filter(
+                    (v) =>
+                      !ventasSearch.trim() ||
+                      v.numero.toLowerCase().includes(ventasSearch.toLowerCase()) ||
+                      v.cliente_nombre.toLowerCase().includes(ventasSearch.toLowerCase())
+                  )
+                  .map((v) => {
+                    const mon = monedas.find((m) => String(m.id) === String(v.moneda_id));
+                    return (
+                      <View key={v.id} style={styles.card}>
+                        <View style={styles.creditoCardHeader}>
+                          <View>
+                            <Text style={styles.creditoNumero}>{v.numero}</Text>
+                            <Text style={styles.creditoClienteName}>{v.cliente_nombre}</Text>
+                            <Text style={styles.clientCardMeta}>
+                              {v.fecha} · {v.tipo_pago || "Contado"}
+                            </Text>
+                          </View>
+                          <View style={{ alignItems: "flex-end" }}>
+                            <Text style={styles.posProdPrice}>
+                              {mon?.simbolo || "$"} {Number(v.total).toFixed(2)}{" "}
+                              {mon?.codigo || ""}
+                            </Text>
+                            <View
+                              style={[
+                                styles.statusBadge,
+                                v.sincronizado === 1
+                                  ? {
+                                      backgroundColor: THEME.successSoft,
+                                      borderColor: THEME.successBorder,
+                                    }
+                                  : {
+                                      backgroundColor: THEME.warningSoft,
+                                      borderColor: THEME.warningBorder,
+                                    },
+                              ]}
+                            >
+                              <Text
+                                style={[
+                                  styles.statusBadgeText,
+                                  {
+                                    color:
+                                      v.sincronizado === 1
+                                        ? THEME.successStrong
+                                        : THEME.warningStrong,
+                                  },
+                                ]}
+                              >
+                                {v.sincronizado === 1 ? "Sincronizada" : "En cola"}
+                              </Text>
+                            </View>
+                          </View>
+                        </View>
+                      </View>
+                    );
+                  })}
+              </View>
+            )}
+
+            {/* Ventas generales sincronizadas del sistema */}
+            <Text style={styles.sectionGroupHeader}>HISTORIAL GENERAL DE VENTAS</Text>
+            {ventasRemotas
+              .filter(
+                (v) =>
+                  !ventasSearch.trim() ||
+                  v.numero.toLowerCase().includes(ventasSearch.toLowerCase()) ||
+                  (v.cliente && v.cliente.toLowerCase().includes(ventasSearch.toLowerCase()))
+              )
+              .map((v) => (
+                <View key={v.id} style={styles.card}>
+                  <View style={styles.creditoCardHeader}>
+                    <View style={{ flex: 1 }}>
+                      <Text style={styles.creditoNumero}>{v.numero}</Text>
+                      <Text style={styles.creditoClienteName}>
+                        {v.cliente || "Consumidor Final"}
+                      </Text>
+                      <Text style={styles.clientCardMeta}>
+                        {v.fecha} · {v.tipo_pago}
+                        {v.metodo_pago_nombre ? ` (${v.metodo_pago_nombre})` : ""}
+                      </Text>
+                    </View>
+                    <View style={{ alignItems: "flex-end", gap: 4 }}>
+                      <Text style={styles.posProdPrice}>
+                        {v.moneda_simbolo || "$"} {Number(v.total).toFixed(2)}{" "}
+                        {v.moneda_codigo || ""}
+                      </Text>
+                      <View
+                        style={[
+                          styles.statusBadge,
+                          v.estado === "Pagada"
+                            ? {
+                                backgroundColor: THEME.successSoft,
+                                borderColor: THEME.successBorder,
+                              }
+                            : {
+                                backgroundColor: THEME.warningSoft,
+                                borderColor: THEME.warningBorder,
+                              },
+                        ]}
+                      >
+                        <Text
+                          style={[
+                            styles.statusBadgeText,
+                            {
+                              color:
+                                v.estado === "Pagada"
+                                  ? THEME.successStrong
+                                  : THEME.warningStrong,
+                            },
+                          ]}
+                        >
+                          {v.estado}
+                        </Text>
+                      </View>
+                    </View>
+                  </View>
+                </View>
+              ))}
+          </ScrollView>
+        </View>
+      )}
+
+      {/* ==================== 5. PRODUCTOS (/productos) ==================== */}
+      {route === "productos" && (
+        <View style={{ flex: 1 }}>
+          <View style={styles.moduleHeaderBar}>
+            <View style={[styles.searchBox, { flex: 1 }]}>
+              <Feather name="search" size={16} color={THEME.mutedForeground} />
+              <TextInput
+                style={styles.searchBoxInput}
+                placeholder="Buscar producto por nombre o código..."
+                placeholderTextColor={THEME.mutedForeground}
+                value={productosSearch}
+                onChangeText={setProductosSearch}
+              />
+            </View>
+          </View>
+
+          <FlatList
+            data={productos.filter(
+              (p) =>
+                !productosSearch.trim() ||
+                p.nombre.toLowerCase().includes(productosSearch.toLowerCase()) ||
+                p.codigo.toLowerCase().includes(productosSearch.toLowerCase())
+            )}
+            keyExtractor={(item) => String(item.id)}
+            contentContainerStyle={{ padding: 12, paddingBottom: 90, gap: 10 }}
+            renderItem={({ item }) => {
+              const precio = precioUnitarioEnMoneda(item, monedaSeleccionada);
+              return (
+                <View style={styles.card}>
+                  <View style={styles.creditoCardHeader}>
+                    <View style={{ flex: 1 }}>
+                      <Text style={styles.clientCardName}>{item.nombre}</Text>
+                      <Text style={styles.clientCardMeta}>
+                        Código: {item.codigo}
+                        {item.categoria_nombre ? ` · ${item.categoria_nombre}` : ""}
+                      </Text>
+                    </View>
+                    <View style={{ alignItems: "flex-end" }}>
+                      <Text style={styles.posProdPrice}>
+                        {fmt(precio, monedaSeleccionada)}
+                      </Text>
+                      <Text style={styles.clientCardMeta}>Stock: {item.stock} und.</Text>
+                    </View>
+                  </View>
+                </View>
+              );
+            }}
+          />
+        </View>
+      )}
+
+      {/* ==================== 6. PANEL DE CONTROL (/dashboard) & CONFIG ==================== */}
+      {(route === "dashboard" || route === "config") && (
+        <ScrollView contentContainerStyle={{ padding: 12, paddingBottom: 90, gap: 12 }}>
+          <View style={styles.creditosKpiRow}>
+            <View style={styles.kpiCard}>
+              <Text style={styles.kpiLabel}>PRODUCTOS</Text>
+              <Text style={styles.kpiValue}>{productos.length}</Text>
+            </View>
+            <View style={styles.kpiCard}>
+              <Text style={styles.kpiLabel}>CLIENTES</Text>
+              <Text style={styles.kpiValue}>{clientes.length}</Text>
+            </View>
+            <View style={styles.kpiCard}>
+              <Text style={styles.kpiLabel}>DEUDORES</Text>
+              <Text style={[styles.kpiValue, { color: THEME.warningStrong }]}>
+                {creditosData.pendientes}
+              </Text>
+            </View>
+          </View>
+
+          {/* Accesos Directos idénticos al sistema */}
+          <View style={styles.card}>
+            <Text style={styles.cardSectionTitle}>Módulos Principales</Text>
+            <View style={styles.quickGrid}>
+              <TouchableOpacity style={styles.quickTile} onPress={() => setRoute("pos")}>
+                <View style={[styles.quickTileIcon, { backgroundColor: THEME.accent }]}>
+                  <Feather name="shopping-cart" size={20} color={THEME.primary} />
+                </View>
+                <Text style={styles.quickTileTitle}>Punto de Venta</Text>
+                <Text style={styles.quickTileSub}>Contado, Crédito y Mixto</Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity style={styles.quickTile} onPress={() => setRoute("clientes")}>
+                <View style={[styles.quickTileIcon, { backgroundColor: THEME.infoSoft }]}>
+                  <Feather name="users" size={20} color={THEME.infoStrong} />
+                </View>
+                <Text style={styles.quickTileTitle}>Clientes</Text>
+                <Text style={styles.quickTileSub}>Perfiles y Límites</Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity style={styles.quickTile} onPress={() => setRoute("creditos")}>
+                <View style={[styles.quickTileIcon, { backgroundColor: THEME.dangerSoft }]}>
+                  <Feather name="credit-card" size={20} color={THEME.dangerStrong} />
+                </View>
+                <Text style={styles.quickTileTitle}>Deudores</Text>
+                <Text style={styles.quickTileSub}>Cuentas por Cobrar y Abonos</Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity style={styles.quickTile} onPress={() => setRoute("ventas")}>
+                <View style={[styles.quickTileIcon, { backgroundColor: THEME.successSoft }]}>
+                  <Feather name="trending-up" size={20} color={THEME.successStrong} />
+                </View>
+                <Text style={styles.quickTileTitle}>Ventas</Text>
+                <Text style={styles.quickTileSub}>Historial y Recibos</Text>
               </TouchableOpacity>
             </View>
           </View>
-        )}
 
-        {activeTab === "sincronizacion" && (
-          <View style={{ flex: 1 }}>
-            <TouchableOpacity
-              style={[styles.primaryBtn, { marginBottom: 14 }]}
-              onPress={() => handleSync(false)}
-              disabled={syncing}
+          {/* Tasas de Cambio Activas */}
+          <View style={styles.card}>
+            <Text style={styles.cardSectionTitle}>Monedas y Tasas Sincronizadas</Text>
+            {monedas.map((m) => (
+              <View key={m.id} style={styles.summaryRow}>
+                <Text style={styles.summaryLabel}>
+                  {m.nombre} ({m.codigo}) {m.es_base === 1 ? "· Base" : ""}
+                </Text>
+                <Text style={styles.summaryVal}>
+                  {m.simbolo} {Number(m.tasa).toFixed(2)}
+                </Text>
+              </View>
+            ))}
+          </View>
+
+          {/* Estado de Sincronización Automática */}
+          <View style={styles.card}>
+            <Text style={styles.cardSectionTitle}>Sincronización en Tiempo Real</Text>
+            <Text style={styles.clientCardMeta}>Servidor: {session.serverUrl}</Text>
+            <Text style={styles.clientCardMeta}>
+              Última actualización:{" "}
+              {lastSyncIso ? new Date(lastSyncIso).toLocaleTimeString() : "Recién conectado"}
+            </Text>
+            <Text style={[styles.clientCardMeta, { color: THEME.successStrong, marginTop: 4 }]}>
+              ✓ Sincronización automática activa en segundo plano (cada 10s y al registrar operaciones).
+            </Text>
+          </View>
+        </ScrollView>
+      )}
+
+      {/* ── BARRA DE NAVEGACIÓN INFERIOR RÁPIDA (Responsive) ── */}
+      <View style={styles.bottomNav}>
+        <TouchableOpacity style={styles.bottomNavItem} onPress={() => setRoute("pos")}>
+          <Feather
+            name="shopping-cart"
+            size={18}
+            color={route === "pos" ? THEME.primary : THEME.mutedForeground}
+          />
+          <Text
+            style={[
+              styles.bottomNavText,
+              route === "pos" && styles.bottomNavTextActive,
+            ]}
+          >
+            POS
+          </Text>
+        </TouchableOpacity>
+
+        <TouchableOpacity style={styles.bottomNavItem} onPress={() => setRoute("clientes")}>
+          <Feather
+            name="users"
+            size={18}
+            color={route === "clientes" ? THEME.primary : THEME.mutedForeground}
+          />
+          <Text
+            style={[
+              styles.bottomNavText,
+              route === "clientes" && styles.bottomNavTextActive,
+            ]}
+          >
+            Clientes
+          </Text>
+        </TouchableOpacity>
+
+        <TouchableOpacity style={styles.bottomNavItem} onPress={() => setRoute("creditos")}>
+          <Feather
+            name="credit-card"
+            size={18}
+            color={route === "creditos" ? THEME.primary : THEME.mutedForeground}
+          />
+          <Text
+            style={[
+              styles.bottomNavText,
+              route === "creditos" && styles.bottomNavTextActive,
+            ]}
+          >
+            Deudores
+          </Text>
+        </TouchableOpacity>
+
+        <TouchableOpacity style={styles.bottomNavItem} onPress={() => setRoute("ventas")}>
+          <Feather
+            name="trending-up"
+            size={18}
+            color={route === "ventas" ? THEME.primary : THEME.mutedForeground}
+          />
+          <Text
+            style={[
+              styles.bottomNavText,
+              route === "ventas" && styles.bottomNavTextActive,
+            ]}
+          >
+            Ventas
+          </Text>
+        </TouchableOpacity>
+
+        <TouchableOpacity style={styles.bottomNavItem} onPress={() => setDrawerOpen(true)}>
+          <Feather name="grid" size={18} color={THEME.mutedForeground} />
+          <Text style={styles.bottomNavText}>Menú</Text>
+        </TouchableOpacity>
+      </View>
+
+      {/* ==================== SIDEBAR DRAWER OSCURO (#1c1917 idéntico a Desktop) ==================== */}
+      <Modal
+        visible={drawerOpen}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setDrawerOpen(false)}
+      >
+        <View style={styles.drawerOverlay}>
+          <View style={styles.sidebarDrawer}>
+            <View style={styles.sidebarHeader}>
+              <View>
+                <Text style={styles.sidebarBrandTitle}>PosBit</Text>
+                <Text style={styles.sidebarBrandSub}>Inventario & POS v2.6</Text>
+              </View>
+              <TouchableOpacity onPress={() => setDrawerOpen(false)}>
+                <Feather name="x" size={20} color={THEME.sidebarForeground} />
+              </TouchableOpacity>
+            </View>
+
+            <ScrollView style={{ flex: 1, paddingHorizontal: 12, paddingVertical: 14 }}>
+              {[
+                {
+                  group: "PRINCIPAL",
+                  items: [{ id: "dashboard" as AppRoute, label: "Panel de control", icon: "grid" }],
+                },
+                {
+                  group: "CLIENTES",
+                  items: [
+                    { id: "clientes" as AppRoute, label: "Clientes", icon: "users" },
+                    {
+                      id: "creditos" as AppRoute,
+                      label: "Créditos / Deudores",
+                      icon: "credit-card",
+                    },
+                  ],
+                },
+                {
+                  group: "CATÁLOGO",
+                  items: [{ id: "productos" as AppRoute, label: "Productos", icon: "package" }],
+                },
+                {
+                  group: "OPERACIONES",
+                  items: [
+                    { id: "pos" as AppRoute, label: "Punto de Venta", icon: "shopping-cart" },
+                    { id: "ventas" as AppRoute, label: "Ventas", icon: "trending-up" },
+                  ],
+                },
+                {
+                  group: "SISTEMA",
+                  items: [
+                    { id: "config" as AppRoute, label: "Sincronización y Tasas", icon: "settings" },
+                  ],
+                },
+              ].map((section) => (
+                <View key={section.group} style={{ marginBottom: 18 }}>
+                  <View style={styles.sidebarGroupLabelRow}>
+                    <View style={styles.sidebarGroupDivider} />
+                    <Text style={styles.sidebarGroupLabel}>{section.group}</Text>
+                    <View style={styles.sidebarGroupDivider} />
+                  </View>
+                  {section.items.map((it) => {
+                    const active = route === it.id;
+                    return (
+                      <TouchableOpacity
+                        key={it.id}
+                        style={[styles.sidebarItem, active && styles.sidebarItemActive]}
+                        onPress={() => {
+                          setRoute(it.id);
+                          setDrawerOpen(false);
+                        }}
+                      >
+                        {active && <View style={styles.sidebarActiveBar} />}
+                        <Feather
+                          name={it.icon as any}
+                          size={16}
+                          color={active ? "#fff" : THEME.sidebarForeground}
+                        />
+                        <Text
+                          style={[
+                            styles.sidebarItemText,
+                            active && styles.sidebarItemTextActive,
+                          ]}
+                        >
+                          {it.label}
+                        </Text>
+                      </TouchableOpacity>
+                    );
+                  })}
+                </View>
+              ))}
+            </ScrollView>
+
+            <View style={styles.sidebarFooter}>
+              <View style={styles.sidebarUserRow}>
+                <View style={styles.avatarCircle}>
+                  <Text style={styles.avatarCircleText}>
+                    {userInitials(session.user.name)}
+                  </Text>
+                </View>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.sidebarUserName} numberOfLines={1}>
+                    {session.user.name}
+                  </Text>
+                  <Text style={styles.sidebarUserRole}>{session.user.role}</Text>
+                </View>
+                <TouchableOpacity onPress={handleLogout} style={{ padding: 6 }}>
+                  <Feather name="log-out" size={16} color={THEME.sidebarForeground} />
+                </TouchableOpacity>
+              </View>
+            </View>
+          </View>
+
+          <TouchableOpacity
+            style={{ flex: 1 }}
+            activeOpacity={1}
+            onPress={() => setDrawerOpen(false)}
+          />
+        </View>
+      </Modal>
+
+      {/* ==================== MODAL FINALIZAR VENTA (CHECKOUT IDÉNTICO A LA WEB) ==================== */}
+      <Modal
+        visible={showCheckoutModal}
+        transparent
+        animationType="slide"
+        onRequestClose={() => setShowCheckoutModal(false)}
+      >
+        <View style={styles.modalBackdrop}>
+          <View style={styles.modalSheet}>
+            <View style={styles.modalHeader}>
+              <Text style={styles.modalTitle}>Finalizar Venta</Text>
+              <TouchableOpacity onPress={() => setShowCheckoutModal(false)}>
+                <Feather name="x" size={20} color={THEME.mutedForeground} />
+              </TouchableOpacity>
+            </View>
+
+            <ScrollView
+              style={{ maxHeight: 540 }}
+              contentContainerStyle={{ gap: 12, paddingBottom: 16 }}
+              keyboardShouldPersistTaps="handled"
             >
-              <Text style={styles.primaryBtnText}>
-                {syncing
-                  ? "Sincronizando con PosBit Cloud..."
-                  : `Sincronizar Ahora (${pendientesCount} pendientes)`}
+              {/* Resumen Cliente y Total a Pagar */}
+              <View style={styles.checkoutTopSummary}>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.fieldLabelSmall}>CLIENTE</Text>
+                  <Text style={styles.checkoutClientText}>
+                    {clienteSeleccionadoObj
+                      ? clienteSeleccionadoObj.nombre
+                      : "Consumidor Final"}
+                  </Text>
+                </View>
+                <View style={{ alignItems: "flex-end" }}>
+                  <Text style={styles.fieldLabelSmall}>TOTAL A COBRAR</Text>
+                  <Text style={styles.checkoutBigTotal}>
+                    {fmt(total, monedaSeleccionada)}
+                  </Text>
+                </View>
+              </View>
+
+              {/* Cabecera Forma de Pago + Switch Pago Mixto */}
+              <View style={styles.checkoutSectionHeader}>
+                <Text style={styles.fieldLabelSmall}>
+                  {modoMixto ? "LÍNEAS DE PAGO MIXTO" : "FORMA DE PAGO"}
+                </Text>
+                <TouchableOpacity
+                  style={[styles.mixtoToggleBtn, modoMixto && styles.mixtoToggleBtnActive]}
+                  onPress={() => {
+                    const next = !modoMixto;
+                    setModoMixto(next);
+                    if (!next && lineasPago.length > 1) {
+                      setLineasPago([lineasPago[0]]);
+                    }
+                  }}
+                >
+                  <Text
+                    style={[
+                      styles.mixtoToggleBtnText,
+                      modoMixto && { color: "#fff" },
+                    ]}
+                  >
+                    {modoMixto ? "Modo simple" : "🔀 Pago Mixto"}
+                  </Text>
+                </TouchableOpacity>
+              </View>
+
+              {!modoMixto ? (
+                /* Modo Simple: Lista de Métodos de Pago + Monto Ingresado */
+                <View style={{ gap: 8 }}>
+                  <View style={styles.simpleMethodsList}>
+                    {metodosPago.map((mp) => {
+                      const active = String(lineasPago[0]?.metodoId || metodoPagoSeleccionado) === String(mp.id);
+                      return (
+                        <TouchableOpacity
+                          key={mp.id}
+                          style={[
+                            styles.simpleMethodRow,
+                            active && styles.simpleMethodRowActive,
+                          ]}
+                          onPress={() => {
+                            handleSelectMetodoPago(String(mp.id));
+                            setLineasPago((prev) => [
+                              {
+                                key: prev[0]?.key || 1,
+                                metodoId: String(mp.id),
+                                montoStr: prev[0]?.montoStr || String(total),
+                              },
+                            ]);
+                          }}
+                        >
+                          <Text style={{ fontSize: 15 }}>{getMetodoEmoji(mp.tipo, mp.nombre)}</Text>
+                          <Text
+                            style={[
+                              styles.simpleMethodName,
+                              active && { color: THEME.primary600, fontWeight: "700" },
+                            ]}
+                          >
+                            {mp.nombre}
+                          </Text>
+                          {mp.moneda_codigo && (
+                            <View style={styles.metodoChipBadge}>
+                              <Text style={styles.metodoChipBadgeText}>{mp.moneda_codigo}</Text>
+                            </View>
+                          )}
+                        </TouchableOpacity>
+                      );
+                    })}
+                  </View>
+
+                  <View>
+                    <Text style={styles.fieldLabelSmall}>
+                      MONTO RECIBIDO ({monedaSeleccionada})
+                    </Text>
+                    <TextInput
+                      style={styles.input}
+                      keyboardType="decimal-pad"
+                      value={lineasPago[0]?.montoStr ?? ""}
+                      onChangeText={(v) =>
+                        setLineasPago([
+                          {
+                            key: 1,
+                            metodoId: lineasPago[0]?.metodoId || metodoPagoSeleccionado,
+                            montoStr: v,
+                          },
+                        ])
+                      }
+                    />
+                  </View>
+                </View>
+              ) : (
+                /* Modo Mixto: Múltiples Líneas de Pago en distintas monedas */
+                <View style={{ gap: 8 }}>
+                  {lineasPago.map((lp, idx) => {
+                    const mpActual = metodosPago.find((m) => String(m.id) === String(lp.metodoId));
+                    return (
+                      <View key={lp.key} style={styles.mixtoLineCard}>
+                        <ScrollView
+                          horizontal
+                          showsHorizontalScrollIndicator={false}
+                          contentContainerStyle={{ gap: 6, marginBottom: 6 }}
+                        >
+                          {metodosPago.map((mp) => {
+                            const sel = String(mp.id) === String(lp.metodoId);
+                            return (
+                              <TouchableOpacity
+                                key={mp.id}
+                                style={[styles.metodoChip, sel && styles.metodoChipActive]}
+                                onPress={() =>
+                                  setLineasPago((prev) =>
+                                    prev.map((x) =>
+                                      x.key === lp.key ? { ...x, metodoId: String(mp.id) } : x
+                                    )
+                                  )
+                                }
+                              >
+                                <Text
+                                  style={[
+                                    styles.metodoChipText,
+                                    sel && styles.metodoChipTextActive,
+                                  ]}
+                                >
+                                  {mp.nombre} ({mp.moneda_codigo || monedaSeleccionada})
+                                </Text>
+                              </TouchableOpacity>
+                            );
+                          })}
+                        </ScrollView>
+
+                        <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+                          <TextInput
+                            style={[styles.input, { flex: 1, marginTop: 0 }]}
+                            keyboardType="decimal-pad"
+                            placeholder={`Monto en ${mpActual?.moneda_codigo || monedaSeleccionada}`}
+                            value={lp.montoStr}
+                            onChangeText={(v) =>
+                              setLineasPago((prev) =>
+                                prev.map((x) => (x.key === lp.key ? { ...x, montoStr: v } : x))
+                              )
+                            }
+                          />
+                          {lineasPago.length > 1 && (
+                            <TouchableOpacity
+                              style={styles.removeLineBtn}
+                              onPress={() =>
+                                setLineasPago((prev) => prev.filter((x) => x.key !== lp.key))
+                              }
+                            >
+                              <Feather name="trash-2" size={16} color={THEME.dangerStrong} />
+                            </TouchableOpacity>
+                          )}
+                        </View>
+                      </View>
+                    );
+                  })}
+
+                  <TouchableOpacity
+                    style={styles.outlineSmallBtn}
+                    onPress={() =>
+                      setLineasPago((prev) => [
+                        ...prev,
+                        {
+                          key: Date.now(),
+                          metodoId: metodoPagoSeleccionado || String(metodosPago[0]?.id || ""),
+                          montoStr: "",
+                        },
+                      ])
+                    }
+                  >
+                    <Feather name="plus" size={13} color={THEME.primary} />
+                    <Text style={[styles.outlineSmallBtnText, { color: THEME.primary }]}>
+                      + Agregar otra línea de pago
+                    </Text>
+                  </TouchableOpacity>
+                </View>
+              )}
+
+              {/* Resumen de Entra / Falta (Crédito) / Vuelto */}
+              <View style={styles.checkoutBalanceBanner}>
+                <View style={styles.summaryRow}>
+                  <Text style={styles.summaryLabel}>Total Recibido (equiv.):</Text>
+                  <Text style={[styles.summaryVal, { color: THEME.successStrong }]}>
+                    {fmt(totalPagadoEnMonedaVenta, monedaSeleccionada)}
+                  </Text>
+                </View>
+                {faltaPorPagar > 0.009 && (
+                  <View style={styles.summaryRow}>
+                    <Text style={[styles.summaryLabel, { color: THEME.dangerStrong }]}>
+                      Saldo pendiente (a Crédito):
+                    </Text>
+                    <Text style={[styles.summaryVal, { color: THEME.dangerStrong }]}>
+                      {fmt(faltaPorPagar, monedaSeleccionada)}
+                    </Text>
+                  </View>
+                )}
+                {vueltoEnMonedaVenta > 0.009 && (
+                  <View style={styles.summaryRow}>
+                    <Text style={[styles.summaryLabel, { color: THEME.infoStrong }]}>
+                      Vuelto a entregar:
+                    </Text>
+                    <Text style={[styles.summaryVal, { color: THEME.infoStrong }]}>
+                      {fmt(vueltoEnMonedaVenta, monedaSeleccionada)}
+                    </Text>
+                  </View>
+                )}
+              </View>
+
+              {/* Panel de Control de Límite de Crédito en Vivo (igual que en el POS Web) */}
+              {clienteSeleccionadoObj && infoCreditoCliente && (
+                <View style={styles.checkoutCreditPanel}>
+                  <View style={{ flexDirection: "row", justifyContent: "space-between" }}>
+                    <Text style={styles.fieldLabelSmall}>
+                      CRÉDITO DE {clienteSeleccionadoObj.nombre.toUpperCase()} ({monedaSeleccionada})
+                    </Text>
+                    <Text style={styles.clientCardMeta}>
+                      Disp: {fmt(infoCreditoCliente.disponible, monedaSeleccionada)}
+                    </Text>
+                  </View>
+
+                  <View style={{ flexDirection: "row", alignItems: "center", gap: 6, marginTop: 6 }}>
+                    <TextInput
+                      style={[styles.input, { flex: 1, marginTop: 0, height: 36, paddingVertical: 4 }]}
+                      keyboardType="decimal-pad"
+                      placeholder="Límite"
+                      value={limiteInputStr}
+                      onChangeText={setLimiteInputStr}
+                    />
+                    <TouchableOpacity
+                      style={styles.outlineSmallBtn}
+                      disabled={grantingCredit}
+                      onPress={() => {
+                        const val = parseFloat(limiteInputStr.replace(",", ".")) || 0;
+                        handleAjustarLimiteCheckout(val);
+                      }}
+                    >
+                      <Text style={styles.outlineSmallBtnText}>Fijar Límite</Text>
+                    </TouchableOpacity>
+                    <TouchableOpacity
+                      style={styles.primarySmallBtn}
+                      disabled={grantingCredit}
+                      onPress={() => {
+                        const necesario = Math.max(
+                          100,
+                          Math.ceil(infoCreditoCliente.deuda + total)
+                        );
+                        handleAjustarLimiteCheckout(necesario);
+                      }}
+                    >
+                      <Text style={styles.primarySmallBtnText}>Otorgar</Text>
+                    </TouchableOpacity>
+                  </View>
+                </View>
+              )}
+
+              {/* Cobros Extra Desplegable (+ Delivery, + Envío, + Bolsa, + Propina) */}
+              <View style={styles.cobrosExtraContainer}>
+                <TouchableOpacity
+                  style={styles.cobrosExtraHeader}
+                  onPress={() => setShowCobrosExtra((v) => !v)}
+                >
+                  <Text style={styles.fieldLabelSmall}>
+                    COBROS EXTRA (DELIVERY, ENVÍO, PROPINA)
+                  </Text>
+                  <Feather
+                    name={showCobrosExtra ? "chevron-up" : "chevron-down"}
+                    size={15}
+                    color={THEME.mutedForeground}
+                  />
+                </TouchableOpacity>
+
+                {showCobrosExtra && (
+                  <View style={{ marginTop: 8, gap: 8 }}>
+                    <ScrollView
+                      horizontal
+                      showsHorizontalScrollIndicator={false}
+                      contentContainerStyle={{ gap: 6 }}
+                    >
+                      {PRESETS_COBRO_EXTRA.map((preset) => (
+                        <TouchableOpacity
+                          key={preset}
+                          style={styles.presetExtraChip}
+                          onPress={() =>
+                            setCobrosExtra((prev) => [
+                              ...prev,
+                              {
+                                key: Date.now() + Math.random(),
+                                concepto: preset,
+                                montoStr: "",
+                                monedaCodigo: monedaSeleccionada,
+                              },
+                            ])
+                          }
+                        >
+                          <Text style={styles.presetExtraChipText}>+ {preset}</Text>
+                        </TouchableOpacity>
+                      ))}
+                    </ScrollView>
+
+                    {cobrosExtra.map((ce) => (
+                      <View
+                        key={ce.key}
+                        style={{ flexDirection: "row", alignItems: "center", gap: 6 }}
+                      >
+                        <TextInput
+                          style={[styles.input, { flex: 1.2, marginTop: 0, height: 36 }]}
+                          placeholder="Concepto"
+                          value={ce.concepto}
+                          onChangeText={(v) =>
+                            setCobrosExtra((prev) =>
+                              prev.map((x) => (x.key === ce.key ? { ...x, concepto: v } : x))
+                            )
+                          }
+                        />
+                        <TextInput
+                          style={[styles.input, { flex: 1, marginTop: 0, height: 36 }]}
+                          placeholder={`Monto (${ce.monedaCodigo})`}
+                          keyboardType="decimal-pad"
+                          value={ce.montoStr}
+                          onChangeText={(v) =>
+                            setCobrosExtra((prev) =>
+                              prev.map((x) => (x.key === ce.key ? { ...x, montoStr: v } : x))
+                            )
+                          }
+                        />
+                        <TouchableOpacity
+                          onPress={() =>
+                            setCobrosExtra((prev) => prev.filter((x) => x.key !== ce.key))
+                          }
+                        >
+                          <Feather name="x-circle" size={18} color={THEME.dangerStrong} />
+                        </TouchableOpacity>
+                      </View>
+                    ))}
+                  </View>
+                )}
+              </View>
+
+              {/* Nota / Observación */}
+              <View>
+                <Text style={styles.fieldLabelSmall}>OBSERVACIÓN / NOTA (OPCIONAL)</Text>
+                <TextInput
+                  style={[styles.input, { height: 40 }]}
+                  placeholder="Nota para el recibo o despacho..."
+                  placeholderTextColor={THEME.mutedForeground}
+                  value={observacionesVenta}
+                  onChangeText={setObservacionesVenta}
+                />
+              </View>
+
+              {/* 3 Botones de Acción idénticos al Modal de Checkout Web */}
+              <View style={{ gap: 8, marginTop: 4 }}>
+                <View style={{ flexDirection: "row", gap: 8 }}>
+                  <TouchableOpacity
+                    style={[styles.checkoutActionBtn, { backgroundColor: THEME.success, flex: 1 }]}
+                    disabled={submittingSale}
+                    onPress={() => handleConfirmSale("completo")}
+                  >
+                    <Feather name="check-circle" size={16} color="#fff" />
+                    <Text style={styles.checkoutActionBtnText}>Pagar Completo</Text>
+                  </TouchableOpacity>
+
+                  <TouchableOpacity
+                    style={[
+                      styles.checkoutActionBtn,
+                      {
+                        backgroundColor: THEME.rose,
+                        flex: 1,
+                        opacity: clienteSeleccionadoObj ? 1 : 0.45,
+                      },
+                    ]}
+                    disabled={submittingSale}
+                    onPress={() => handleConfirmSale("credito")}
+                  >
+                    <Feather name="clock" size={16} color="#fff" />
+                    <Text style={styles.checkoutActionBtnText}>Todo a Crédito</Text>
+                  </TouchableOpacity>
+                </View>
+
+                <TouchableOpacity
+                  style={[styles.checkoutActionBtn, { backgroundColor: THEME.sky }]}
+                  disabled={submittingSale}
+                  onPress={() => handleConfirmSale("personalizado")}
+                >
+                  {submittingSale ? (
+                    <ActivityIndicator color="#fff" />
+                  ) : (
+                    <>
+                      <Feather name="sliders" size={16} color="#fff" />
+                      <Text style={styles.checkoutActionBtnText}>
+                        {faltaPorPagar > 0.009
+                          ? `Registrar Pago Parcial (${fmt(faltaPorPagar)} a crédito)`
+                          : "Confirmar con Monto Ingresado"}
+                      </Text>
+                    </>
+                  )}
+                </TouchableOpacity>
+              </View>
+            </ScrollView>
+          </View>
+        </View>
+      </Modal>
+
+      {/* ==================== MODAL SELECTOR DE CLIENTE EN POS ==================== */}
+      <Modal
+        visible={showClientePickerModal}
+        transparent
+        animationType="slide"
+        onRequestClose={() => setShowClientePickerModal(false)}
+      >
+        <View style={styles.modalBackdrop}>
+          <View style={styles.modalSheet}>
+            <View style={styles.modalHeader}>
+              <Text style={styles.modalTitle}>Seleccionar Cliente</Text>
+              <TouchableOpacity onPress={() => setShowClientePickerModal(false)}>
+                <Feather name="x" size={20} color={THEME.mutedForeground} />
+              </TouchableOpacity>
+            </View>
+
+            <View style={[styles.searchBox, { marginBottom: 10 }]}>
+              <Feather name="search" size={15} color={THEME.mutedForeground} />
+              <TextInput
+                style={styles.searchBoxInput}
+                placeholder="Buscar por nombre o documento..."
+                placeholderTextColor={THEME.mutedForeground}
+                value={clientePickerSearch}
+                onChangeText={setClientePickerSearch}
+              />
+            </View>
+
+            <TouchableOpacity
+              style={styles.pickerRow}
+              onPress={() => {
+                setClienteId(null);
+                setShowClientePickerModal(false);
+              }}
+            >
+              <Text style={{ fontWeight: "700", color: THEME.foreground }}>
+                Consumidor Final (Sin registrar)
               </Text>
             </TouchableOpacity>
 
             <FlatList
-              data={ventasLocales}
-              keyExtractor={(item) => item.id}
-              ListEmptyComponent={
-                <Text style={styles.emptyText}>
-                  Aún no se han registrado ventas desde este dispositivo móvil.
-                </Text>
-              }
+              data={clientes.filter(
+                (c) =>
+                  !clientePickerSearch.trim() ||
+                  c.nombre.toLowerCase().includes(clientePickerSearch.toLowerCase()) ||
+                  (c.documento &&
+                    c.documento.toLowerCase().includes(clientePickerSearch.toLowerCase()))
+              )}
+              keyExtractor={(item) => String(item.id)}
+              style={{ maxHeight: 340 }}
               renderItem={({ item }) => (
-                <View style={styles.cardRow}>
+                <TouchableOpacity
+                  style={styles.pickerRow}
+                  onPress={() => {
+                    setClienteId(item.id);
+                    setShowClientePickerModal(false);
+                  }}
+                >
                   <View style={{ flex: 1 }}>
-                    <Text style={styles.prodName}>{item.numero}</Text>
-                    <Text style={styles.prodCode}>
-                      {item.cliente_nombre} · {item.fecha}
+                    <Text style={styles.clientCardName}>{item.nombre}</Text>
+                    <Text style={styles.clientCardMeta}>
+                      {item.documento || "Sin doc"}
+                      {item.telefono ? ` · ${item.telefono}` : ""}
                     </Text>
                   </View>
-                  <View style={{ alignItems: "flex-end" }}>
-                    <Text style={styles.prodPrice}>${item.total.toFixed(2)}</Text>
-                    <Text
-                      style={{
-                        fontSize: 11,
-                        color: item.sincronizado ? "#10b981" : "#f59e0b",
-                      }}
-                    >
-                      {item.sincronizado ? "Sincronizada en Nube" : "Pendiente por subir"}
-                    </Text>
-                  </View>
-                </View>
+                  {item.deuda_total && item.deuda_total.length > 0 && (
+                    <View style={styles.deudaChip}>
+                      <Text style={styles.deudaChipText}>
+                        Deuda: {item.deuda_total[0].simbolo}{" "}
+                        {item.deuda_total[0].monto.toFixed(2)}
+                      </Text>
+                    </View>
+                  )}
+                </TouchableOpacity>
               )}
             />
           </View>
-        )}
+        </View>
+      </Modal>
 
-        {activeTab === "ajustes" && (
-          <View style={{ flex: 1, padding: 8 }}>
-            <Text style={styles.label}>Servidor Conectado</Text>
-            <Text style={[styles.prodName, { marginBottom: 16 }]}>{serverUrl}</Text>
+      {/* ==================== MODAL CREAR / EDITAR CLIENTE ==================== */}
+      <Modal
+        visible={clienteModalOpen}
+        transparent
+        animationType="slide"
+        onRequestClose={() => setClienteModalOpen(false)}
+      >
+        <View style={styles.modalBackdrop}>
+          <View style={styles.modalSheet}>
+            <View style={styles.modalHeader}>
+              <Text style={styles.modalTitle}>
+                {editingCliente ? `Editar: ${editingCliente.nombre}` : "Nuevo Cliente"}
+              </Text>
+              <TouchableOpacity onPress={() => setClienteModalOpen(false)}>
+                <Feather name="x" size={20} color={THEME.mutedForeground} />
+              </TouchableOpacity>
+            </View>
 
-            <Text style={styles.label}>Usuario Activo</Text>
-            <Text style={[styles.prodName, { marginBottom: 24 }]}>
-              {user.name} ({user.email})
-            </Text>
-
-            <TouchableOpacity
-              style={[styles.primaryBtn, { backgroundColor: "#ef4444" }]}
-              onPress={async () => {
-                await clearStoredSession();
-                setUser(null);
-              }}
+            <ScrollView
+              style={{ maxHeight: 500 }}
+              contentContainerStyle={{ gap: 10, paddingBottom: 16 }}
+              keyboardShouldPersistTaps="handled"
             >
-              <Text style={styles.primaryBtnText}>Cerrar Sesión</Text>
-            </TouchableOpacity>
+              <View style={{ flexDirection: "row", gap: 8 }}>
+                {(["Persona Natural", "Empresa"] as const).map((t) => (
+                  <TouchableOpacity
+                    key={t}
+                    style={[
+                      styles.catChip,
+                      { flex: 1, alignItems: "center" },
+                      clFormTipo === t && styles.catChipActive,
+                    ]}
+                    onPress={() => setClFormTipo(t)}
+                  >
+                    <Text
+                      style={[
+                        styles.catChipText,
+                        clFormTipo === t && styles.catChipTextActive,
+                      ]}
+                    >
+                      {t}
+                    </Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+
+              <View>
+                <Text style={styles.fieldLabelSmall}>NOMBRE O RAZÓN SOCIAL *</Text>
+                <TextInput
+                  style={styles.input}
+                  placeholder="Ej. Juan Pérez"
+                  value={clFormNombre}
+                  onChangeText={setClFormNombre}
+                />
+              </View>
+
+              <View style={{ flexDirection: "row", gap: 8 }}>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.fieldLabelSmall}>DOCUMENTO / RIF / C.I.</Text>
+                  <TextInput
+                    style={styles.input}
+                    placeholder="V-12345678"
+                    value={clFormDoc}
+                    onChangeText={setClFormDoc}
+                  />
+                </View>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.fieldLabelSmall}>TELÉFONO</Text>
+                  <TextInput
+                    style={styles.input}
+                    placeholder="0414-0000000"
+                    keyboardType="phone-pad"
+                    value={clFormTel}
+                    onChangeText={setClFormTel}
+                  />
+                </View>
+              </View>
+
+              <View style={{ flexDirection: "row", gap: 8 }}>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.fieldLabelSmall}>CIUDAD</Text>
+                  <TextInput
+                    style={styles.input}
+                    placeholder="Ciudad"
+                    value={clFormCiudad}
+                    onChangeText={setClFormCiudad}
+                  />
+                </View>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.fieldLabelSmall}>CORREO</Text>
+                  <TextInput
+                    style={styles.input}
+                    placeholder="correo@ejemplo.com"
+                    autoCapitalize="none"
+                    value={clFormEmail}
+                    onChangeText={setClFormEmail}
+                  />
+                </View>
+              </View>
+
+              {/* Configuración de Crédito por Moneda */}
+              <TouchableOpacity
+                style={styles.creditCheckRow}
+                onPress={() => setClFormRecibeCredito((v) => !v)}
+              >
+                <Feather
+                  name={clFormRecibeCredito ? "check-square" : "square"}
+                  size={18}
+                  color={clFormRecibeCredito ? THEME.primary : THEME.mutedForeground}
+                />
+                <Text style={{ fontWeight: "700", color: THEME.foreground }}>
+                  Habilitar compras a crédito para este cliente
+                </Text>
+              </TouchableOpacity>
+
+              {clFormRecibeCredito && (
+                <View style={styles.checkoutCreditPanel}>
+                  <Text style={styles.fieldLabelSmall}>LÍMITES DE CRÉDITO POR MONEDA</Text>
+                  {monedas.map((m) => (
+                    <View
+                      key={m.id}
+                      style={{
+                        flexDirection: "row",
+                        alignItems: "center",
+                        justifyContent: "space-between",
+                        marginTop: 6,
+                      }}
+                    >
+                      <Text style={{ fontSize: 13, fontWeight: "600", color: THEME.foreground }}>
+                        {m.codigo} ({m.simbolo})
+                      </Text>
+                      <TextInput
+                        style={[styles.input, { width: 140, marginTop: 0, height: 36 }]}
+                        keyboardType="decimal-pad"
+                        placeholder="0.00"
+                        value={clFormLimites[m.id] ?? "0"}
+                        onChangeText={(v) =>
+                          setClFormLimites((prev) => ({ ...prev, [m.id]: v }))
+                        }
+                      />
+                    </View>
+                  ))}
+                </View>
+              )}
+
+              <TouchableOpacity
+                style={[styles.primaryBtn, { marginTop: 8 }]}
+                disabled={savingCliente}
+                onPress={handleSaveCliente}
+              >
+                {savingCliente ? (
+                  <ActivityIndicator color="#fff" />
+                ) : (
+                  <Text style={styles.primaryBtnText}>
+                    {editingCliente ? "Guardar Cambios" : "Crear Cliente"}
+                  </Text>
+                )}
+              </TouchableOpacity>
+            </ScrollView>
           </View>
-        )}
-      </View>
+        </View>
+      </Modal>
 
-      {/* Barra de Navegación Inferior */}
-      <View style={styles.tabBar}>
-        {(
-          [
-            { key: "catalogo", label: "Catálogo" },
-            { key: "pos", label: `POS (${cart.length})` },
-            { key: "sincronizacion", label: `Sync (${pendientesCount})` },
-            { key: "ajustes", label: "Ajustes" },
-          ] as const
-        ).map((t) => (
-          <TouchableOpacity
-            key={t.key}
-            style={[styles.tabItem, activeTab === t.key && styles.tabItemActive]}
-            onPress={() => setActiveTab(t.key)}
-          >
-            <Text
-              style={[
-                styles.tabLabel,
-                activeTab === t.key && styles.tabLabelActive,
-              ]}
-            >
-              {t.label}
-            </Text>
-          </TouchableOpacity>
-        ))}
-      </View>
-    </SafeAreaView>
+      {/* ==================== MODAL REGISTRAR ABONO A CRÉDITO ==================== */}
+      <Modal
+        visible={!!abonoModalCredito}
+        transparent
+        animationType="slide"
+        onRequestClose={() => setAbonoModalCredito(null)}
+      >
+        <View style={styles.modalBackdrop}>
+          <View style={styles.modalSheet}>
+            {abonoModalCredito && (
+              <>
+                <View style={styles.modalHeader}>
+                  <View>
+                    <Text style={styles.modalTitle}>Registrar Abono</Text>
+                    <Text style={styles.clientCardMeta}>
+                      {abonoModalCredito.numero} · {abonoModalCredito.cliente_nombre}
+                    </Text>
+                  </View>
+                  <TouchableOpacity onPress={() => setAbonoModalCredito(null)}>
+                    <Feather name="x" size={20} color={THEME.mutedForeground} />
+                  </TouchableOpacity>
+                </View>
+
+                <View style={styles.checkoutTopSummary}>
+                  <View>
+                    <Text style={styles.fieldLabelSmall}>SALDO PENDIENTE</Text>
+                    <Text style={[styles.checkoutBigTotal, { color: THEME.dangerStrong }]}>
+                      {abonoModalCredito.moneda_simbolo} {abonoModalCredito.saldo.toFixed(2)}{" "}
+                      {abonoModalCredito.moneda_codigo}
+                    </Text>
+                  </View>
+                  <TouchableOpacity
+                    style={styles.outlineSmallBtn}
+                    onPress={() => {
+                      const mp = metodosPago.find((x) => String(x.id) === String(abonoMetodoId));
+                      const cod = mp?.moneda_codigo || abonoModalCredito.moneda_codigo;
+                      const montoConvertido = convertirMonto(
+                        abonoModalCredito.saldo,
+                        abonoModalCredito.moneda_codigo,
+                        cod
+                      );
+                      setAbonoMontoStr(montoConvertido.toFixed(decMoneda(cod)));
+                    }}
+                  >
+                    <Text style={styles.outlineSmallBtnText}>Abonar Saldo Total</Text>
+                  </TouchableOpacity>
+                </View>
+
+                <Text style={[styles.fieldLabelSmall, { marginTop: 10 }]}>MÉTODO DE PAGO</Text>
+                <ScrollView
+                  horizontal
+                  showsHorizontalScrollIndicator={false}
+                  contentContainerStyle={{ gap: 6, marginVertical: 8 }}
+                >
+                  {metodosPago.map((mp) => {
+                    const active = String(mp.id) === String(abonoMetodoId);
+                    return (
+                      <TouchableOpacity
+                        key={mp.id}
+                        style={[styles.metodoChip, active && styles.metodoChipActive]}
+                        onPress={() => setAbonoMetodoId(String(mp.id))}
+                      >
+                        <Text style={{ fontSize: 12 }}>{getMetodoEmoji(mp.tipo, mp.nombre)}</Text>
+                        <Text
+                          style={[
+                            styles.metodoChipText,
+                            active && styles.metodoChipTextActive,
+                          ]}
+                        >
+                          {mp.nombre} ({mp.moneda_codigo || "USD"})
+                        </Text>
+                      </TouchableOpacity>
+                    );
+                  })}
+                </ScrollView>
+
+                <Text style={styles.fieldLabelSmall}>MONTO A ABONAR</Text>
+                <TextInput
+                  style={styles.input}
+                  keyboardType="decimal-pad"
+                  value={abonoMontoStr}
+                  onChangeText={setAbonoMontoStr}
+                />
+
+                <Text style={[styles.fieldLabelSmall, { marginTop: 10 }]}>
+                  OBSERVACIONES (OPCIONAL)
+                </Text>
+                <TextInput
+                  style={styles.input}
+                  placeholder="Referencia bancaria o nota..."
+                  value={abonoObs}
+                  onChangeText={setAbonoObs}
+                />
+
+                <TouchableOpacity
+                  style={[styles.primaryBtn, { marginTop: 16 }]}
+                  disabled={savingAbono}
+                  onPress={handleConfirmAbono}
+                >
+                  {savingAbono ? (
+                    <ActivityIndicator color="#fff" />
+                  ) : (
+                    <>
+                      <Feather name="check-circle" size={16} color="#fff" />
+                      <Text style={styles.primaryBtnText}>Confirmar Abono</Text>
+                    </>
+                  )}
+                </TouchableOpacity>
+              </>
+            )}
+          </View>
+        </View>
+      </Modal>
+
+      {/* ==================== MODAL HISTORIAL DE ABONOS ==================== */}
+      <Modal
+        visible={!!historialCredito}
+        transparent
+        animationType="slide"
+        onRequestClose={() => setHistorialCredito(null)}
+      >
+        <View style={styles.modalBackdrop}>
+          <View style={styles.modalSheet}>
+            {historialCredito && (
+              <>
+                <View style={styles.modalHeader}>
+                  <View>
+                    <Text style={styles.modalTitle}>
+                      Abonos de {historialCredito.numero}
+                    </Text>
+                    <Text style={styles.clientCardMeta}>
+                      {historialCredito.cliente_nombre}
+                    </Text>
+                  </View>
+                  <TouchableOpacity onPress={() => setHistorialCredito(null)}>
+                    <Feather name="x" size={20} color={THEME.mutedForeground} />
+                  </TouchableOpacity>
+                </View>
+
+                <FlatList
+                  data={historialAbonos}
+                  keyExtractor={(item, idx) => String(item.id || idx)}
+                  style={{ maxHeight: 340 }}
+                  renderItem={({ item }) => (
+                    <View style={styles.pickerRow}>
+                      <View style={{ flex: 1 }}>
+                        <Text style={styles.clientCardName}>
+                          {item.moneda_simbolo || "$"} {Number(item.monto).toFixed(2)}{" "}
+                          {item.moneda_codigo || ""}
+                        </Text>
+                        <Text style={styles.clientCardMeta}>
+                          {item.fecha}
+                          {item.metodo_pago_nombre ? ` · ${item.metodo_pago_nombre}` : ""}
+                          {item.observaciones ? ` · ${item.observaciones}` : ""}
+                        </Text>
+                      </View>
+                    </View>
+                  )}
+                  ListEmptyComponent={
+                    <Text style={[styles.clientCardMeta, { padding: 16, textAlign: "center" }]}>
+                      Sin abonos registrados aún.
+                    </Text>
+                  }
+                />
+              </>
+            )}
+          </View>
+        </View>
+      </Modal>
+
+      {/* ==================== MODAL RECIBO DE VENTA ==================== */}
+      <Modal
+        visible={!!receiptModal}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setReceiptModal(null)}
+      >
+        <View style={styles.modalBackdrop}>
+          <View style={styles.modalSheet}>
+            {receiptModal && (
+              <>
+                <View style={{ alignItems: "center", marginBottom: 12 }}>
+                  <View
+                    style={{
+                      width: 44,
+                      height: 44,
+                      borderRadius: 22,
+                      backgroundColor: THEME.successSoft,
+                      alignItems: "center",
+                      justifyContent: "center",
+                      marginBottom: 6,
+                    }}
+                  >
+                    <Feather name="check" size={24} color={THEME.successStrong} />
+                  </View>
+                  <Text style={styles.modalTitle}>¡Venta Registrada!</Text>
+                  <Text style={styles.clientCardMeta}>
+                    {receiptModal.numero} · {receiptModal.fecha}
+                  </Text>
+                </View>
+
+                <View style={styles.checkoutBalanceBanner}>
+                  <View style={styles.summaryRow}>
+                    <Text style={styles.summaryLabel}>Cliente:</Text>
+                    <Text style={styles.summaryVal}>{receiptModal.cliente}</Text>
+                  </View>
+                  <View style={styles.summaryRow}>
+                    <Text style={styles.summaryLabel}>Modalidad:</Text>
+                    <Text style={styles.summaryVal}>{receiptModal.tipo_pago}</Text>
+                  </View>
+                  <View style={styles.summaryTotalRow}>
+                    <Text style={styles.summaryTotalLabel}>Total:</Text>
+                    <Text style={styles.summaryTotalValue}>
+                      {fmt(receiptModal.total, receiptModal.moneda)}
+                    </Text>
+                  </View>
+                  {receiptModal.saldoCredito > 0.009 && (
+                    <View style={styles.summaryRow}>
+                      <Text style={[styles.summaryLabel, { color: THEME.dangerStrong }]}>
+                        Saldo a Crédito:
+                      </Text>
+                      <Text style={[styles.summaryVal, { color: THEME.dangerStrong }]}>
+                        {fmt(receiptModal.saldoCredito, receiptModal.moneda)}
+                      </Text>
+                    </View>
+                  )}
+                </View>
+
+                <View style={{ flexDirection: "row", gap: 8, marginTop: 14 }}>
+                  <TouchableOpacity
+                    style={[styles.outlineSmallBtn, { flex: 1, justifyContent: "center", height: 42 }]}
+                    onPress={() => {
+                      const lines = receiptModal.items
+                        .map((i: any) => `• ${i.cantidad}x ${i.nombre}: ${fmt(i.subtotal, receiptModal.moneda)}`)
+                        .join("\n");
+                      Share.share({
+                        message: `Recibo PosBit ${receiptModal.numero}\nCliente: ${receiptModal.cliente}\n${lines}\nTotal: ${fmt(receiptModal.total, receiptModal.moneda)}`,
+                      });
+                    }}
+                  >
+                    <Feather name="share-2" size={15} color={THEME.foreground} />
+                    <Text style={styles.outlineSmallBtnText}>Compartir Recibo</Text>
+                  </TouchableOpacity>
+
+                  <TouchableOpacity
+                    style={[styles.primaryBtn, { flex: 1, height: 42 }]}
+                    onPress={() => setReceiptModal(null)}
+                  >
+                    <Text style={styles.primaryBtnText}>Nueva Venta</Text>
+                  </TouchableOpacity>
+                </View>
+              </>
+            )}
+          </View>
+        </View>
+      </Modal>
+
+      {/* ==================== MODAL CARRITOS EN ESPERA ==================== */}
+      <Modal
+        visible={showHeldModal}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setShowHeldModal(false)}
+      >
+        <View style={styles.modalBackdrop}>
+          <View style={styles.modalSheet}>
+            <View style={styles.modalHeader}>
+              <Text style={styles.modalTitle}>Ventas en Espera ({heldCarts.length})</Text>
+              <TouchableOpacity onPress={() => setShowHeldModal(false)}>
+                <Feather name="x" size={20} color={THEME.mutedForeground} />
+              </TouchableOpacity>
+            </View>
+            {heldCarts.map((h) => (
+              <TouchableOpacity
+                key={h.id}
+                style={styles.pickerRow}
+                onPress={() => handleResumeCart(h)}
+              >
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.clientCardName}>
+                    Carrito de las {h.hora} ({h.items.length} productos)
+                  </Text>
+                </View>
+                <Text style={{ color: THEME.primary, fontWeight: "700" }}>Recuperar</Text>
+              </TouchableOpacity>
+            ))}
+          </View>
+        </View>
+      </Modal>
+    </View>
   );
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: "#090d16" },
-  centered: { flex: 1, backgroundColor: "#090d16", justifyContent: "center", alignItems: "center" },
-  loginBox: { flex: 1, justifyContent: "center", paddingHorizontal: 24 },
-  brandTitle: { fontSize: 28, fontWeight: "700", color: "#f8fafc", marginBottom: 6 },
-  brandSub: { fontSize: 13, color: "#94a3b8", marginBottom: 24 },
-  label: { fontSize: 12, fontWeight: "600", color: "#cbd5e1", marginBottom: 6 },
-  input: {
-    backgroundColor: "#111827",
-    borderColor: "#1e293b",
+  appContainer: {
+    flex: 1,
+    backgroundColor: THEME.background,
+  },
+  centerScreen: {
+    flex: 1,
+    backgroundColor: THEME.background,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  loginContainer: {
+    flex: 1,
+    backgroundColor: THEME.background,
+  },
+  loginScroll: {
+    flexGrow: 1,
+    justifyContent: "center",
+    padding: 20,
+  },
+  loginCard: {
+    backgroundColor: THEME.card,
+    borderRadius: 12,
     borderWidth: 1,
+    borderColor: THEME.border,
+    padding: 22,
+    overflow: "hidden",
+  },
+  loginAccentBar: {
+    position: "absolute",
+    top: 0,
+    left: 0,
+    right: 0,
+    height: 4,
+    backgroundColor: THEME.primary,
+  },
+  loginBrandRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 12,
+    marginBottom: 18,
+  },
+  brandLogoBox: {
+    width: 42,
+    height: 42,
+    borderRadius: 10,
+    backgroundColor: THEME.primary,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  brandLogoLetter: {
+    color: "#fff",
+    fontSize: 22,
+    fontWeight: "900",
+  },
+  loginTitle: {
+    fontSize: 22,
+    fontWeight: "800",
+    color: THEME.foreground,
+  },
+  loginSubtitle: {
+    fontSize: 12,
+    color: THEME.mutedForeground,
+  },
+  fieldLabel: {
+    fontSize: 11,
+    fontWeight: "700",
+    color: THEME.mutedForeground,
+    marginTop: 12,
+    marginBottom: 4,
+    letterSpacing: 0.6,
+  },
+  fieldLabelSmall: {
+    fontSize: 10,
+    fontWeight: "700",
+    color: THEME.mutedForeground,
+    letterSpacing: 0.5,
+  },
+  input: {
+    backgroundColor: THEME.inputBg,
+    borderWidth: 1,
+    borderColor: THEME.border,
     borderRadius: 8,
     paddingHorizontal: 12,
     paddingVertical: 10,
-    color: "#f8fafc",
-    marginBottom: 14,
+    color: THEME.foreground,
+    fontSize: 14,
+  },
+  advancedToggle: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    marginTop: 12,
+  },
+  advancedToggleText: {
+    fontSize: 12,
+    color: THEME.mutedForeground,
+    fontWeight: "600",
+  },
+  errorAlert: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    marginTop: 12,
+    backgroundColor: THEME.dangerSoft,
+    borderWidth: 1,
+    borderColor: THEME.dangerBorder,
+    borderRadius: 8,
+    padding: 10,
+  },
+  errorAlertText: {
+    color: THEME.dangerStrong,
+    fontSize: 12,
+    flex: 1,
   },
   primaryBtn: {
-    backgroundColor: "#2563eb",
+    backgroundColor: THEME.primary,
     borderRadius: 8,
-    paddingVertical: 13,
+    height: 46,
+    flexDirection: "row",
     alignItems: "center",
+    justifyContent: "center",
+    gap: 8,
   },
-  primaryBtnText: { color: "#ffffff", fontWeight: "600", fontSize: 14 },
-  header: {
+  primaryBtnText: {
+    color: "#fff",
+    fontWeight: "700",
+    fontSize: 15,
+  },
+  primarySmallBtn: {
+    backgroundColor: THEME.primary,
+    borderRadius: 8,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 5,
+  },
+  primarySmallBtnText: {
+    color: "#fff",
+    fontSize: 12,
+    fontWeight: "700",
+  },
+  outlineSmallBtn: {
+    backgroundColor: THEME.card,
+    borderWidth: 1,
+    borderColor: THEME.border,
+    borderRadius: 8,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 5,
+  },
+  outlineSmallBtnText: {
+    color: THEME.foreground,
+    fontSize: 12,
+    fontWeight: "600",
+  },
+  // Topbar
+  topbar: {
+    height: 56,
+    backgroundColor: THEME.card,
+    borderBottomWidth: 1,
+    borderBottomColor: THEME.border,
+    flexDirection: "row",
+    alignItems: "center",
+    paddingHorizontal: 12,
+    gap: 10,
+  },
+  topbarOrangeLine: {
+    position: "absolute",
+    bottom: 0,
+    left: 0,
+    width: 64,
+    height: 3,
+    backgroundColor: THEME.primary,
+  },
+  menuIconBtn: {
+    padding: 6,
+    borderRadius: 8,
+  },
+  topbarBrand: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+  },
+  topbarLogoSmall: {
+    width: 28,
+    height: 28,
+    borderRadius: 7,
+    backgroundColor: THEME.primary,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  topbarLogoSmallText: {
+    color: "#fff",
+    fontWeight: "900",
+    fontSize: 14,
+  },
+  topbarTitle: {
+    fontSize: 14,
+    fontWeight: "700",
+    color: THEME.foreground,
+  },
+  topbarSubtitle: {
+    fontSize: 10,
+    color: THEME.mutedForeground,
+  },
+  cloudBadge: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 5,
+    paddingHorizontal: 9,
+    paddingVertical: 5,
+    borderRadius: 999,
+    borderWidth: 1,
+  },
+  cloudBadgeOk: {
+    backgroundColor: THEME.successSoft,
+    borderColor: THEME.successBorder,
+  },
+  cloudBadgeSyncing: {
+    backgroundColor: THEME.accent,
+    borderColor: THEME.primary,
+  },
+  cloudBadgePending: {
+    backgroundColor: THEME.warningSoft,
+    borderColor: THEME.warningBorder,
+  },
+  cloudBadgeOffline: {
+    backgroundColor: THEME.dangerSoft,
+    borderColor: THEME.dangerBorder,
+  },
+  cloudDot: {
+    width: 7,
+    height: 7,
+    borderRadius: 4,
+  },
+  cloudBadgeText: {
+    fontSize: 11,
+    fontWeight: "700",
+  },
+  topbarPosShortBtn: {
+    backgroundColor: THEME.primary,
+    borderRadius: 8,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 4,
+  },
+  topbarPosShortBtnText: {
+    color: "#fff",
+    fontSize: 11,
+    fontWeight: "700",
+  },
+  toastBanner: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    marginHorizontal: 12,
+    marginTop: 8,
+    paddingHorizontal: 12,
+    paddingVertical: 9,
+    borderRadius: 8,
+    borderWidth: 1,
+  },
+  toastBannerText: {
+    fontSize: 12,
+    fontWeight: "600",
+    flex: 1,
+  },
+  // POS Controls
+  posControlHeader: {
+    backgroundColor: THEME.card,
+    borderBottomWidth: 1,
+    borderBottomColor: THEME.border,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    gap: 8,
+  },
+  posSearchRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+  },
+  searchBox: {
+    flex: 1,
+    flexDirection: "row",
+    alignItems: "center",
+    backgroundColor: THEME.inputBg,
+    borderWidth: 1,
+    borderColor: THEME.border,
+    borderRadius: 8,
+    paddingHorizontal: 10,
+    height: 38,
+    gap: 6,
+  },
+  searchBoxInput: {
+    flex: 1,
+    fontSize: 13,
+    color: THEME.foreground,
+    paddingVertical: 0,
+  },
+  currencyPill: {
+    paddingHorizontal: 10,
+    paddingVertical: 7,
+    borderRadius: 8,
+    backgroundColor: THEME.inputBg,
+    borderWidth: 1,
+    borderColor: THEME.border,
+  },
+  currencyPillActive: {
+    backgroundColor: THEME.primary,
+    borderColor: THEME.primary600,
+  },
+  currencyPillText: {
+    fontSize: 11,
+    fontWeight: "700",
+    color: THEME.foreground,
+  },
+  currencyPillTextActive: {
+    color: "#fff",
+  },
+  posMetodosRow: {
+    gap: 6,
+    paddingVertical: 2,
+  },
+  metodoChip: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 5,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 8,
+    backgroundColor: THEME.inputBg,
+    borderWidth: 1,
+    borderColor: THEME.border,
+  },
+  metodoChipActive: {
+    backgroundColor: THEME.primary,
+    borderColor: THEME.primary600,
+  },
+  metodoChipText: {
+    fontSize: 12,
+    fontWeight: "600",
+    color: THEME.foreground,
+  },
+  metodoChipTextActive: {
+    color: "#fff",
+  },
+  metodoChipBadge: {
+    backgroundColor: THEME.muted,
+    paddingHorizontal: 5,
+    paddingVertical: 1,
+    borderRadius: 4,
+  },
+  metodoChipBadgeText: {
+    fontSize: 9,
+    fontWeight: "700",
+    color: THEME.mutedForeground,
+  },
+  posModeSwitchRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+  },
+  posModeTab: {
+    flex: 1,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 6,
+    paddingVertical: 7,
+    borderRadius: 8,
+    backgroundColor: THEME.inputBg,
+    borderWidth: 1,
+    borderColor: THEME.border,
+  },
+  posModeTabActive: {
+    backgroundColor: THEME.foreground,
+    borderColor: THEME.foreground,
+  },
+  posModeTabText: {
+    fontSize: 12,
+    fontWeight: "700",
+    color: THEME.foreground,
+  },
+  posModeTabTextActive: {
+    color: "#fff",
+  },
+  heldCartPill: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 4,
+    paddingHorizontal: 10,
+    paddingVertical: 7,
+    borderRadius: 8,
+    backgroundColor: THEME.warningSoft,
+    borderWidth: 1,
+    borderColor: THEME.warningBorder,
+  },
+  heldCartPillText: {
+    fontSize: 11,
+    fontWeight: "700",
+    color: THEME.warningStrong,
+  },
+  catFilterContainer: {
+    paddingTop: 8,
+  },
+  catChip: {
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 8,
+    backgroundColor: THEME.card,
+    borderWidth: 1,
+    borderColor: THEME.border,
+  },
+  catChipActive: {
+    backgroundColor: THEME.primary,
+    borderColor: THEME.primary600,
+  },
+  catChipText: {
+    fontSize: 12,
+    fontWeight: "600",
+    color: THEME.foreground,
+  },
+  catChipTextActive: {
+    color: "#fff",
+  },
+  // Product Cards in POS
+  posProdCard: {
+    flex: 1,
+    backgroundColor: THEME.card,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: THEME.border,
+    padding: 11,
+    justifyContent: "space-between",
+  },
+  posProdCardInCart: {
+    borderColor: THEME.primary,
+    borderWidth: 1.5,
+    backgroundColor: THEME.accent,
+  },
+  posProdTopRow: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "flex-start",
+    marginBottom: 6,
+  },
+  posProdIconWrap: {
+    width: 34,
+    height: 34,
+    borderRadius: 8,
+    backgroundColor: THEME.secondary,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  ivaBadge: {
+    backgroundColor: THEME.warningSoft,
+    borderWidth: 1,
+    borderColor: THEME.warningBorder,
+    paddingHorizontal: 5,
+    paddingVertical: 1,
+    borderRadius: 4,
+  },
+  ivaBadgeText: {
+    fontSize: 9,
+    fontWeight: "700",
+    color: THEME.warningStrong,
+  },
+  inCartCountBadge: {
+    backgroundColor: THEME.primary,
+    minWidth: 20,
+    height: 20,
+    borderRadius: 10,
+    alignItems: "center",
+    justifyContent: "center",
+    paddingHorizontal: 5,
+  },
+  inCartCountBadgeText: {
+    color: "#fff",
+    fontSize: 10,
+    fontWeight: "800",
+  },
+  posProdName: {
+    fontSize: 13,
+    fontWeight: "700",
+    color: THEME.foreground,
+    lineHeight: 17,
+  },
+  posProdCode: {
+    fontSize: 10,
+    color: THEME.mutedForeground,
+    marginTop: 2,
+  },
+  posPresPillsRow: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 4,
+    marginTop: 6,
+  },
+  posPresMiniBtn: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 3,
+    backgroundColor: THEME.secondary,
+    borderWidth: 1,
+    borderColor: THEME.primary,
+    borderRadius: 5,
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+  },
+  posPresMiniBtnText: {
+    fontSize: 10,
+    fontWeight: "700",
+    color: THEME.primary600,
+  },
+  posProdFooter: {
+    marginTop: 8,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 4,
+  },
+  posProdPrice: {
+    fontSize: 14,
+    fontWeight: "800",
+    color: THEME.primary,
+  },
+  stockBadge: {
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 5,
+    borderWidth: 1,
+  },
+  stockBadgeSuccess: {
+    backgroundColor: THEME.successSoft,
+    borderColor: THEME.successBorder,
+  },
+  stockBadgeWarning: {
+    backgroundColor: THEME.warningSoft,
+    borderColor: THEME.warningBorder,
+  },
+  stockBadgeDanger: {
+    backgroundColor: THEME.dangerSoft,
+    borderColor: THEME.dangerBorder,
+  },
+  stockBadgeText: {
+    fontSize: 9,
+    fontWeight: "700",
+  },
+  // Floating Cart Bar
+  floatingCartBar: {
+    position: "absolute",
+    bottom: 10,
+    left: 12,
+    right: 12,
+    backgroundColor: THEME.sidebar,
+    borderRadius: 12,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    elevation: 6,
+  },
+  floatingCartInfo: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+  },
+  floatingCartBadge: {
+    backgroundColor: THEME.primary,
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  floatingCartBadgeText: {
+    color: "#fff",
+    fontWeight: "800",
+    fontSize: 13,
+  },
+  floatingCartLabel: {
+    color: THEME.sidebarForeground,
+    fontSize: 9,
+    fontWeight: "700",
+  },
+  floatingCartTotal: {
+    color: "#fff",
+    fontSize: 16,
+    fontWeight: "800",
+  },
+  floatingViewCartBtn: {
+    backgroundColor: THEME.sidebarAccent,
+    paddingHorizontal: 12,
+    paddingVertical: 9,
+    borderRadius: 8,
+  },
+  floatingViewCartBtnText: {
+    color: "#fff",
+    fontSize: 12,
+    fontWeight: "600",
+  },
+  floatingCheckoutBtn: {
+    backgroundColor: THEME.primary,
+    paddingHorizontal: 14,
+    paddingVertical: 9,
+    borderRadius: 8,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 5,
+  },
+  floatingCheckoutBtnText: {
+    color: "#fff",
+    fontSize: 13,
+    fontWeight: "800",
+  },
+  // Cards & Cart View
+  card: {
+    backgroundColor: THEME.card,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: THEME.border,
+    padding: 13,
+  },
+  cardSectionTitle: {
+    fontSize: 14,
+    fontWeight: "700",
+    color: THEME.foreground,
+  },
+  cartHeaderRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    marginBottom: 10,
+  },
+  clienteSelectorBox: {
+    borderTopWidth: 1,
+    borderTopColor: THEME.border,
+    paddingTop: 10,
+  },
+  clienteSelectorHeader: {
     flexDirection: "row",
     justifyContent: "space-between",
     alignItems: "center",
-    paddingHorizontal: 16,
-    paddingVertical: 12,
-    borderBottomWidth: 1,
-    borderBottomColor: "#1e293b",
+    marginBottom: 6,
   },
-  headerTitle: { fontSize: 16, fontWeight: "700", color: "#f8fafc" },
-  headerSub: { fontSize: 12, color: "#94a3b8" },
-  statusBadge: { paddingHorizontal: 10, paddingVertical: 5, borderRadius: 20 },
-  badgeOnline: { backgroundColor: "rgba(16, 185, 129, 0.15)" },
-  badgeOffline: { backgroundColor: "rgba(245, 158, 11, 0.15)" },
-  statusBadgeText: { fontSize: 11, fontWeight: "600", color: "#f8fafc" },
-  content: { flex: 1, padding: 12 },
-  searchInput: {
-    backgroundColor: "#111827",
-    borderColor: "#1e293b",
+  newClientInlineBtn: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 4,
+  },
+  newClientInlineBtnText: {
+    fontSize: 11,
+    fontWeight: "700",
+    color: THEME.primary,
+  },
+  clienteDropdownBtn: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    backgroundColor: THEME.inputBg,
     borderWidth: 1,
+    borderColor: THEME.border,
     borderRadius: 8,
+    paddingHorizontal: 11,
+    paddingVertical: 9,
+  },
+  clienteDropdownText: {
+    flex: 1,
+    fontSize: 13,
+    fontWeight: "600",
+    color: THEME.foreground,
+  },
+  deudaAlertBox: {
+    marginTop: 8,
+    backgroundColor: THEME.warningSoft,
+    borderWidth: 1,
+    borderColor: THEME.warningBorder,
+    borderRadius: 8,
+    padding: 9,
+    gap: 5,
+  },
+  deudaAlertTitle: {
+    fontSize: 11,
+    fontWeight: "700",
+    color: THEME.warningStrong,
+  },
+  deudaAlertAmountsRow: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 6,
+  },
+  deudaChip: {
+    backgroundColor: THEME.dangerSoft,
+    borderWidth: 1,
+    borderColor: THEME.dangerBorder,
+    paddingHorizontal: 7,
+    paddingVertical: 2,
+    borderRadius: 5,
+  },
+  deudaChipText: {
+    fontSize: 11,
+    fontWeight: "700",
+    color: THEME.dangerStrong,
+  },
+  cartItemCard: {
+    backgroundColor: THEME.card,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: THEME.border,
+    padding: 12,
+  },
+  cartItemTopRow: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "flex-start",
+  },
+  cartItemName: {
+    fontSize: 13,
+    fontWeight: "700",
+    color: THEME.foreground,
+  },
+  cartItemSub: {
+    fontSize: 11,
+    color: THEME.mutedForeground,
+    marginTop: 2,
+  },
+  cartItemNeto: {
+    fontSize: 14,
+    fontWeight: "800",
+    color: THEME.primary,
+  },
+  presSelectChip: {
+    paddingHorizontal: 9,
+    paddingVertical: 4,
+    borderRadius: 6,
+    backgroundColor: THEME.inputBg,
+    borderWidth: 1,
+    borderColor: THEME.border,
+  },
+  presSelectChipActive: {
+    backgroundColor: THEME.primary,
+    borderColor: THEME.primary600,
+  },
+  presSelectChipText: {
+    fontSize: 11,
+    fontWeight: "600",
+    color: THEME.foreground,
+  },
+  presSelectChipTextActive: {
+    color: "#fff",
+  },
+  cartItemControlsRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    marginTop: 8,
+    gap: 8,
+  },
+  qtyStepper: {
+    flexDirection: "row",
+    alignItems: "center",
+    backgroundColor: THEME.inputBg,
+    borderWidth: 1,
+    borderColor: THEME.border,
+    borderRadius: 8,
+  },
+  qtyStepBtn: {
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+  },
+  qtyStepValue: {
+    fontSize: 13,
+    fontWeight: "700",
+    color: THEME.foreground,
+    minWidth: 26,
+    textAlign: "center",
+  },
+  lineDiscountBox: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 4,
+    backgroundColor: THEME.inputBg,
+    borderWidth: 1,
+    borderColor: THEME.border,
+    borderRadius: 8,
+    paddingHorizontal: 8,
+    height: 32,
+  },
+  lineDiscountLabel: {
+    fontSize: 11,
+    color: THEME.mutedForeground,
+  },
+  lineDiscountInput: {
+    fontSize: 12,
+    color: THEME.foreground,
+    minWidth: 48,
+    paddingVertical: 0,
+  },
+  removeLineBtn: {
+    padding: 6,
+  },
+  summaryRow: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    paddingVertical: 3,
+  },
+  summaryLabel: {
+    fontSize: 12,
+    color: THEME.mutedForeground,
+  },
+  summaryVal: {
+    fontSize: 12,
+    fontWeight: "700",
+    color: THEME.foreground,
+  },
+  summaryTotalRow: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    borderTopWidth: 1,
+    borderTopColor: THEME.border,
+    marginTop: 6,
+    paddingTop: 8,
+  },
+  summaryTotalLabel: {
+    fontSize: 15,
+    fontWeight: "800",
+    color: THEME.foreground,
+  },
+  summaryTotalValue: {
+    fontSize: 19,
+    fontWeight: "900",
+    color: THEME.primary,
+  },
+  // Clientes & Créditos Modules
+  moduleHeaderBar: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    padding: 12,
+    backgroundColor: THEME.card,
+    borderBottomWidth: 1,
+    borderBottomColor: THEME.border,
+  },
+  clientCardTop: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+  },
+  avatarCircle: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    backgroundColor: THEME.secondary,
+    borderWidth: 1,
+    borderColor: THEME.primary,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  avatarCircleText: {
+    color: THEME.primary600,
+    fontWeight: "800",
+    fontSize: 13,
+  },
+  clientCardName: {
+    fontSize: 14,
+    fontWeight: "700",
+    color: THEME.foreground,
+  },
+  clientCardMeta: {
+    fontSize: 11,
+    color: THEME.mutedForeground,
+    marginTop: 2,
+  },
+  clientCardFooter: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "flex-end",
+    borderTopWidth: 1,
+    borderTopColor: THEME.border,
+    marginTop: 10,
+    paddingTop: 8,
+  },
+  creditLimitTag: {
+    backgroundColor: THEME.inputBg,
+    borderWidth: 1,
+    borderColor: THEME.border,
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 4,
+  },
+  creditLimitTagText: {
+    fontSize: 10,
+    fontWeight: "600",
+    color: THEME.foreground,
+  },
+  clientDebtAmount: {
+    fontSize: 13,
+    fontWeight: "800",
+    color: THEME.dangerStrong,
+  },
+  mutedSmallText: {
+    fontSize: 11,
+    color: THEME.mutedForeground,
+  },
+  statusBadge: {
+    paddingHorizontal: 7,
+    paddingVertical: 2,
+    borderRadius: 6,
+    borderWidth: 1,
+  },
+  statusBadgeText: {
+    fontSize: 10,
+    fontWeight: "700",
+  },
+  creditosKpiRow: {
+    flexDirection: "row",
+    gap: 8,
+    paddingHorizontal: 12,
+    paddingTop: 10,
+  },
+  kpiCard: {
+    flex: 1,
+    backgroundColor: THEME.card,
+    borderWidth: 1,
+    borderColor: THEME.border,
+    borderRadius: 10,
+    padding: 10,
+  },
+  kpiLabel: {
+    fontSize: 9,
+    fontWeight: "700",
+    color: THEME.mutedForeground,
+    letterSpacing: 0.5,
+  },
+  kpiValue: {
+    fontSize: 18,
+    fontWeight: "900",
+    color: THEME.foreground,
+    marginTop: 3,
+  },
+  kpiValueSmall: {
+    fontSize: 13,
+    fontWeight: "800",
+    marginTop: 2,
+  },
+  creditosFilterBar: {
+    paddingHorizontal: 12,
+    paddingTop: 10,
+  },
+  creditoCardHeader: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "flex-start",
+  },
+  creditoNumero: {
+    fontSize: 12,
+    fontWeight: "800",
+    color: THEME.primary600,
+  },
+  creditoVentaTag: {
+    fontSize: 10,
+    color: THEME.mutedForeground,
+    backgroundColor: THEME.inputBg,
+    paddingHorizontal: 6,
+    paddingVertical: 1,
+    borderRadius: 4,
+  },
+  creditoClienteName: {
+    fontSize: 14,
+    fontWeight: "700",
+    color: THEME.foreground,
+    marginTop: 2,
+  },
+  creditoAmountsGrid: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    backgroundColor: THEME.inputBg,
+    borderRadius: 8,
+    padding: 9,
+    marginTop: 10,
+  },
+  creditoAmountTotal: {
+    fontSize: 13,
+    fontWeight: "700",
+    color: THEME.foreground,
+  },
+  creditoAmountAbonado: {
+    fontSize: 13,
+    fontWeight: "700",
+    color: THEME.successStrong,
+  },
+  creditoAmountSaldo: {
+    fontSize: 14,
+    fontWeight: "800",
+    color: THEME.dangerStrong,
+  },
+  creditoActionsRow: {
+    flexDirection: "row",
+    justifyContent: "flex-end",
+    gap: 8,
+    marginTop: 10,
+  },
+  sectionGroupHeader: {
+    fontSize: 11,
+    fontWeight: "800",
+    color: THEME.mutedForeground,
+    letterSpacing: 0.6,
+    marginTop: 4,
+  },
+  quickGrid: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 10,
+    marginTop: 10,
+  },
+  quickTile: {
+    width: "48%",
+    backgroundColor: THEME.inputBg,
+    borderWidth: 1,
+    borderColor: THEME.border,
+    borderRadius: 10,
+    padding: 12,
+    gap: 4,
+  },
+  quickTileIcon: {
+    width: 36,
+    height: 36,
+    borderRadius: 8,
+    alignItems: "center",
+    justifyContent: "center",
+    marginBottom: 4,
+  },
+  quickTileTitle: {
+    fontSize: 13,
+    fontWeight: "700",
+    color: THEME.foreground,
+  },
+  quickTileSub: {
+    fontSize: 11,
+    color: THEME.mutedForeground,
+  },
+  // Bottom Nav
+  bottomNav: {
+    height: 58,
+    backgroundColor: THEME.card,
+    borderTopWidth: 1,
+    borderTopColor: THEME.border,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-around",
+  },
+  bottomNavItem: {
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 2,
+    flex: 1,
+  },
+  bottomNavText: {
+    fontSize: 10,
+    fontWeight: "600",
+    color: THEME.mutedForeground,
+  },
+  bottomNavTextActive: {
+    color: THEME.primary,
+    fontWeight: "800",
+  },
+  // Sidebar Drawer (#1c1917 idéntico a Desktop)
+  drawerOverlay: {
+    flex: 1,
+    flexDirection: "row",
+    backgroundColor: "rgba(0,0,0,0.45)",
+  },
+  sidebarDrawer: {
+    width: 265,
+    backgroundColor: THEME.sidebar,
+    height: "100%",
+  },
+  sidebarHeader: {
+    paddingHorizontal: 18,
+    paddingVertical: 18,
+    borderBottomWidth: 1,
+    borderBottomColor: THEME.sidebarBorder,
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+  },
+  sidebarBrandTitle: {
+    color: "#fff",
+    fontSize: 16,
+    fontWeight: "800",
+  },
+  sidebarBrandSub: {
+    color: THEME.sidebarForeground,
+    fontSize: 11,
+  },
+  sidebarGroupLabelRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    marginBottom: 6,
+    paddingHorizontal: 6,
+  },
+  sidebarGroupDivider: {
+    flex: 1,
+    height: 1,
+    backgroundColor: THEME.sidebarAccent,
+  },
+  sidebarGroupLabel: {
+    fontSize: 9,
+    fontWeight: "700",
+    color: THEME.sidebarForeground,
+    letterSpacing: 1.2,
+  },
+  sidebarItem: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+    paddingHorizontal: 10,
+    paddingVertical: 10,
+    borderRadius: 6,
+    position: "relative",
+  },
+  sidebarItemActive: {
+    backgroundColor: THEME.sidebarAccent,
+  },
+  sidebarActiveBar: {
+    position: "absolute",
+    left: 0,
+    top: 8,
+    bottom: 8,
+    width: 3,
+    backgroundColor: THEME.primary,
+    borderRadius: 2,
+  },
+  sidebarItemText: {
+    fontSize: 13,
+    color: THEME.sidebarForeground,
+    fontWeight: "500",
+  },
+  sidebarItemTextActive: {
+    color: "#fff",
+    fontWeight: "700",
+  },
+  sidebarFooter: {
+    borderTopWidth: 1,
+    borderTopColor: THEME.sidebarBorder,
+    padding: 14,
+  },
+  sidebarUserRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+  },
+  sidebarUserName: {
+    color: "#fff",
+    fontSize: 12,
+    fontWeight: "700",
+  },
+  sidebarUserRole: {
+    color: THEME.sidebarForeground,
+    fontSize: 10,
+    textTransform: "capitalize",
+  },
+  // Modals & Checkout
+  modalBackdrop: {
+    flex: 1,
+    backgroundColor: "rgba(28,25,23,0.55)",
+    justifyContent: "flex-end",
+  },
+  modalSheet: {
+    backgroundColor: THEME.card,
+    borderTopLeftRadius: 18,
+    borderTopRightRadius: 18,
+    padding: 16,
+    maxHeight: "92%",
+  },
+  modalHeader: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    marginBottom: 12,
+  },
+  modalTitle: {
+    fontSize: 17,
+    fontWeight: "800",
+    color: THEME.foreground,
+  },
+  checkoutTopSummary: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    backgroundColor: THEME.inputBg,
+    borderWidth: 1,
+    borderColor: THEME.border,
+    borderRadius: 10,
+    padding: 12,
+  },
+  checkoutClientText: {
+    fontSize: 14,
+    fontWeight: "700",
+    color: THEME.foreground,
+    marginTop: 2,
+  },
+  checkoutBigTotal: {
+    fontSize: 20,
+    fontWeight: "900",
+    color: THEME.primary,
+  },
+  checkoutSectionHeader: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+  },
+  mixtoToggleBtn: {
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    borderRadius: 6,
+    backgroundColor: THEME.secondary,
+    borderWidth: 1,
+    borderColor: THEME.primary,
+  },
+  mixtoToggleBtnActive: {
+    backgroundColor: THEME.primary,
+  },
+  mixtoToggleBtnText: {
+    fontSize: 11,
+    fontWeight: "700",
+    color: THEME.primary600,
+  },
+  simpleMethodsList: {
+    gap: 6,
+  },
+  simpleMethodRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
     paddingHorizontal: 12,
     paddingVertical: 9,
-    color: "#f8fafc",
-    marginBottom: 10,
-  },
-  cardRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    backgroundColor: "#111827",
     borderRadius: 8,
-    padding: 12,
-    marginBottom: 8,
+    backgroundColor: THEME.inputBg,
     borderWidth: 1,
-    borderColor: "#1e293b",
+    borderColor: THEME.border,
   },
-  prodName: { fontSize: 14, fontWeight: "600", color: "#f8fafc" },
-  prodCode: { fontSize: 11, color: "#94a3b8", marginTop: 2 },
-  prodPrice: { fontSize: 15, fontWeight: "700", color: "#38bdf8" },
-  prodPriceSub: { fontSize: 11, color: "#94a3b8" },
-  addBtn: {
-    backgroundColor: "#1d4ed8",
-    paddingHorizontal: 10,
-    paddingVertical: 7,
-    borderRadius: 6,
+  simpleMethodRowActive: {
+    backgroundColor: THEME.accent,
+    borderColor: THEME.primary,
+    borderWidth: 1.5,
   },
-  addBtnText: { color: "#fff", fontSize: 12, fontWeight: "600" },
-  emptyText: { color: "#64748b", textAlign: "center", marginTop: 40, fontSize: 13 },
-  qtyControls: { flexDirection: "row", alignItems: "center", gap: 8 },
-  qtyBtn: {
-    backgroundColor: "#1e293b",
-    width: 28,
-    height: 28,
-    borderRadius: 6,
-    justifyContent: "center",
+  simpleMethodName: {
+    flex: 1,
+    fontSize: 13,
+    fontWeight: "600",
+    color: THEME.foreground,
+  },
+  mixtoLineCard: {
+    backgroundColor: THEME.inputBg,
+    borderWidth: 1,
+    borderColor: THEME.border,
+    borderRadius: 8,
+    padding: 8,
+  },
+  checkoutBalanceBanner: {
+    backgroundColor: THEME.inputBg,
+    borderWidth: 1,
+    borderColor: THEME.border,
+    borderRadius: 8,
+    padding: 10,
+  },
+  checkoutCreditPanel: {
+    backgroundColor: THEME.accent,
+    borderWidth: 1,
+    borderColor: THEME.primary,
+    borderRadius: 8,
+    padding: 10,
+  },
+  cobrosExtraContainer: {
+    backgroundColor: THEME.inputBg,
+    borderWidth: 1,
+    borderColor: THEME.border,
+    borderRadius: 8,
+    padding: 10,
+  },
+  cobrosExtraHeader: {
+    flexDirection: "row",
+    justifyContent: "space-between",
     alignItems: "center",
   },
-  qtyBtnText: { color: "#fff", fontSize: 16, fontWeight: "700" },
-  qtyVal: { color: "#f8fafc", fontSize: 14, fontWeight: "600", minWidth: 20, textAlign: "center" },
-  checkoutFooter: {
-    borderTopWidth: 1,
-    borderTopColor: "#1e293b",
-    paddingTop: 12,
-    marginTop: 8,
+  presetExtraChip: {
+    backgroundColor: THEME.card,
+    borderWidth: 1,
+    borderColor: THEME.border,
+    borderRadius: 6,
+    paddingHorizontal: 9,
+    paddingVertical: 5,
   },
-  totalLabel: { color: "#94a3b8", fontSize: 14 },
-  totalValue: { color: "#f8fafc", fontSize: 18, fontWeight: "700" },
-  tabBar: {
+  presetExtraChipText: {
+    fontSize: 11,
+    fontWeight: "700",
+    color: THEME.primary600,
+  },
+  checkoutActionBtn: {
+    height: 44,
+    borderRadius: 8,
     flexDirection: "row",
-    borderTopWidth: 1,
-    borderTopColor: "#1e293b",
-    backgroundColor: "#0f172a",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 6,
+    paddingHorizontal: 10,
   },
-  tabItem: { flex: 1, paddingVertical: 12, alignItems: "center" },
-  tabItemActive: { borderTopWidth: 2, borderTopColor: "#3b82f6" },
-  tabLabel: { fontSize: 12, color: "#64748b", fontWeight: "600" },
-  tabLabelActive: { color: "#3b82f6" },
+  checkoutActionBtnText: {
+    color: "#fff",
+    fontSize: 13,
+    fontWeight: "800",
+  },
+  pickerRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    paddingVertical: 11,
+    paddingHorizontal: 8,
+    borderBottomWidth: 1,
+    borderBottomColor: THEME.border,
+  },
+  creditCheckRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    paddingVertical: 6,
+  },
+  emptyBox: {
+    alignItems: "center",
+    justifyContent: "center",
+    paddingVertical: 36,
+    paddingHorizontal: 20,
+    gap: 6,
+  },
+  emptyBoxTitle: {
+    fontSize: 15,
+    fontWeight: "700",
+    color: THEME.foreground,
+  },
+  emptyBoxSub: {
+    fontSize: 12,
+    color: THEME.mutedForeground,
+    textAlign: "center",
+  },
 });

@@ -6,6 +6,7 @@ import { query, queryOne, transaction } from "@/lib/db";
 import { fechaLocalISO } from "@/lib/format";
 import { aBase, convertirConMetodo, redondear, tasaUsd } from "@/lib/money";
 import { getConfiguracionGlobal } from "@/lib/global-config";
+import { triggerBackgroundSync } from "@/lib/sync-engine";
 
 export async function GET(
   request: Request,
@@ -270,6 +271,7 @@ export async function POST(
       };
     });
 
+    triggerBackgroundSync();
     return NextResponse.json(result, { status: 201 });
   } catch (error) {
     const msg = error instanceof Error ? error.message : "Error al procesar abono";

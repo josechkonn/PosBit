@@ -33,7 +33,8 @@
           "cameraPermission": "Permitir a PosBit usar la cámara para escanear códigos de barras de productos."
         }
       ],
-      "expo-asset"
+      "expo-asset",
+      "expo-font"
     ]
   }
 }

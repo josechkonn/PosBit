@@ -4,6 +4,7 @@ import { NextResponse } from "next/server";
 import { requireSession } from "@/lib/auth-server";
 import { query, queryOne, transaction } from "@/lib/db";
 import { aBase, convertir, redondear, tasaUsd } from "@/lib/money";
+import { triggerBackgroundSync } from "@/lib/sync-engine";
 
 function generarNumero() {
   const year = new Date().getFullYear();
@@ -169,6 +170,7 @@ export async function POST(request: Request) {
       return { abono: { ...body, monto: montoAbono, monto_base: montoBase }, credito: { ...credito, saldo: nuevoSaldo, saldo_base: nuevoSaldoBase, estado: nuevoEstado } };
     });
 
+    triggerBackgroundSync();
     return NextResponse.json(result, { status: 201 });
   } catch (error) {
     return NextResponse.json({ error: error instanceof Error ? error.message : "Error al registrar abono" }, { status: 500 });

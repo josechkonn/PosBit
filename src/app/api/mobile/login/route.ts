@@ -51,25 +51,51 @@ export async function POST(request: Request) {
     const userId = signInResult.user.id;
     let token: string | null = signInResult.token ?? null;
 
-    const [latestSession, userRow, monedas, cajas, metodosPago, productos] =
-      await Promise.all([
-        !token
-          ? queryOne<{ token: string }>(
-              `SELECT token FROM "session" WHERE "userId" = $1 AND "expiresAt" > NOW() ORDER BY "createdAt" DESC LIMIT 1`,
-              [userId]
-            )
-          : Promise.resolve(null),
-        queryOne<{
-          id: string;
-          name: string;
-          email: string;
-          role: string;
-        }>(`SELECT id, name, email, role FROM "user" WHERE id = $1`, [userId]),
-        query(`SELECT * FROM monedas WHERE activo = true ORDER BY es_base DESC, codigo ASC`),
-        query(`SELECT * FROM cajas ORDER BY nombre ASC`),
-        query(`SELECT * FROM metodos_pago WHERE activo = true ORDER BY nombre ASC`),
-        query(`SELECT id, codigo, nombre, stock, precio_base, moneda_base_id, activo, actualizado_en FROM productos ORDER BY nombre ASC`),
-      ]);
+    const [
+      latestSession,
+      userRow,
+      monedas,
+      cajas,
+      metodosPago,
+      categorias,
+      clientes,
+      clienteLimitesCredito,
+      productos,
+      productoPresentaciones,
+      creditos,
+      abonos,
+      ventas,
+    ] = await Promise.all([
+      !token
+        ? queryOne<{ token: string }>(
+            `SELECT token FROM "session" WHERE "userId" = $1 AND "expiresAt" > NOW() ORDER BY "createdAt" DESC LIMIT 1`,
+            [userId]
+          )
+        : Promise.resolve(null),
+      queryOne<{
+        id: string;
+        name: string;
+        email: string;
+        role: string;
+      }>(`SELECT id, name, email, role FROM "user" WHERE id = $1`, [userId]),
+      query(`SELECT * FROM monedas WHERE activo = true ORDER BY es_base DESC, codigo ASC`),
+      query(`SELECT * FROM cajas ORDER BY nombre ASC`),
+      query(`SELECT * FROM metodos_pago WHERE activo = true ORDER BY nombre ASC`),
+      query(`SELECT * FROM categorias ORDER BY nombre ASC`),
+      query(`SELECT * FROM clientes ORDER BY nombre ASC`),
+      query(`SELECT * FROM cliente_limites_credito`),
+      query(
+        `SELECT p.*, c.nombre as categoria_nombre, m.nombre as marca_nombre
+         FROM productos p
+         LEFT JOIN categorias c ON p.categoria_id = c.id
+         LEFT JOIN marcas m ON p.marca_id = m.id
+         ORDER BY p.nombre ASC`
+      ),
+      query(`SELECT * FROM producto_presentaciones WHERE activo = true ORDER BY unidades ASC`),
+      query(`SELECT * FROM creditos ORDER BY fecha DESC, id DESC LIMIT 300`),
+      query(`SELECT * FROM abonos ORDER BY fecha DESC, id DESC LIMIT 500`),
+      query(`SELECT * FROM ventas ORDER BY fecha DESC, id DESC LIMIT 200`),
+    ]);
 
     if (!token && latestSession?.token) {
       token = latestSession.token;
@@ -87,7 +113,14 @@ export async function POST(request: Request) {
       monedas,
       cajas,
       metodosPago,
+      categorias,
+      clientes,
+      clienteLimitesCredito,
       productos,
+      productoPresentaciones,
+      creditos,
+      abonos,
+      ventas,
       serverTime: new Date().toISOString(),
     });
   } catch (error: any) {
