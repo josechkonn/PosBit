@@ -13,6 +13,17 @@ export interface LocalMoneda {
   tasa_usd_directa?: number | null;
 }
 
+export interface LocalConfiguracionGlobal {
+  metodo_conversion_compras: "directa" | "triangulacion";
+  metodo_conversion_ventas: "directa" | "triangulacion";
+  moneda_transito_compras_id: string | null;
+  moneda_transito_ventas_id: string | null;
+  auto_precio_compra?: boolean;
+  redondeo_activo?: boolean;
+  redondeo_multiplo?: number;
+  redondeo_no_bajar_de_costo?: boolean;
+}
+
 export interface LocalCaja {
   id: string;
   nombre: string;
@@ -30,7 +41,7 @@ export interface LocalMetodoPago {
 }
 
 export interface LocalCategoria {
-  id: number;
+  id: string;
   nombre: string;
 }
 
@@ -45,22 +56,11 @@ export interface LocalPresentacion {
   margen_override: number | null;
 }
 
-export interface LocalConfiguracionGlobal {
-  metodo_conversion_compras: "directa" | "triangulacion";
-  metodo_conversion_ventas: "directa" | "triangulacion";
-  moneda_transito_compras_id: string | null;
-  moneda_transito_ventas_id: string | null;
-  auto_precio_compra?: boolean;
-  redondeo_activo?: boolean;
-  redondeo_multiplo?: number;
-  redondeo_no_bajar_de_costo?: boolean;
-}
-
 export interface LocalProducto {
   id: number;
   codigo: string;
   nombre: string;
-  categoria_id?: number | null;
+  categoria_id?: string | null;
   categoria_nombre?: string | null;
   marca_nombre?: string | null;
   stock: number;
@@ -91,7 +91,7 @@ export interface LocalClienteDeuda {
 }
 
 export interface LocalCliente {
-  id: number;
+  id: string;
   nombre: string;
   tipo: string;
   documento: string | null;
@@ -108,11 +108,11 @@ export interface LocalCliente {
 }
 
 export interface LocalCredito {
-  id: number;
+  id: string;
   numero: string;
-  venta_id: number | null;
+  venta_id: string | null;
   venta_numero?: string | null;
-  cliente_id: number;
+  cliente_id: string;
   cliente_nombre: string;
   cliente_documento?: string | null;
   cliente_telefono?: string | null;
@@ -129,9 +129,9 @@ export interface LocalCredito {
 }
 
 export interface LocalAbono {
-  id: number;
-  credito_id: number;
-  cliente_id: number;
+  id: string;
+  credito_id: string;
+  cliente_id: string;
   fecha: string;
   monto: number;
   moneda_id: string;
@@ -144,9 +144,9 @@ export interface LocalAbono {
 }
 
 export interface LocalVentaRemota {
-  id: number;
+  id: string;
   numero: string;
-  cliente_id: number | null;
+  cliente_id: string | null;
   cliente: string | null;
   fecha: string;
   subtotal: number;
@@ -166,7 +166,7 @@ export interface LocalVentaRemota {
 export interface LocalVentaPendiente {
   id: string;
   numero: string;
-  cliente_id?: number | null;
+  cliente_id?: string | null;
   cliente_nombre: string;
   moneda_id: string;
   tipo_pago?: string;
@@ -188,7 +188,7 @@ export interface LocalVentaPendiente {
 
 export interface LocalAbonoPendiente {
   id: string;
-  credito_id: number;
+  credito_id: string;
   fecha: string;
   monto: number;
   moneda_id: string;
@@ -202,7 +202,7 @@ export interface LocalAbonoPendiente {
 
 let dbInstance: SQLite.SQLiteDatabase | null = null;
 let schemaVersionApplied = 0;
-const CURRENT_SCHEMA_VERSION = 6;
+const CURRENT_SCHEMA_VERSION = 7;
 
 export async function getMobileDb(): Promise<SQLite.SQLiteDatabase> {
   if (dbInstance && schemaVersionApplied === CURRENT_SCHEMA_VERSION) return dbInstance;
@@ -217,7 +217,35 @@ export async function getMobileDb(): Promise<SQLite.SQLiteDatabase> {
       clave TEXT PRIMARY KEY,
       valor TEXT
     );
+  `);
 
+  // Check if we need to migrate to UUID-based tables (version 7)
+  try {
+    const verRow = await dbInstance.getFirstAsync<{ valor: string }>(
+      `SELECT valor FROM sync_meta WHERE clave = 'db_schema_version'`
+    );
+    if (verRow?.valor !== String(CURRENT_SCHEMA_VERSION)) {
+      await dbInstance.execAsync(`
+        DROP TABLE IF EXISTS categorias;
+        DROP TABLE IF EXISTS clientes;
+        DROP TABLE IF EXISTS cliente_limites_credito;
+        DROP TABLE IF EXISTS creditos;
+        DROP TABLE IF EXISTS abonos;
+        DROP TABLE IF EXISTS ventas_remotas;
+        DROP TABLE IF EXISTS abonos_locales;
+      `);
+      await dbInstance.runAsync(`DELETE FROM sync_meta WHERE clave = 'last_pull_iso'`);
+      await dbInstance.runAsync(
+        `INSERT INTO sync_meta (clave, valor) VALUES ('db_schema_version', ?)
+         ON CONFLICT(clave) DO UPDATE SET valor = excluded.valor`,
+        [String(CURRENT_SCHEMA_VERSION)]
+      );
+    }
+  } catch {
+    // Ignore
+  }
+
+  await dbInstance.execAsync(`
     CREATE TABLE IF NOT EXISTS monedas (
       id TEXT PRIMARY KEY,
       codigo TEXT NOT NULL,
@@ -246,12 +274,12 @@ export async function getMobileDb(): Promise<SQLite.SQLiteDatabase> {
     );
 
     CREATE TABLE IF NOT EXISTS categorias (
-      id INTEGER PRIMARY KEY,
+      id TEXT PRIMARY KEY,
       nombre TEXT NOT NULL
     );
 
     CREATE TABLE IF NOT EXISTS clientes (
-      id INTEGER PRIMARY KEY,
+      id TEXT PRIMARY KEY,
       nombre TEXT NOT NULL,
       tipo TEXT NOT NULL DEFAULT 'Persona Natural',
       documento TEXT,
@@ -266,7 +294,7 @@ export async function getMobileDb(): Promise<SQLite.SQLiteDatabase> {
     );
 
     CREATE TABLE IF NOT EXISTS cliente_limites_credito (
-      cliente_id INTEGER NOT NULL,
+      cliente_id TEXT NOT NULL,
       moneda_id TEXT NOT NULL,
       limite REAL NOT NULL DEFAULT 0,
       PRIMARY KEY (cliente_id, moneda_id)
@@ -276,7 +304,7 @@ export async function getMobileDb(): Promise<SQLite.SQLiteDatabase> {
       id INTEGER PRIMARY KEY,
       codigo TEXT NOT NULL,
       nombre TEXT NOT NULL,
-      categoria_id INTEGER,
+      categoria_id TEXT,
       categoria_nombre TEXT,
       marca_nombre TEXT,
       stock INTEGER NOT NULL DEFAULT 0,
@@ -284,6 +312,7 @@ export async function getMobileDb(): Promise<SQLite.SQLiteDatabase> {
       precio_base REAL NOT NULL DEFAULT 0,
       costo_base REAL NOT NULL DEFAULT 0,
       moneda_base_id TEXT,
+      moneda_costo_id TEXT,
       iva_incluido INTEGER NOT NULL DEFAULT 1,
       imagen TEXT,
       activo INTEGER NOT NULL DEFAULT 1,
@@ -302,10 +331,10 @@ export async function getMobileDb(): Promise<SQLite.SQLiteDatabase> {
     );
 
     CREATE TABLE IF NOT EXISTS creditos (
-      id INTEGER PRIMARY KEY,
+      id TEXT PRIMARY KEY,
       numero TEXT NOT NULL,
-      venta_id INTEGER,
-      cliente_id INTEGER NOT NULL,
+      venta_id TEXT,
+      cliente_id TEXT NOT NULL,
       fecha TEXT NOT NULL,
       fecha_vencimiento TEXT,
       moneda_id TEXT NOT NULL,
@@ -316,9 +345,9 @@ export async function getMobileDb(): Promise<SQLite.SQLiteDatabase> {
     );
 
     CREATE TABLE IF NOT EXISTS abonos (
-      id INTEGER PRIMARY KEY,
-      credito_id INTEGER NOT NULL,
-      cliente_id INTEGER NOT NULL,
+      id TEXT PRIMARY KEY,
+      credito_id TEXT NOT NULL,
+      cliente_id TEXT NOT NULL,
       fecha TEXT NOT NULL,
       monto REAL NOT NULL DEFAULT 0,
       moneda_id TEXT NOT NULL,
@@ -328,9 +357,9 @@ export async function getMobileDb(): Promise<SQLite.SQLiteDatabase> {
     );
 
     CREATE TABLE IF NOT EXISTS ventas_remotas (
-      id INTEGER PRIMARY KEY,
+      id TEXT PRIMARY KEY,
       numero TEXT NOT NULL,
-      cliente_id INTEGER,
+      cliente_id TEXT,
       cliente TEXT,
       fecha TEXT NOT NULL,
       subtotal REAL NOT NULL DEFAULT 0,
@@ -352,7 +381,7 @@ export async function getMobileDb(): Promise<SQLite.SQLiteDatabase> {
     CREATE TABLE IF NOT EXISTS ventas_locales (
       id TEXT PRIMARY KEY,
       numero TEXT NOT NULL,
-      cliente_id INTEGER,
+      cliente_id TEXT,
       cliente_nombre TEXT,
       moneda_id TEXT NOT NULL,
       tipo_pago TEXT NOT NULL DEFAULT 'Contado',
@@ -374,7 +403,7 @@ export async function getMobileDb(): Promise<SQLite.SQLiteDatabase> {
 
     CREATE TABLE IF NOT EXISTS abonos_locales (
       id TEXT PRIMARY KEY,
-      credito_id INTEGER NOT NULL,
+      credito_id TEXT NOT NULL,
       fecha TEXT NOT NULL,
       monto REAL NOT NULL,
       moneda_id TEXT NOT NULL,
@@ -387,14 +416,13 @@ export async function getMobileDb(): Promise<SQLite.SQLiteDatabase> {
     );
   `);
 
-  // Safe migrations for existing installations
   const safeAlter = [
     `ALTER TABLE monedas ADD COLUMN decimales INTEGER NOT NULL DEFAULT 2`,
     `ALTER TABLE monedas ADD COLUMN tasa_ref_moneda_id TEXT`,
     `ALTER TABLE monedas ADD COLUMN usa_tasa_usd_directa INTEGER NOT NULL DEFAULT 0`,
     `ALTER TABLE monedas ADD COLUMN tasa_usd_directa REAL`,
     `ALTER TABLE cajas ADD COLUMN saldo_actual REAL NOT NULL DEFAULT 0`,
-    `ALTER TABLE productos ADD COLUMN categoria_id INTEGER`,
+    `ALTER TABLE productos ADD COLUMN categoria_id TEXT`,
     `ALTER TABLE productos ADD COLUMN categoria_nombre TEXT`,
     `ALTER TABLE productos ADD COLUMN marca_nombre TEXT`,
     `ALTER TABLE productos ADD COLUMN stock_minimo INTEGER NOT NULL DEFAULT 5`,
@@ -402,7 +430,7 @@ export async function getMobileDb(): Promise<SQLite.SQLiteDatabase> {
     `ALTER TABLE productos ADD COLUMN moneda_costo_id TEXT`,
     `ALTER TABLE productos ADD COLUMN iva_incluido INTEGER NOT NULL DEFAULT 1`,
     `ALTER TABLE productos ADD COLUMN imagen TEXT`,
-    `ALTER TABLE ventas_locales ADD COLUMN cliente_id INTEGER`,
+    `ALTER TABLE ventas_locales ADD COLUMN cliente_id TEXT`,
     `ALTER TABLE ventas_locales ADD COLUMN tipo_pago TEXT NOT NULL DEFAULT 'Contado'`,
     `ALTER TABLE ventas_locales ADD COLUMN subtotal REAL NOT NULL DEFAULT 0`,
     `ALTER TABLE ventas_locales ADD COLUMN impuesto REAL NOT NULL DEFAULT 0`,
@@ -418,23 +446,6 @@ export async function getMobileDb(): Promise<SQLite.SQLiteDatabase> {
     } catch {
       // Column already exists
     }
-  }
-
-  // Si la versión de esquema en disco cambió, forzar re-descarga completa del catálogo y tasas
-  try {
-    const verRow = await dbInstance.getFirstAsync<{ valor: string }>(
-      `SELECT valor FROM sync_meta WHERE clave = 'db_schema_version'`
-    );
-    if (verRow?.valor !== String(CURRENT_SCHEMA_VERSION)) {
-      await dbInstance.runAsync(`DELETE FROM sync_meta WHERE clave = 'last_pull_iso'`);
-      await dbInstance.runAsync(
-        `INSERT INTO sync_meta (clave, valor) VALUES ('db_schema_version', ?)
-         ON CONFLICT(clave) DO UPDATE SET valor = excluded.valor`,
-        [String(CURRENT_SCHEMA_VERSION)]
-      );
-    }
-  } catch {
-    // Ignore
   }
 
   schemaVersionApplied = CURRENT_SCHEMA_VERSION;
@@ -492,6 +503,7 @@ export async function saveCatalogOffline(data: {
 
     if (Array.isArray(data.monedas)) {
       for (const m of data.monedas) {
+        if (!m || !m.id) continue;
         await db.runAsync(
           `INSERT INTO monedas (id, codigo, nombre, simbolo, tasa, es_base, decimales, tasa_ref_moneda_id, usa_tasa_usd_directa, tasa_usd_directa)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -507,8 +519,8 @@ export async function saveCatalogOffline(data: {
              tasa_usd_directa = excluded.tasa_usd_directa`,
           [
             String(m.id),
-            String(m.codigo),
-            String(m.nombre),
+            String(m.codigo || "USD"),
+            String(m.nombre || m.codigo || "Moneda"),
             String(m.simbolo || "$"),
             Number(m.tasa) || 1,
             m.es_base ? 1 : 0,
@@ -523,6 +535,7 @@ export async function saveCatalogOffline(data: {
 
     if (Array.isArray(data.cajas)) {
       for (const c of data.cajas) {
+        if (!c || !c.id) continue;
         await db.runAsync(
           `INSERT INTO cajas (id, nombre, moneda_id, saldo_actual)
            VALUES (?, ?, ?, ?)
@@ -542,6 +555,7 @@ export async function saveCatalogOffline(data: {
 
     if (Array.isArray(data.metodos_pago)) {
       for (const mp of data.metodos_pago) {
+        if (!mp || !mp.id) continue;
         await db.runAsync(
           `INSERT INTO metodos_pago (id, nombre, tipo, caja_id)
            VALUES (?, ?, ?, ?)
@@ -561,17 +575,19 @@ export async function saveCatalogOffline(data: {
 
     if (Array.isArray(data.categorias)) {
       for (const cat of data.categorias) {
+        if (!cat || !cat.id) continue;
         await db.runAsync(
           `INSERT INTO categorias (id, nombre)
            VALUES (?, ?)
            ON CONFLICT(id) DO UPDATE SET nombre = excluded.nombre`,
-          [Number(cat.id), String(cat.nombre)]
+          [String(cat.id), String(cat.nombre)]
         );
       }
     }
 
     if (Array.isArray(data.clientes)) {
       for (const cl of data.clientes) {
+        if (!cl || !cl.id) continue;
         await db.runAsync(
           `INSERT INTO clientes (id, nombre, tipo, documento, email, telefono, ciudad, direccion, recibe_credito, limite_credito, activo, actualizado_en)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -588,7 +604,7 @@ export async function saveCatalogOffline(data: {
              activo = excluded.activo,
              actualizado_en = excluded.actualizado_en`,
           [
-            Number(cl.id),
+            String(cl.id),
             String(cl.nombre),
             String(cl.tipo || "Persona Natural"),
             cl.documento ? String(cl.documento) : null,
@@ -609,7 +625,7 @@ export async function saveCatalogOffline(data: {
               `INSERT INTO cliente_limites_credito (cliente_id, moneda_id, limite)
                VALUES (?, ?, ?)
                ON CONFLICT(cliente_id, moneda_id) DO UPDATE SET limite = excluded.limite`,
-              [Number(cl.id), String(lc.moneda_id), Number(lc.limite) || 0]
+              [String(cl.id), String(lc.moneda_id), Number(lc.limite) || 0]
             );
           }
         }
@@ -618,17 +634,19 @@ export async function saveCatalogOffline(data: {
 
     if (Array.isArray(data.cliente_limites_credito)) {
       for (const lc of data.cliente_limites_credito) {
+        if (!lc || !lc.cliente_id || !lc.moneda_id) continue;
         await db.runAsync(
           `INSERT INTO cliente_limites_credito (cliente_id, moneda_id, limite)
            VALUES (?, ?, ?)
            ON CONFLICT(cliente_id, moneda_id) DO UPDATE SET limite = excluded.limite`,
-          [Number(lc.cliente_id), String(lc.moneda_id), Number(lc.limite) || 0]
+          [String(lc.cliente_id), String(lc.moneda_id), Number(lc.limite) || 0]
         );
       }
     }
 
     if (Array.isArray(data.productos)) {
       for (const p of data.productos) {
+        if (!p || p.id == null) continue;
         await db.runAsync(
           `INSERT INTO productos (id, codigo, nombre, categoria_id, categoria_nombre, marca_nombre, stock, stock_minimo, precio_base, costo_base, moneda_base_id, moneda_costo_id, iva_incluido, imagen, activo, actualizado_en)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -652,7 +670,7 @@ export async function saveCatalogOffline(data: {
             Number(p.id),
             String(p.codigo),
             String(p.nombre),
-            p.categoria_id ? Number(p.categoria_id) : null,
+            p.categoria_id ? String(p.categoria_id) : null,
             p.categoria_nombre ? String(p.categoria_nombre) : null,
             p.marca_nombre ? String(p.marca_nombre) : null,
             Number(p.stock) || 0,
@@ -672,6 +690,7 @@ export async function saveCatalogOffline(data: {
 
     if (Array.isArray(data.producto_presentaciones)) {
       for (const pp of data.producto_presentaciones) {
+        if (!pp || !pp.id) continue;
         if (pp.activo === false) {
           await db.runAsync(`DELETE FROM producto_presentaciones WHERE id = ?`, [String(pp.id)]);
           continue;
@@ -703,6 +722,7 @@ export async function saveCatalogOffline(data: {
 
     if (Array.isArray(data.creditos)) {
       for (const cr of data.creditos) {
+        if (!cr || !cr.id) continue;
         await db.runAsync(
           `INSERT INTO creditos (id, numero, venta_id, cliente_id, fecha, fecha_vencimiento, moneda_id, monto_total, saldo, estado, actualizado_en)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -718,10 +738,10 @@ export async function saveCatalogOffline(data: {
              estado = excluded.estado,
              actualizado_en = excluded.actualizado_en`,
           [
-            Number(cr.id),
+            String(cr.id),
             String(cr.numero),
-            cr.venta_id ? Number(cr.venta_id) : null,
-            Number(cr.cliente_id),
+            cr.venta_id ? String(cr.venta_id) : null,
+            String(cr.cliente_id),
             String(cr.fecha || "").slice(0, 10),
             cr.fecha_vencimiento ? String(cr.fecha_vencimiento).slice(0, 10) : null,
             String(cr.moneda_id),
@@ -736,6 +756,7 @@ export async function saveCatalogOffline(data: {
 
     if (Array.isArray(data.abonos)) {
       for (const ab of data.abonos) {
+        if (!ab || !ab.id) continue;
         await db.runAsync(
           `INSERT INTO abonos (id, credito_id, cliente_id, fecha, monto, moneda_id, metodo_pago_id, caja_id, observaciones)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -749,9 +770,9 @@ export async function saveCatalogOffline(data: {
              caja_id = excluded.caja_id,
              observaciones = excluded.observaciones`,
           [
-            Number(ab.id),
-            Number(ab.credito_id),
-            Number(ab.cliente_id),
+            String(ab.id),
+            String(ab.credito_id),
+            String(ab.cliente_id),
             String(ab.fecha || "").slice(0, 10),
             Number(ab.monto) || 0,
             String(ab.moneda_id),
@@ -765,6 +786,7 @@ export async function saveCatalogOffline(data: {
 
     if (Array.isArray(data.ventas)) {
       for (const v of data.ventas) {
+        if (!v || !v.id) continue;
         await db.runAsync(
           `INSERT INTO ventas_remotas (id, numero, cliente_id, cliente, fecha, subtotal, impuesto, descuento, total, moneda_id, tipo_pago, metodo_pago_id, estado, observaciones)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -783,9 +805,9 @@ export async function saveCatalogOffline(data: {
              estado = excluded.estado,
              observaciones = excluded.observaciones`,
           [
-            Number(v.id),
+            String(v.id),
             String(v.numero),
-            v.cliente_id ? Number(v.cliente_id) : null,
+            v.cliente_id ? String(v.cliente_id) : null,
             v.cliente ? String(v.cliente) : null,
             String(v.fecha || "").slice(0, 10),
             Number(v.subtotal) || 0,
@@ -809,9 +831,9 @@ export async function saveCatalogOffline(data: {
         } else if (del.tabla === "monedas") {
           await db.runAsync(`DELETE FROM monedas WHERE id = ?`, [String(del.registro_id)]);
         } else if (del.tabla === "clientes") {
-          await db.runAsync(`DELETE FROM clientes WHERE id = ?`, [Number(del.registro_id)]);
+          await db.runAsync(`DELETE FROM clientes WHERE id = ?`, [String(del.registro_id)]);
         } else if (del.tabla === "creditos") {
-          await db.runAsync(`DELETE FROM creditos WHERE id = ?`, [Number(del.registro_id)]);
+          await db.runAsync(`DELETE FROM creditos WHERE id = ?`, [String(del.registro_id)]);
         } else if (del.tabla === "producto_presentaciones") {
           await db.runAsync(`DELETE FROM producto_presentaciones WHERE id = ?`, [String(del.registro_id)]);
         }
@@ -928,17 +950,17 @@ export async function getLocalClientes(): Promise<LocalCliente[]> {
   const [clientesRows, monedasRows, limitesRows, deudasRows, ventasCounts] = await Promise.all([
     db.getAllAsync<any>(`SELECT * FROM clientes ORDER BY nombre ASC`),
     db.getAllAsync<LocalMoneda>(`SELECT * FROM monedas ORDER BY es_base DESC, codigo ASC`),
-    db.getAllAsync<{ cliente_id: number; moneda_id: string; limite: number }>(
+    db.getAllAsync<{ cliente_id: string; moneda_id: string; limite: number }>(
       `SELECT * FROM cliente_limites_credito`
     ),
-    db.getAllAsync<{ cliente_id: number; codigo: string; simbolo: string; total_saldo: number }>(`
+    db.getAllAsync<{ cliente_id: string; codigo: string; simbolo: string; total_saldo: number }>(`
       SELECT cr.cliente_id, m.codigo, m.simbolo, SUM(cr.saldo) as total_saldo
       FROM creditos cr
       JOIN monedas m ON cr.moneda_id = m.id
       WHERE cr.estado <> 'Pagado' AND cr.saldo > 0.009
       GROUP BY cr.cliente_id, m.codigo, m.simbolo
     `),
-    db.getAllAsync<{ cliente_id: number; cnt: number }>(`
+    db.getAllAsync<{ cliente_id: string; cnt: number }>(`
       SELECT cliente_id, COUNT(*) as cnt FROM ventas_remotas WHERE cliente_id IS NOT NULL GROUP BY cliente_id
     `),
   ]);
@@ -948,43 +970,46 @@ export async function getLocalClientes(): Promise<LocalCliente[]> {
     limitesMap.set(`${l.cliente_id}::${l.moneda_id}`, Number(l.limite) || 0);
   }
 
-  const deudasMap = new Map<number, LocalClienteDeuda[]>();
+  const deudasMap = new Map<string, LocalClienteDeuda[]>();
   for (const d of deudasRows) {
     if (d.total_saldo <= 0.009) continue;
-    const list = deudasMap.get(d.cliente_id) || [];
+    const list = deudasMap.get(String(d.cliente_id)) || [];
     list.push({ codigo: d.codigo, simbolo: d.simbolo, monto: Number(d.total_saldo) });
-    deudasMap.set(d.cliente_id, list);
+    deudasMap.set(String(d.cliente_id), list);
   }
 
-  const vCountMap = new Map<number, number>();
+  const vCountMap = new Map<string, number>();
   for (const vc of ventasCounts) {
-    vCountMap.set(vc.cliente_id, Number(vc.cnt) || 0);
+    vCountMap.set(String(vc.cliente_id), Number(vc.cnt) || 0);
   }
 
-  return clientesRows.map((c) => ({
-    id: Number(c.id),
-    nombre: String(c.nombre),
-    tipo: String(c.tipo || "Persona Natural"),
-    documento: c.documento || null,
-    email: c.email || null,
-    telefono: c.telefono || null,
-    ciudad: c.ciudad || null,
-    direccion: c.direccion || null,
-    recibe_credito: Number(c.recibe_credito) || 0,
-    limite_credito: Number(c.limite_credito) || 0,
-    activo: Number(c.activo ?? 1),
-    limites_credito: monedasRows.map((m) => ({
-      moneda_id: m.id,
-      codigo: m.codigo,
-      simbolo: m.simbolo,
-      es_base: m.es_base,
-      limite:
-        limitesMap.get(`${c.id}::${m.id}`) ??
-        (m.es_base ? Number(c.limite_credito) || 0 : 0),
-    })),
-    deuda_total: deudasMap.get(Number(c.id)) || [],
-    ventas_count: vCountMap.get(Number(c.id)) || 0,
-  }));
+  return clientesRows.map((c) => {
+    const cid = String(c.id);
+    return {
+      id: cid,
+      nombre: String(c.nombre),
+      tipo: String(c.tipo || "Persona Natural"),
+      documento: c.documento || null,
+      email: c.email || null,
+      telefono: c.telefono || null,
+      ciudad: c.ciudad || null,
+      direccion: c.direccion || null,
+      recibe_credito: Number(c.recibe_credito) || 0,
+      limite_credito: Number(c.limite_credito) || 0,
+      activo: Number(c.activo ?? 1),
+      limites_credito: monedasRows.map((m) => ({
+        moneda_id: m.id,
+        codigo: m.codigo,
+        simbolo: m.simbolo,
+        es_base: m.es_base,
+        limite:
+          limitesMap.get(`${cid}::${m.id}`) ??
+          (m.es_base ? Number(c.limite_credito) || 0 : 0),
+      })),
+      deuda_total: deudasMap.get(cid) || [],
+      ventas_count: vCountMap.get(cid) || 0,
+    };
+  });
 }
 
 export async function getLocalCreditos(): Promise<{
@@ -996,7 +1021,7 @@ export async function getLocalCreditos(): Promise<{
   const db = await getMobileDb();
   const rows = await db.getAllAsync<any>(`
     SELECT cr.*,
-      COALESCE(cl.nombre, 'Cliente #' || cr.cliente_id) as cliente_nombre,
+      COALESCE(cl.nombre, 'Cliente') as cliente_nombre,
       cl.documento as cliente_documento,
       cl.telefono as cliente_telefono,
       v.numero as venta_numero,
@@ -1014,11 +1039,11 @@ export async function getLocalCreditos(): Promise<{
     const montoTotal = Number(r.monto_total) || 0;
     const saldo = Number(r.saldo) || 0;
     return {
-      id: Number(r.id),
+      id: String(r.id),
       numero: String(r.numero),
-      venta_id: r.venta_id ? Number(r.venta_id) : null,
+      venta_id: r.venta_id ? String(r.venta_id) : null,
       venta_numero: r.venta_numero || null,
-      cliente_id: Number(r.cliente_id),
+      cliente_id: String(r.cliente_id),
       cliente_nombre: String(r.cliente_nombre),
       cliente_documento: r.cliente_documento || null,
       cliente_telefono: r.cliente_telefono || null,
@@ -1062,7 +1087,7 @@ export async function getLocalCreditos(): Promise<{
   };
 }
 
-export async function getLocalAbonosByCredito(creditoId: number): Promise<LocalAbono[]> {
+export async function getLocalAbonosByCredito(creditoId: string): Promise<LocalAbono[]> {
   const db = await getMobileDb();
   return await db.getAllAsync<LocalAbono>(
     `SELECT a.*, m.codigo as moneda_codigo, m.simbolo as moneda_simbolo, mp.nombre as metodo_pago_nombre
@@ -1088,7 +1113,7 @@ export async function getLocalVentasRemotas(): Promise<LocalVentaRemota[]> {
 }
 
 export async function createOfflineSale(venta: {
-  cliente_id?: number | null;
+  cliente_id?: string | null;
   cliente_nombre: string;
   moneda_id: string;
   tipo_pago?: string;
@@ -1188,7 +1213,6 @@ export async function createOfflineSale(venta: {
       ]
     );
 
-    // Descontar stock localmente de forma optimista
     for (const item of venta.items) {
       await db.runAsync(
         `UPDATE productos SET stock = MAX(0, stock - ?) WHERE id = ?`,
@@ -1196,10 +1220,9 @@ export async function createOfflineSale(venta: {
       );
     }
 
-    // Si hay saldo pendiente a crédito y cliente seleccionado, reflejar crédito localmente de inmediato
     const saldoPendiente = Math.max(0, venta.total - montoPagado);
     if (saldoPendiente > 0.009 && venta.cliente_id) {
-      const tempCreditoId = -Math.floor(100000 + Math.random() * 900000);
+      const tempCreditoId = `local-cre-${id}`;
       await db.runAsync(
         `INSERT INTO creditos (id, numero, venta_id, cliente_id, fecha, fecha_vencimiento, moneda_id, monto_total, saldo, estado, actualizado_en)
          VALUES (?, ?, NULL, ?, ?, NULL, ?, ?, ?, ?, ?)`,
@@ -1255,8 +1278,8 @@ export async function markVentaSincronizada(id: string): Promise<void> {
 }
 
 export async function createOfflineAbono(payload: {
-  credito_id: number;
-  cliente_id: number;
+  credito_id: string;
+  cliente_id: string;
   fecha: string;
   monto: number;
   moneda_id: string;
@@ -1301,7 +1324,7 @@ export async function createOfflineAbono(payload: {
       );
     }
 
-    const tempAbonoId = -Math.floor(100000 + Math.random() * 900000);
+    const tempAbonoId = `local-abn-${id}`;
     await db.runAsync(
       `INSERT INTO abonos (id, credito_id, cliente_id, fecha, monto, moneda_id, metodo_pago_id, caja_id, observaciones)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,

@@ -145,7 +145,7 @@ export async function syncMobileWithCloud(): Promise<{
       headers,
       body: JSON.stringify({
         origen_offline: true,
-        cliente_id: venta.cliente_id && venta.cliente_id > 0 ? venta.cliente_id : null,
+        cliente_id: venta.cliente_id ? String(venta.cliente_id) : null,
         cliente: venta.cliente_nombre,
         tipo_pago: tipoPago,
         fecha: venta.fecha,
@@ -181,7 +181,7 @@ export async function syncMobileWithCloud(): Promise<{
   // 2. Subir abonos pendientes creados en el teléfono
   const abonosPend = await getAbonosLocalesPendientes();
   for (const ab of abonosPend) {
-    if (ab.credito_id <= 0) continue;
+    if (!ab.credito_id || String(ab.credito_id).startsWith("local-")) continue;
     const lineas = ab.lineas_json ? JSON.parse(ab.lineas_json) : undefined;
     const res = await fetch(`${serverUrl}/api/creditos/${ab.credito_id}/abonos`, {
       method: "POST",
@@ -238,11 +238,11 @@ export async function syncMobileWithCloud(): Promise<{
     throw new Error(delta?.error || `Error al descargar catálogo (HTTP ${pullRes.status})`);
   }
 
-  // Si subimos ventas con créditos temporales negativos, limpiar los temporales antes de guardar los oficiales del servidor
+  // Si subimos ventas con créditos temporales locales, limpiar los temporales antes de guardar los oficiales del servidor
   if (ventasSubidas > 0 || abonosPend.length > 0) {
     const db = await getMobileDb();
-    await db.runAsync(`DELETE FROM creditos WHERE id < 0`);
-    await db.runAsync(`DELETE FROM abonos WHERE id < 0`);
+    await db.runAsync(`DELETE FROM creditos WHERE id LIKE 'local-%'`);
+    await db.runAsync(`DELETE FROM abonos WHERE id LIKE 'local-%'`);
   }
 
   const prods = delta.tables?.productos || [];
@@ -289,7 +289,7 @@ export async function syncMobileWithCloud(): Promise<{
  * Crea o actualiza un cliente directamente en la nube y actualiza la base SQLite local.
  */
 export async function saveClienteCloud(payload: {
-  id?: number | null;
+  id?: string | null;
   nombre: string;
   tipo: string;
   documento?: string | null;
@@ -335,7 +335,7 @@ export async function saveClienteCloud(payload: {
  * Ajusta el límite de crédito de un cliente en una moneda puntual (usado en el POS y en el perfil del cliente).
  */
 export async function patchClienteLimiteCloud(payload: {
-  id: number;
+  id: string;
   moneda_id: string;
   limite: number;
   recibe_credito?: boolean;
@@ -373,8 +373,8 @@ export async function patchClienteLimiteCloud(payload: {
  * Registra un abono a un crédito (intenta subirlo en tiempo real y si no hay red lo encola en SQLite).
  */
 export async function registrarAbonoMobile(payload: {
-  credito_id: number;
-  cliente_id: number;
+  credito_id: string;
+  cliente_id: string;
   fecha: string;
   monto: number;
   moneda_id: string;
@@ -385,7 +385,7 @@ export async function registrarAbonoMobile(payload: {
   observaciones?: string | null;
 }) {
   const { serverUrl, token } = await getStoredSession();
-  if (serverUrl && token && payload.credito_id > 0) {
+  if (serverUrl && token && payload.credito_id && !String(payload.credito_id).startsWith("local-")) {
     try {
       const res = await fetch(`${serverUrl}/api/creditos/${payload.credito_id}/abonos`, {
         method: "POST",

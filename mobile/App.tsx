@@ -109,7 +109,7 @@ interface CartItem {
 interface HeldCart {
   id: number;
   items: CartItem[];
-  clienteId: number | null;
+  clienteId: string | null;
   hora: string;
 }
 
@@ -215,14 +215,14 @@ export default function App() {
   // POS State
   const [posSubView, setPosSubView] = useState<"catalogo" | "carrito">("catalogo");
   const [posSearch, setPosSearch] = useState("");
-  const [posCategoriaId, setPosCategoriaId] = useState<number | null>(null);
+  const [posCategoriaId, setPosCategoriaId] = useState<string | null>(null);
   const [monedaSeleccionada, setMonedaSeleccionada] = useState<string>("USD");
   const [metodoPagoSeleccionado, setMetodoPagoSeleccionado] = useState<string>("");
   const [cajaSeleccionada, setCajaSeleccionada] = useState<string>("");
   const [cart, setCart] = useState<CartItem[]>([]);
   const [heldCarts, setHeldCarts] = useState<HeldCart[]>([]);
   const [showHeldModal, setShowHeldModal] = useState(false);
-  const [clienteId, setClienteId] = useState<number | null>(null);
+  const [clienteId, setClienteId] = useState<string | null>(null);
   const [showClientePickerModal, setShowClientePickerModal] = useState(false);
   const [clientePickerSearch, setClientePickerSearch] = useState("");
 
@@ -355,7 +355,8 @@ export default function App() {
       await syncMobileWithCloud();
       setSyncOnline(true);
       await refreshLocalState(posSearch);
-    } catch {
+    } catch (err) {
+      console.warn("Silent sync warning:", err);
       setSyncOnline(false);
     } finally {
       syncInFlightRef.current = false;
@@ -1134,7 +1135,7 @@ export default function App() {
       });
       await refreshLocalState(posSearch);
       if (saved?.id && route === "pos") {
-        setClienteId(Number(saved.id));
+        setClienteId(String(saved.id));
       }
       setClienteModalOpen(false);
       showToast(editingCliente ? "Cliente actualizado" : "Cliente creado", "success");
