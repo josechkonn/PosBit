@@ -2321,7 +2321,7 @@ export default function App() {
         )}
       </View>
 
-      {/* Toast flotante */}
+      {/* Toast flotante absoluto (no desplaza el layout/DOM) */}
       {toastMsg && (
         <View
           style={[
@@ -2341,7 +2341,7 @@ export default function App() {
                 ? "info"
                 : "check-circle"
             }
-            size={15}
+            size={17}
             color={
               toastMsg.type === "error"
                 ? THEME.dangerStrong
@@ -2365,6 +2365,22 @@ export default function App() {
           >
             {toastMsg.text}
           </Text>
+          <TouchableOpacity
+            onPress={() => setToastMsg(null)}
+            hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+          >
+            <Feather
+              name="x"
+              size={15}
+              color={
+                toastMsg.type === "error"
+                  ? THEME.dangerStrong
+                  : toastMsg.type === "info"
+                  ? THEME.infoStrong
+                  : THEME.successStrong
+              }
+            />
+          </TouchableOpacity>
         </View>
       )}
 
@@ -7369,19 +7385,27 @@ const styles = StyleSheet.create({
     fontWeight: "700",
   },
   toastBanner: {
+    position: "absolute",
+    top: 64,
+    left: 14,
+    right: 14,
+    zIndex: 9999,
     flexDirection: "row",
     alignItems: "center",
-    gap: 8,
-    marginHorizontal: 12,
-    marginTop: 8,
-    paddingHorizontal: 12,
-    paddingVertical: 9,
-    borderRadius: 8,
-    borderWidth: 1,
+    gap: 10,
+    paddingHorizontal: 14,
+    paddingVertical: 11,
+    borderRadius: 10,
+    borderWidth: 1.5,
+    shadowColor: "#000",
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.2,
+    shadowRadius: 8,
+    elevation: 10,
   },
   toastBannerText: {
-    fontSize: 12,
-    fontWeight: "600",
+    fontSize: 12.5,
+    fontWeight: "700",
     flex: 1,
   },
   // POS Controls
