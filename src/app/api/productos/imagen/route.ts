@@ -2,15 +2,15 @@ export const dynamic = "force-dynamic";
 
 import { NextResponse } from "next/server";
 import { requireSession } from "@/lib/auth-server";
-import { writeFile, mkdir } from "fs/promises";
+import { writeFile, mkdir, unlink } from "fs/promises";
 import { join } from "path";
 import { queryOne } from "@/lib/db";
 
 function getUploadDir() {
   if (process.env.USER_DATA_PATH) {
-    return join(process.env.USER_DATA_PATH, "uploads", "images", "productos");
+    return join(/*turbopackIgnore: true*/ process.env.USER_DATA_PATH, "uploads", "images", "productos");
   }
-  return join(process.cwd(), "public", "images", "productos");
+  return join(/*turbopackIgnore: true*/ process.cwd(), "public", "images", "productos");
 }
 
 export async function POST(request: Request) {
@@ -48,12 +48,12 @@ export async function POST(request: Request) {
     const uploadDir = getUploadDir();
 
     // Ensure directory exists
-    await mkdir(uploadDir, { recursive: true });
+    await mkdir(/*turbopackIgnore: true*/ uploadDir, { recursive: true });
 
     // Save file
     const bytes = await file.arrayBuffer();
     const buffer = Buffer.from(bytes);
-    await writeFile(join(uploadDir, filename), buffer);
+    await writeFile(/*turbopackIgnore: true*/ join(/*turbopackIgnore: true*/ uploadDir, filename), buffer);
 
     // Update product with image path
     await queryOne(
@@ -88,14 +88,14 @@ export async function DELETE(request: Request) {
       // Remove image file from both locations if present
       const filename = producto.imagen.split("/").pop();
       if (filename) {
-        const { unlink } = await import("fs/promises");
+        const uploadDir = getUploadDir();
         const paths = [
-          join(getUploadDir(), filename),
-          join(process.cwd(), "public", "images", "productos", filename),
+          join(/*turbopackIgnore: true*/ uploadDir, filename),
+          join(/*turbopackIgnore: true*/ process.cwd(), "public", "images", "productos", filename),
         ];
         for (const p of paths) {
           try {
-            await unlink(p);
+            await unlink(/*turbopackIgnore: true*/ p);
           } catch {
             // File might not exist in this location, ignore
           }

@@ -44,3 +44,8 @@ Thumbs.db
 /dist-electron/
 /resources/node/
 /resources/postgres/
+
+# Expo Mobile
+.expo/
+mobile/.expo/
+

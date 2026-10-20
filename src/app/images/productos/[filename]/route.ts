@@ -30,9 +30,9 @@ export async function GET(
 
     // 1. Check process.env.USER_DATA_PATH / uploads (for Electron production)
     if (process.env.USER_DATA_PATH) {
-      const userPath = join(process.env.USER_DATA_PATH, "uploads", "images", "productos", filename);
+      const userPath = join(/*turbopackIgnore: true*/ process.env.USER_DATA_PATH, "uploads", "images", "productos", filename);
       try {
-        await stat(userPath);
+        await stat(/*turbopackIgnore: true*/ userPath);
         filePath = userPath;
       } catch {
         // Not found in USER_DATA_PATH
@@ -41,9 +41,9 @@ export async function GET(
 
     // 2. Check public directory (for web / dev mode)
     if (!filePath) {
-      const publicPath = join(process.cwd(), "public", "images", "productos", filename);
+      const publicPath = join(/*turbopackIgnore: true*/ process.cwd(), "public", "images", "productos", filename);
       try {
-        await stat(publicPath);
+        await stat(/*turbopackIgnore: true*/ publicPath);
         filePath = publicPath;
       } catch {
         // Not found in public path
@@ -52,9 +52,9 @@ export async function GET(
 
     // 3. Fallback check for root uploads
     if (!filePath) {
-      const rootUploadPath = join(process.cwd(), "uploads", "images", "productos", filename);
+      const rootUploadPath = join(/*turbopackIgnore: true*/ process.cwd(), "uploads", "images", "productos", filename);
       try {
-        await stat(rootUploadPath);
+        await stat(/*turbopackIgnore: true*/ rootUploadPath);
         filePath = rootUploadPath;
       } catch {
         // Not found
@@ -65,7 +65,7 @@ export async function GET(
       return new NextResponse("Image not found", { status: 404 });
     }
 
-    const fileBuffer = await readFile(filePath);
+    const fileBuffer = await readFile(/*turbopackIgnore: true*/ filePath);
 
     return new NextResponse(fileBuffer, {
       status: 200,

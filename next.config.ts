@@ -9,6 +9,9 @@ const nextConfig: NextConfig = {
     "/api/**/*": ["./sql/**/*"],
     "/**/*": ["./sql/**/*"],
   },
+  outputFileTracingExcludes: {
+    "*": ["./mobile/**/*", "./dist-electron/**/*", "./resources/**/*"],
+  },
   async headers() {
     return [
       {

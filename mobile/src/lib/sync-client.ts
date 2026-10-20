@@ -40,15 +40,33 @@ export async function loginMobile(
   password: string
 ) {
   const serverUrl = rawServerUrl.trim().replace(/\/+$/, "");
-  const res = await fetch(`${serverUrl}/api/mobile/login`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ email, password }),
-  });
+  if (!serverUrl || serverUrl === "https://" || serverUrl === "http://") {
+    throw new Error("Por favor ingresa la URL completa de tu servidor (ej. https://tu-posbit.vercel.app)");
+  }
 
-  const data = await res.json();
+  let res: Response;
+  try {
+    res = await fetch(`${serverUrl}/api/mobile/login`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email, password }),
+    });
+  } catch (netErr: any) {
+    throw new Error(`No se pudo conectar a "${serverUrl}". Verifica tu conexión y la URL (${netErr?.message || netErr}).`);
+  }
+
+  const rawText = await res.text();
+  let data: any;
+  try {
+    data = JSON.parse(rawText);
+  } catch {
+    throw new Error(
+      `El servidor respondió con error (HTTP ${res.status}). La URL ingresada no devolvió una respuesta válida de PosBit. Verifica que la URL del servidor sea correcta.`
+    );
+  }
+
   if (!res.ok || !data.ok) {
-    throw new Error(data.error || "No se pudo iniciar sesión");
+    throw new Error(data.error || `Error ${res.status}: No se pudo iniciar sesión`);
   }
 
   await SecureStore.setItemAsync(KEY_SERVER_URL, serverUrl);
@@ -129,11 +147,17 @@ export async function syncMobileWithCloud(): Promise<{
     : `${serverUrl}/api/sync`;
 
   const pullRes = await fetch(syncUrl, { method: "GET", headers });
-  if (!pullRes.ok) {
-    throw new Error(`Error al descargar catálogo (HTTP ${pullRes.status})`);
+  const pullText = await pullRes.text();
+  let delta: any;
+  try {
+    delta = JSON.parse(pullText);
+  } catch {
+    throw new Error(`Error HTTP ${pullRes.status} al descargar datos desde ${syncUrl}`);
   }
 
-  const delta = await pullRes.json();
+  if (!pullRes.ok) {
+    throw new Error(delta?.error || `Error al descargar catálogo (HTTP ${pullRes.status})`);
+  }
   const prods = delta.tables?.productos || [];
   await saveCatalogOffline({
     monedas: delta.tables?.monedas,
