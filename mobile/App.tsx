@@ -821,6 +821,28 @@ export default function App() {
     [subtotal, descuentoTotal, tax, totalCobrosExtraEnMoneda, monedaSeleccionada]
   );
 
+  // Total del carrito expresado en cualquier moneda con la regla de precios y tasas del POS
+  const calcularTotalEnMoneda = useCallback(
+    (codMoneda: string): number => {
+      if (!codMoneda || codMoneda === monedaSeleccionada) return total;
+      let sub = 0;
+      let taxMoneda = 0;
+      for (const c of cart) {
+        const importe = totalLineaEnMoneda(c, codMoneda);
+        sub += importe;
+        if (c.product.iva_incluido === 0) {
+          taxMoneda += Math.round(importe * 0.16 * 100) / 100;
+        }
+      }
+      const escala = subtotal > 0 ? sub / subtotal : 0;
+      const dec = decMoneda(codMoneda);
+      const factor = Math.pow(10, dec);
+      const descuentoMoneda = Math.round(descuentoTotal * escala * factor) / factor;
+      return Math.max(0, sub - descuentoMoneda + taxMoneda + totalCobrosExtraEnMoneda(codMoneda));
+    },
+    [cart, total, monedaSeleccionada, totalLineaEnMoneda, subtotal, descuentoTotal, decMoneda, totalCobrosExtraEnMoneda]
+  );
+
   const clienteSeleccionadoObj = useMemo(
     () => (clienteId ? clientes.find((c) => c.id === clienteId) || null : null),
     [clientes, clienteId]
@@ -833,9 +855,15 @@ export default function App() {
       if (!Number.isFinite(m) || m <= 0) return acc;
       const mp = metodosPago.find((x) => String(x.id) === String(lp.metodoId));
       const codLinea = mp?.moneda_codigo || monedaSeleccionada;
-      return acc + convertirMonto(m, codLinea, monedaSeleccionada);
+      if (!modoMixto && lineasPago.length === 1) {
+        const totalEsperado = calcularTotalEnMoneda(codLinea);
+        if (Math.abs(m - totalEsperado) <= 0.005) {
+          return total;
+        }
+      }
+      return acc + convertirMonto(m, codLinea, monedaSeleccionada, "ventas");
     }, 0);
-  }, [lineasPago, metodosPago, monedaSeleccionada, convertirMonto]);
+  }, [lineasPago, metodosPago, monedaSeleccionada, convertirMonto, modoMixto, calcularTotalEnMoneda, total]);
 
   const faltaPorPagar = Math.max(0, Math.round((total - totalPagadoEnMonedaVenta) * 100) / 100);
   const vueltoEnMonedaVenta = Math.max(0, Math.round((totalPagadoEnMonedaVenta - total) * 100) / 100);
@@ -860,20 +888,40 @@ export default function App() {
     };
   }, [clienteSeleccionadoObj, monedaSeleccionada]);
 
-  // Abrir Modal de Checkout inicializando la línea de pago
+  // Abrir Modal de Checkout inicializando la línea de pago en la moneda del método seleccionado
   const handleOpenCheckout = useCallback(() => {
     if (cart.length === 0) {
       showToast("Agrega al menos un producto al carrito", "error");
       return;
     }
-    const mpDefault = metodoPagoSeleccionado || (metodosPago[0] ? String(metodosPago[0].id) : "");
+    const mpDefaultId = metodoPagoSeleccionado || (metodosPago[0] ? String(metodosPago[0].id) : "");
+    const mpObj = metodosPago.find((x) => String(x.id) === String(mpDefaultId));
+    const codMetodo = mpObj?.moneda_codigo || monedaSeleccionada;
+    const totalEnMonedaMetodo = calcularTotalEnMoneda(codMetodo);
+    const dec = decMoneda(codMetodo);
+
     setModoMixto(false);
-    setLineasPago([{ key: 1, metodoId: mpDefault, montoStr: total.toFixed(decMoneda()) }]);
+    setLineasPago([
+      {
+        key: 1,
+        metodoId: mpDefaultId,
+        montoStr: totalEnMonedaMetodo.toFixed(dec),
+      },
+    ]);
     if (infoCreditoCliente) {
       setLimiteInputStr(String(infoCreditoCliente.limite || 0));
     }
     setShowCheckoutModal(true);
-  }, [cart.length, metodoPagoSeleccionado, metodosPago, total, decMoneda, infoCreditoCliente, showToast]);
+  }, [
+    cart.length,
+    metodoPagoSeleccionado,
+    metodosPago,
+    monedaSeleccionada,
+    calcularTotalEnMoneda,
+    decMoneda,
+    infoCreditoCliente,
+    showToast,
+  ]);
 
   // Otorgar o ajustar límite de crédito directamente desde el Checkout
   const handleAjustarLimiteCheckout = useCallback(
@@ -966,8 +1014,8 @@ export default function App() {
           };
         });
 
-        const pagosPayload =
-          !isCreditoTotal && (modoMixto || lineasPago.length > 1)
+        const pagosPayload = !isCreditoTotal
+          ? modoMixto || lineasPago.length > 1
             ? lineasPago
                 .map((lp) => {
                   const m = parseFloat(lp.montoStr.replace(",", "."));
@@ -981,7 +1029,25 @@ export default function App() {
                   };
                 })
                 .filter((p) => p.monto > 0)
-            : undefined;
+            : (() => {
+                const mp = metodoObj;
+                const mon = monedas.find((x) => x.codigo === (mp?.moneda_codigo || monedaSeleccionada));
+                const codMetodo = mp?.moneda_codigo || monedaSeleccionada;
+                const m = isPagoCompleto
+                  ? calcularTotalEnMoneda(codMetodo)
+                  : parseFloat((lineasPago[0]?.montoStr || "").replace(",", "."));
+                return Number.isFinite(m) && m > 0
+                  ? [
+                      {
+                        metodo_pago_id: mp ? String(mp.id) : null,
+                        caja_id: mp?.caja_id || cajaSeleccionada || null,
+                        moneda_id: mon?.id || activeMonedaObj.id,
+                        monto: m,
+                      },
+                    ]
+                  : undefined;
+              })()
+          : undefined;
 
         const cobrosExtraPayload = cobrosExtra
           .map((ce) => {
@@ -4610,12 +4676,16 @@ export default function App() {
                             active && styles.simpleMethodRowActive,
                           ]}
                           onPress={() => {
-                            handleSelectMetodoPago(String(mp.id));
-                            setLineasPago((prev) => [
+                            setMetodoPagoSeleccionado(String(mp.id));
+                            if (mp.caja_id) setCajaSeleccionada(String(mp.caja_id));
+                            const codMetodo = mp.moneda_codigo || monedaSeleccionada;
+                            const totalEnMonedaMetodo = calcularTotalEnMoneda(codMetodo);
+                            const dec = decMoneda(codMetodo);
+                            setLineasPago([
                               {
-                                key: prev[0]?.key || 1,
+                                key: 1,
                                 metodoId: String(mp.id),
-                                montoStr: prev[0]?.montoStr || String(total),
+                                montoStr: totalEnMonedaMetodo.toFixed(dec),
                               },
                             ]);
                           }}
@@ -4639,25 +4709,60 @@ export default function App() {
                     })}
                   </View>
 
-                  <View>
-                    <Text style={styles.fieldLabelSmall}>
-                      MONTO RECIBIDO ({monedaSeleccionada})
-                    </Text>
-                    <TextInput
-                      style={styles.input}
-                      keyboardType="decimal-pad"
-                      value={lineasPago[0]?.montoStr ?? ""}
-                      onChangeText={(v) =>
-                        setLineasPago([
-                          {
-                            key: 1,
-                            metodoId: lineasPago[0]?.metodoId || metodoPagoSeleccionado,
-                            montoStr: v,
-                          },
-                        ])
-                      }
-                    />
-                  </View>
+                  {(() => {
+                    const mpActualSimple =
+                      metodosPago.find(
+                        (m) => String(m.id) === String(lineasPago[0]?.metodoId || metodoPagoSeleccionado)
+                      ) || metodosPago[0];
+                    const codLineaSimple = mpActualSimple?.moneda_codigo || monedaSeleccionada;
+                    const mActual = parseFloat((lineasPago[0]?.montoStr || "0").replace(",", ".")) || 0;
+                    const equivVenta = convertirMonto(mActual, codLineaSimple, monedaSeleccionada, "ventas");
+                    const monOrigen = monedas.find((m) => m.codigo === monedaSeleccionada);
+                    const monDestino = monedas.find((m) => m.codigo === codLineaSimple);
+                    const tPar = tasaPar(monOrigen, monDestino, monedas);
+
+                    return (
+                      <View>
+                        <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
+                          <Text style={styles.fieldLabelSmall}>
+                            MONTO RECIBIDO ({codLineaSimple})
+                          </Text>
+                          {codLineaSimple !== monedaSeleccionada && (
+                            <Text style={{ fontSize: 11, color: THEME.mutedForeground }}>
+                              Total venta: {fmt(total, monedaSeleccionada)}
+                            </Text>
+                          )}
+                        </View>
+                        <TextInput
+                          style={styles.input}
+                          keyboardType="decimal-pad"
+                          placeholder={`0.00 en ${codLineaSimple}`}
+                          value={lineasPago[0]?.montoStr ?? ""}
+                          onChangeText={(v) =>
+                            setLineasPago([
+                              {
+                                key: 1,
+                                metodoId: lineasPago[0]?.metodoId || metodoPagoSeleccionado,
+                                montoStr: v,
+                              },
+                            ])
+                          }
+                        />
+                        {codLineaSimple !== monedaSeleccionada && (
+                          <View style={{ flexDirection: "row", justifyContent: "space-between", marginTop: 4 }}>
+                            <Text style={{ fontSize: 11, color: THEME.mutedForeground }}>
+                              Equiv. a pagar: {fmt(equivVenta, monedaSeleccionada)}
+                            </Text>
+                            {tPar > 0 && (
+                              <Text style={{ fontSize: 11, color: THEME.primary600, fontWeight: "600" }}>
+                                1 {monedaSeleccionada} = {tPar.toLocaleString("es-VE", { maximumFractionDigits: 4 })} {codLineaSimple}
+                              </Text>
+                            )}
+                          </View>
+                        )}
+                      </View>
+                    );
+                  })()}
                 </View>
               ) : (
                 /* Modo Mixto: Múltiples Líneas de Pago en distintas monedas */
@@ -4679,9 +4784,19 @@ export default function App() {
                                 style={[styles.metodoChip, sel && styles.metodoChipActive]}
                                 onPress={() =>
                                   setLineasPago((prev) =>
-                                    prev.map((x) =>
-                                      x.key === lp.key ? { ...x, metodoId: String(mp.id) } : x
-                                    )
+                                    prev.map((x) => {
+                                      if (x.key !== lp.key) return x;
+                                      const oldMp = metodosPago.find((m) => String(m.id) === String(x.metodoId));
+                                      const oldCod = oldMp?.moneda_codigo || monedaSeleccionada;
+                                      const newCod = mp.moneda_codigo || monedaSeleccionada;
+                                      const curVal = parseFloat(x.montoStr.replace(",", "."));
+                                      let newMontoStr = x.montoStr;
+                                      if (Number.isFinite(curVal) && curVal > 0 && oldCod !== newCod) {
+                                        const converted = convertirMonto(curVal, oldCod, newCod, "ventas");
+                                        newMontoStr = converted.toFixed(decMoneda(newCod));
+                                      }
+                                      return { ...x, metodoId: String(mp.id), montoStr: newMontoStr };
+                                    })
                                   )
                                 }
                               >
