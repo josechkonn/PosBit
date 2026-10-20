@@ -122,19 +122,35 @@ export function PagarDeudaModal({
     }
   }, [open]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Moneda preseleccionada una vez cargado el catálogo (la base por defecto).
+  // Método de pago y moneda preseleccionados una vez cargados catálogo y métodos
   useEffect(() => {
-    if (open && monedas.length > 0 && !monedaId) {
+    if (open && metodosPago.length > 0 && !metodoPagoId) {
       const inicial =
-        monedas.find((m) => m.id === monedaInicial) ??
-        monedas.find((m) => m.es_base) ??
-        monedas[0];
-      setMonedaId(inicial?.id ?? "");
+        metodosPago.find((mp) => mp.moneda_id === monedaInicial) ??
+        metodosPago.find((mp) => {
+          const m = monedas.find((x) => x.id === mp.moneda_id || x.codigo === mp.moneda_codigo);
+          return m?.es_base;
+        }) ??
+        metodosPago[0];
+
+      if (inicial) {
+        setMetodoPagoId(String(inicial.id));
+        setCajaId(inicial.caja_id ? String(inicial.caja_id) : "");
+        const mObj = monedas.find((m) => m.id === inicial.moneda_id || m.codigo === inicial.moneda_codigo);
+        if (mObj) {
+          setMonedaId(mObj.id);
+        }
+      }
     }
-  }, [open, monedas, monedaId, monedaInicial]);
+  }, [open, metodosPago, metodoPagoId, monedaInicial, monedas]);
 
   const valor = parseFloat(monto) || 0;
-  const monedaPago = monedas.find((m) => m.id === monedaId);
+  const metodoSeleccionado = metodosPago.find((m) => m.id === metodoPagoId);
+  const monedaPago =
+    monedas.find((m) => m.id === metodoSeleccionado?.moneda_id || m.codigo === metodoSeleccionado?.moneda_codigo) ??
+    monedas.find((m) => m.id === monedaId) ??
+    monedas.find((m) => m.es_base) ??
+    monedas[0];
   const baseMoneda = monedas.find((m) => m.es_base) ?? monedas[0];
 
   // Las deudas se pagan desde la factura más antigua (mismo orden que el backend).
@@ -190,23 +206,28 @@ export function PagarDeudaModal({
       ? convertirProducto(valor, monedaPago, baseMoneda, "venta", 2)
       : null;
 
-  const handleCambioMoneda = (nuevaMonedaId: string) => {
-    if (nuevaMonedaId === monedaId) return;
-    const nuevaMoneda = monedas.find((m) => m.id === nuevaMonedaId);
-    const actualMoneda = monedas.find((m) => m.id === monedaId);
-    const num = parseFloat(monto.replace(",", "."));
-    if (Number.isFinite(num) && num > 0 && actualMoneda && nuevaMoneda) {
-      const dec = Number(nuevaMoneda.decimales ?? 2);
-      const convertido = convertirProducto(num, actualMoneda, nuevaMoneda, "venta", dec);
-      setMonto(String(convertido));
-    }
-    setMonedaId(nuevaMonedaId);
-  };
-
   const handleMetodoChange = (id: string) => {
+    const metodoAnterior = metodosPago.find((m) => m.id === metodoPagoId);
+    const metodoNuevo = metodosPago.find((m) => m.id === id);
+    const mAnterior = metodoAnterior
+      ? monedas.find((m) => m.id === metodoAnterior.moneda_id || m.codigo === metodoAnterior.moneda_codigo)
+      : monedaPago;
+    const mNuevo = metodoNuevo
+      ? monedas.find((m) => m.id === metodoNuevo.moneda_id || m.codigo === metodoNuevo.moneda_codigo)
+      : undefined;
+
     setMetodoPagoId(id);
-    const metodo = metodosPago.find((m) => m.id === id);
-    setCajaId(metodo?.caja_id ? String(metodo.caja_id) : "");
+    setCajaId(metodoNuevo?.caja_id ? String(metodoNuevo.caja_id) : "");
+
+    if (mNuevo) {
+      setMonedaId(mNuevo.id);
+      const num = parseFloat(monto.replace(",", "."));
+      if (Number.isFinite(num) && num > 0 && mAnterior && mAnterior.id !== mNuevo.id) {
+        const dec = Number(mNuevo.decimales ?? 2);
+        const convertido = convertirProducto(num, mAnterior, mNuevo, "venta", dec);
+        setMonto(String(convertido));
+      }
+    }
   };
 
   /** Rellena el monto con la deuda total, expresada en la moneda seleccionada. */
@@ -339,49 +360,28 @@ export function PagarDeudaModal({
         </div>
       </div>
 
-      {/* Moneda del pago */}
-      <div>
-        <div className="mb-1.5 text-sm font-medium text-foreground">Moneda del pago</div>
-        <div className="flex flex-wrap gap-1.5">
-          {monedas.length === 0 && (
-            <span className="text-sm text-muted-foreground">Cargando monedas...</span>
-          )}
-          {monedas.map((m) => {
-            const activa = m.id === monedaId;
-            return (
-              <button
-                key={m.id}
-                type="button"
-                onClick={() => handleCambioMoneda(m.id)}
-                aria-pressed={activa}
-                className={cn(
-                  "inline-flex h-9 items-center gap-1.5 rounded-full border px-4 text-sm font-semibold transition-all active:scale-95",
-                  activa
-                    ? "border-primary bg-primary text-primary-foreground shadow-sm"
-                    : "border-border bg-card text-muted-foreground hover:border-primary/40 hover:text-foreground"
-                )}
-              >
-                {m.codigo}
-                {m.es_base && (
-                  <span
-                    className={cn(
-                      "rounded px-1 text-[10px] font-bold uppercase",
-                      activa ? "bg-white/20 text-white" : "bg-muted text-muted-foreground"
-                    )}
-                  >
-                    base
-                  </span>
-                )}
-              </button>
-            );
-          })}
-        </div>
+      {/* Método de pago + Fecha */}
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+        <Field label="Método de pago">
+          <MetodoPagoSelect
+            metodos={metodosPago}
+            value={metodoPagoId || null}
+            onChange={(id) => handleMetodoChange(id === null ? "" : String(id))}
+            placeholder="Seleccionar método de pago"
+            className="w-full"
+          />
+        </Field>
+        <Field label="Fecha">
+          <Input value={fecha} onChange={(e) => setFecha(e.target.value)} type="date" />
+        </Field>
       </div>
 
       {/* Monto a pagar */}
       <div>
         <div className="mb-1.5 flex items-center justify-between">
-          <span className="text-sm font-medium text-foreground">Monto a pagar</span>
+          <span className="text-sm font-medium text-foreground">
+            Monto a pagar {monedaPago ? `(${monedaPago.codigo})` : ""}
+          </span>
           <button
             type="button"
             onClick={rellenarTotal}
@@ -403,7 +403,7 @@ export function PagarDeudaModal({
             step="0.01"
             placeholder="0.00"
             autoFocus
-            className="pl-12 font-mono text-base font-semibold"
+            className="pl-14 font-mono text-base font-semibold"
           />
         </div>
         <p className="mt-1.5 text-xs text-muted-foreground">
@@ -416,23 +416,6 @@ export function PagarDeudaModal({
             "Se reparte automáticamente entre las facturas más antiguas."
           )}
         </p>
-      </div>
-
-      {/* Fecha + Método de pago */}
-      <div className="grid grid-cols-2 gap-3">
-        <Field label="Fecha">
-          <Input value={fecha} onChange={(e) => setFecha(e.target.value)} type="date" />
-        </Field>
-        <Field label="Método de pago">
-          <MetodoPagoSelect
-            metodos={metodosPago}
-            value={metodoPagoId || null}
-            onChange={(id) => handleMetodoChange(id === null ? "" : String(id))}
-            allowEmptyLabel="Sin método"
-            placeholder="Sin método"
-            className="w-full"
-          />
-        </Field>
       </div>
 
       {/* Observaciones */}

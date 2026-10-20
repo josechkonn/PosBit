@@ -1757,33 +1757,79 @@ export default function App() {
     (cli: LocalCliente, monedaInicialId?: string) => {
       setPagoDeudaCliente(cli);
       const baseM = monedas.find((m) => m.es_base === 1) || monedas[0];
-      setPdMonedaId(monedaInicialId || baseM?.id || "");
+      const mpMatch =
+        (monedaInicialId
+          ? metodosPago.find(
+              (m) =>
+                String(m.moneda_id) === String(monedaInicialId) ||
+                m.moneda_codigo === monedaInicialId
+            )
+          : null) ||
+        metodosPago.find((m) => {
+          const mon = monedas.find(
+            (x) => String(x.id) === String(m.moneda_id) || x.codigo === m.moneda_codigo
+          );
+          return mon?.es_base === 1;
+        }) ||
+        metodosPago[0];
+
+      const mpId = mpMatch ? String(mpMatch.id) : "";
+      setPdMetodoPagoId(mpId);
+      setPdCajaId(mpMatch?.caja_id ? String(mpMatch.caja_id) : "");
+
+      const monObj = mpMatch
+        ? monedas.find(
+            (m) => String(m.id) === String(mpMatch.moneda_id) || m.codigo === mpMatch.moneda_codigo
+          )
+        : baseM;
+
+      setPdMonedaId(monObj?.id ? String(monObj.id) : baseM?.id || "");
       setPdMontoStr("");
-      const mpDefault = metodosPago[0];
-      setPdMetodoPagoId(mpDefault ? String(mpDefault.id) : "");
-      setPdCajaId(mpDefault?.caja_id ? String(mpDefault.caja_id) : "");
       setPdObs("");
     },
     [monedas, metodosPago]
   );
 
-  const handleCambioMonedaPagoDeuda = useCallback(
-    (nuevaMonedaId: string) => {
-      if (nuevaMonedaId === pdMonedaId) return;
-      const val = parseFloat(pdMontoStr.replace(",", "."));
-      if (Number.isFinite(val) && val > 0) {
-        const monAnterior =
-          monedas.find((m) => String(m.id) === String(pdMonedaId)) || baseMonedaSistema;
-        const monNueva = monedas.find((m) => String(m.id) === String(nuevaMonedaId));
-        if (monAnterior && monNueva) {
-          const dec = Number(monNueva.decimales ?? 2);
-          const conv = convertirConRegla(val, monAnterior, monNueva, "ventas", dec);
-          setPdMontoStr(String(conv));
-        }
+  const handleSelectMetodoPagoDeuda = useCallback(
+    (mpId: string) => {
+      const mpNuevo = metodosPago.find((x) => String(x.id) === String(mpId));
+      const mpAnterior = metodosPago.find((x) => String(x.id) === String(pdMetodoPagoId));
+
+      const monAnterior =
+        monedas.find(
+          (m) =>
+            String(m.id) === String(mpAnterior?.moneda_id) ||
+            m.codigo === mpAnterior?.moneda_codigo ||
+            String(m.id) === String(pdMonedaId)
+        ) || baseMonedaSistema;
+
+      const monNueva =
+        monedas.find(
+          (m) =>
+            String(m.id) === String(mpNuevo?.moneda_id) ||
+            m.codigo === mpNuevo?.moneda_codigo
+        ) || baseMonedaSistema;
+
+      setPdMetodoPagoId(mpId);
+      setPdCajaId(mpNuevo?.caja_id ? String(mpNuevo.caja_id) : "");
+      if (monNueva) {
+        setPdMonedaId(String(monNueva.id));
       }
-      setPdMonedaId(nuevaMonedaId);
+
+      const val = parseFloat(pdMontoStr.replace(",", "."));
+      if (
+        Number.isFinite(val) &&
+        val > 0 &&
+        monAnterior &&
+        monNueva &&
+        String(monAnterior.id) !== String(monNueva.id)
+      ) {
+        const dec = Number(monNueva.decimales ?? 2);
+        const conv = convertirConRegla(val, monAnterior, monNueva, "ventas", dec);
+        setPdMontoStr(String(conv));
+      }
     },
-    [pdMonedaId, pdMontoStr, monedas, baseMonedaSistema, convertirConRegla]
+    [pdMetodoPagoId, pdMonedaId, pdMontoStr, metodosPago, monedas, baseMonedaSistema, convertirConRegla]
   );
 
   // Facturas pendientes del cliente ordenadas desde la más antigua (FIFO, igual que el backend)
@@ -1801,10 +1847,16 @@ export default function App() {
     );
   }, [pagoDeudaCliente, creditosData.creditos, perfilCreditos]);
 
-  const pagoDeudaMonedaObj = useMemo(
-    () => monedas.find((m) => String(m.id) === String(pdMonedaId)) || baseMonedaSistema,
-    [monedas, pdMonedaId, baseMonedaSistema]
-  );
+  const pagoDeudaMonedaObj = useMemo(() => {
+    const mp = metodosPago.find((x) => String(x.id) === String(pdMetodoPagoId));
+    if (mp) {
+      const m = monedas.find(
+        (x) => String(x.id) === String(mp.moneda_id) || x.codigo === mp.moneda_codigo
+      );
+      if (m) return m;
+    }
+    return monedas.find((m) => String(m.id) === String(pdMonedaId)) || baseMonedaSistema;
+  }, [metodosPago, pdMetodoPagoId, monedas, pdMonedaId, baseMonedaSistema]);
 
   const pagoDeudaTotalBase = useMemo(() => {
     if (!baseMonedaSistema) return 0;
@@ -5923,35 +5975,37 @@ export default function App() {
                         </View>
                       </View>
 
-                      {/* Selector de Moneda del Pago */}
+                      {/* Método de pago */}
                       <View>
-                        <Text style={styles.fieldLabelSmall}>MONEDA DEL PAGO</Text>
-                        <View
-                          style={{
-                            flexDirection: "row",
-                            flexWrap: "wrap",
-                            gap: 6,
-                            marginTop: 6,
-                          }}
+                        <Text style={styles.fieldLabelSmall}>MÉTODO DE PAGO</Text>
+                        <ScrollView
+                          horizontal
+                          showsHorizontalScrollIndicator={false}
+                          contentContainerStyle={{ gap: 6, marginTop: 6 }}
                         >
-                          {monedas.map((m) => {
-                            const activa = String(m.id) === String(pagoDeudaMonedaObj?.id);
+                          {metodosPago.map((mp) => {
+                            const active = String(mp.id) === String(pdMetodoPagoId);
                             return (
                               <TouchableOpacity
-                                key={m.id}
-                                style={[styles.catChip, activa && styles.catChipActive]}
-                                onPress={() => handleCambioMonedaPagoDeuda(m.id)}
+                                key={mp.id}
+                                style={[styles.metodoChip, active && styles.metodoChipActive]}
+                                onPress={() => handleSelectMetodoPagoDeuda(String(mp.id))}
                               >
+                                <Text style={{ fontSize: 12 }}>
+                                  {getMetodoEmoji(mp.tipo, mp.nombre)}
+                                </Text>
                                 <Text
-                                  style={[styles.catChipText, activa && styles.catChipTextActive]}
+                                  style={[
+                                    styles.metodoChipText,
+                                    active && styles.metodoChipTextActive,
+                                  ]}
                                 >
-                                  {m.codigo}
-                                  {m.es_base ? " (base)" : ""}
+                                  {mp.nombre} ({mp.moneda_codigo || "USD"})
                                 </Text>
                               </TouchableOpacity>
                             );
                           })}
-                        </View>
+                        </ScrollView>
                       </View>
 
                       {/* Monto a pagar + Botón "Pagar todo" */}
@@ -5995,42 +6049,6 @@ export default function App() {
                             ? `Equivale a ${fmt(comoBase, baseCod)} · se reparte entre las facturas automáticamente`
                             : "Se reparte automáticamente entre las facturas más antiguas."}
                         </Text>
-                      </View>
-
-                      {/* Método de pago */}
-                      <View>
-                        <Text style={styles.fieldLabelSmall}>MÉTODO DE PAGO</Text>
-                        <ScrollView
-                          horizontal
-                          showsHorizontalScrollIndicator={false}
-                          contentContainerStyle={{ gap: 6, marginTop: 6 }}
-                        >
-                          {metodosPago.map((mp) => {
-                            const active = String(mp.id) === String(pdMetodoPagoId);
-                            return (
-                              <TouchableOpacity
-                                key={mp.id}
-                                style={[styles.metodoChip, active && styles.metodoChipActive]}
-                                onPress={() => {
-                                  setPdMetodoPagoId(String(mp.id));
-                                  setPdCajaId(mp.caja_id ? String(mp.caja_id) : "");
-                                }}
-                              >
-                                <Text style={{ fontSize: 12 }}>
-                                  {getMetodoEmoji(mp.tipo, mp.nombre)}
-                                </Text>
-                                <Text
-                                  style={[
-                                    styles.metodoChipText,
-                                    active && styles.metodoChipTextActive,
-                                  ]}
-                                >
-                                  {mp.nombre} ({mp.moneda_codigo || "USD"})
-                                </Text>
-                              </TouchableOpacity>
-                            );
-                          })}
-                        </ScrollView>
                       </View>
 
                       {/* Observaciones */}
