@@ -94,6 +94,7 @@ export const SYNC_TABLES_ORDER = [
 ] as const;
 
 export const MOBILE_SYNC_TABLES = [
+  "configuracion_global",
   "monedas",
   "cajas",
   "metodos_pago",

@@ -86,6 +86,7 @@ export async function loginMobile(
   }
 
   await saveCatalogOffline({
+    configuracion_global: data.configuracionGlobal,
     monedas: data.monedas,
     cajas: data.cajas,
     metodos_pago: data.metodosPago,
@@ -228,6 +229,7 @@ export async function syncMobileWithCloud(): Promise<{
 
   const prods = delta.tables?.productos || [];
   await saveCatalogOffline({
+    configuracion_global: delta.tables?.configuracion_global,
     monedas: delta.tables?.monedas,
     cajas: delta.tables?.cajas,
     metodos_pago: delta.tables?.metodos_pago,

@@ -44,22 +44,32 @@ export default function RegistroPage() {
     }
 
     setLoading(true);
-    await signUp.email(
-      { name, email, password },
-      {
-        onSuccess: () => {
-          router.push("/login");
-        },
-        onError: (ctx) => {
-          setError(
-            ctx.error.status === 422
-              ? "Ya existe una cuenta con ese correo."
-              : "No se pudo crear la cuenta. Intenta de nuevo."
-          );
-          setLoading(false);
-        },
+    try {
+      const res = await signUp.email(
+        { name, email, password },
+        {
+          onSuccess: () => {
+            router.push("/login");
+          },
+          onError: (ctx) => {
+            setError(
+              ctx.error.status === 422
+                ? "Ya existe una cuenta con ese correo."
+                : "No se pudo crear la cuenta. Intenta de nuevo."
+            );
+            setLoading(false);
+          },
+        }
+      );
+
+      if (res?.error) {
+        setLoading(false);
       }
-    );
+    } catch (err: any) {
+      console.error("[Registro] Error de registro:", err);
+      setError("No se pudo conectar con el servidor. Intenta de nuevo.");
+      setLoading(false);
+    }
   };
 
   return (

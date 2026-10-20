@@ -8,6 +8,9 @@ export interface LocalMoneda {
   tasa: number;
   es_base: number;
   decimales?: number;
+  tasa_ref_moneda_id?: string | null;
+  usa_tasa_usd_directa?: number;
+  tasa_usd_directa?: number | null;
 }
 
 export interface LocalCaja {
@@ -187,7 +190,7 @@ export interface LocalAbonoPendiente {
 
 let dbInstance: SQLite.SQLiteDatabase | null = null;
 let schemaVersionApplied = 0;
-const CURRENT_SCHEMA_VERSION = 3;
+const CURRENT_SCHEMA_VERSION = 5;
 
 export async function getMobileDb(): Promise<SQLite.SQLiteDatabase> {
   if (dbInstance && schemaVersionApplied === CURRENT_SCHEMA_VERSION) return dbInstance;
@@ -210,7 +213,10 @@ export async function getMobileDb(): Promise<SQLite.SQLiteDatabase> {
       simbolo TEXT NOT NULL,
       tasa REAL NOT NULL DEFAULT 1,
       es_base INTEGER NOT NULL DEFAULT 0,
-      decimales INTEGER NOT NULL DEFAULT 2
+      decimales INTEGER NOT NULL DEFAULT 2,
+      tasa_ref_moneda_id TEXT,
+      usa_tasa_usd_directa INTEGER NOT NULL DEFAULT 0,
+      tasa_usd_directa REAL
     );
 
     CREATE TABLE IF NOT EXISTS cajas (
@@ -372,6 +378,9 @@ export async function getMobileDb(): Promise<SQLite.SQLiteDatabase> {
   // Safe migrations for existing installations
   const safeAlter = [
     `ALTER TABLE monedas ADD COLUMN decimales INTEGER NOT NULL DEFAULT 2`,
+    `ALTER TABLE monedas ADD COLUMN tasa_ref_moneda_id TEXT`,
+    `ALTER TABLE monedas ADD COLUMN usa_tasa_usd_directa INTEGER NOT NULL DEFAULT 0`,
+    `ALTER TABLE monedas ADD COLUMN tasa_usd_directa REAL`,
     `ALTER TABLE cajas ADD COLUMN saldo_actual REAL NOT NULL DEFAULT 0`,
     `ALTER TABLE productos ADD COLUMN categoria_id INTEGER`,
     `ALTER TABLE productos ADD COLUMN categoria_nombre TEXT`,
@@ -398,6 +407,23 @@ export async function getMobileDb(): Promise<SQLite.SQLiteDatabase> {
     }
   }
 
+  // Si la versión de esquema en disco cambió, forzar re-descarga completa del catálogo y tasas
+  try {
+    const verRow = await dbInstance.getFirstAsync<{ valor: string }>(
+      `SELECT valor FROM sync_meta WHERE clave = 'db_schema_version'`
+    );
+    if (verRow?.valor !== String(CURRENT_SCHEMA_VERSION)) {
+      await dbInstance.runAsync(`DELETE FROM sync_meta WHERE clave = 'last_pull_iso'`);
+      await dbInstance.runAsync(
+        `INSERT INTO sync_meta (clave, valor) VALUES ('db_schema_version', ?)
+         ON CONFLICT(clave) DO UPDATE SET valor = excluded.valor`,
+        [String(CURRENT_SCHEMA_VERSION)]
+      );
+    }
+  } catch {
+    // Ignore
+  }
+
   schemaVersionApplied = CURRENT_SCHEMA_VERSION;
   return dbInstance;
 }
@@ -421,6 +447,7 @@ export async function setMeta(clave: string, valor: string): Promise<void> {
 }
 
 export async function saveCatalogOffline(data: {
+  configuracion_global?: any;
   monedas?: any[];
   cajas?: any[];
   metodos_pago?: any[];
@@ -437,18 +464,34 @@ export async function saveCatalogOffline(data: {
   const db = await getMobileDb();
 
   await db.withTransactionAsync(async () => {
+    if (data.configuracion_global) {
+      const cfgObj = Array.isArray(data.configuracion_global)
+        ? data.configuracion_global[0]
+        : data.configuracion_global;
+      if (cfgObj) {
+        await db.runAsync(
+          `INSERT INTO sync_meta (clave, valor) VALUES ('configuracion_global', ?)
+           ON CONFLICT(clave) DO UPDATE SET valor = excluded.valor`,
+          [JSON.stringify(cfgObj)]
+        );
+      }
+    }
+
     if (Array.isArray(data.monedas)) {
       for (const m of data.monedas) {
         await db.runAsync(
-          `INSERT INTO monedas (id, codigo, nombre, simbolo, tasa, es_base, decimales)
-           VALUES (?, ?, ?, ?, ?, ?, ?)
+          `INSERT INTO monedas (id, codigo, nombre, simbolo, tasa, es_base, decimales, tasa_ref_moneda_id, usa_tasa_usd_directa, tasa_usd_directa)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT(id) DO UPDATE SET
              codigo = excluded.codigo,
              nombre = excluded.nombre,
              simbolo = excluded.simbolo,
              tasa = excluded.tasa,
              es_base = excluded.es_base,
-             decimales = excluded.decimales`,
+             decimales = excluded.decimales,
+             tasa_ref_moneda_id = excluded.tasa_ref_moneda_id,
+             usa_tasa_usd_directa = excluded.usa_tasa_usd_directa,
+             tasa_usd_directa = excluded.tasa_usd_directa`,
           [
             String(m.id),
             String(m.codigo),
@@ -457,6 +500,9 @@ export async function saveCatalogOffline(data: {
             Number(m.tasa) || 1,
             m.es_base ? 1 : 0,
             Number(m.decimales ?? 2),
+            m.tasa_ref_moneda_id ? String(m.tasa_ref_moneda_id) : null,
+            m.usa_tasa_usd_directa ? 1 : 0,
+            m.tasa_usd_directa != null ? Number(m.tasa_usd_directa) : null,
           ]
         );
       }

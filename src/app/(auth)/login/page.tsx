@@ -34,24 +34,34 @@ export default function LoginPage() {
     setError("");
     setLoading(true);
 
-    await signIn.email(
-      { email, password },
-      {
-        onSuccess: () => {
-          router.push("/dashboard");
-          router.refresh();
-        },
-        onError: (ctx) => {
-          const msg = ctx?.error?.message;
-          if (msg?.includes("verify")) {
-            setError("Debes verificar tu correo antes de iniciar sesión.");
-          } else {
-            setError("Correo o contraseña incorrectos. Intenta de nuevo.");
-          }
-          setLoading(false);
-        },
+    try {
+      const res = await signIn.email(
+        { email, password },
+        {
+          onSuccess: () => {
+            router.push("/dashboard");
+            router.refresh();
+          },
+          onError: (ctx) => {
+            const msg = ctx?.error?.message;
+            if (msg?.includes("verify")) {
+              setError("Debes verificar tu correo antes de iniciar sesión.");
+            } else {
+              setError("Correo o contraseña incorrectos. Intenta de nuevo.");
+            }
+            setLoading(false);
+          },
+        }
+      );
+
+      if (res?.error) {
+        setLoading(false);
       }
-    );
+    } catch (err: any) {
+      console.error("[Login] Error de autenticación:", err);
+      setError("No se pudo conectar con el servidor. Verifica que la aplicación esté lista e intenta de nuevo.");
+      setLoading(false);
+    }
   };
 
   return (

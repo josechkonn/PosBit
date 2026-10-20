@@ -54,6 +54,7 @@ export async function POST(request: Request) {
     const [
       latestSession,
       userRow,
+      configuracionGlobal,
       monedas,
       cajas,
       metodosPago,
@@ -78,6 +79,7 @@ export async function POST(request: Request) {
         email: string;
         role: string;
       }>(`SELECT id, name, email, role FROM "user" WHERE id = $1`, [userId]),
+      queryOne(`SELECT * FROM configuracion_global LIMIT 1`),
       query(`SELECT * FROM monedas WHERE activo = true ORDER BY es_base DESC, codigo ASC`),
       query(`SELECT * FROM cajas ORDER BY nombre ASC`),
       query(`SELECT * FROM metodos_pago WHERE activo = true ORDER BY nombre ASC`),
@@ -110,6 +112,7 @@ export async function POST(request: Request) {
         email: userRow?.email ?? signInResult.user.email,
         role: userRow?.role ?? "usuario",
       },
+      configuracionGlobal,
       monedas,
       cajas,
       metodosPago,
