@@ -18,7 +18,7 @@ name: Build Desktop & Release
 
 on:
   push:
-    branches: [main]
+    branches: [main, nube]
     paths-ignore:
       - '**.md'
       - '.github/ISSUE_TEMPLATE/**'
@@ -129,7 +129,7 @@ jobs:
           BUILD_STANDALONE: "1"
 
       # ---------------------------------------------------------------
-      # 7. Obtener versión del package.json
+      # 7. Obtener versión del package.json y detectar si es rama nube
       # ---------------------------------------------------------------
       - name: Get version
         id: version
@@ -137,9 +137,11 @@ jobs:
         run: |
           $pkg = Get-Content package.json | ConvertFrom-Json
           $version = $pkg.version
-          Write-Host "Version: $version"
+          $isPrerelease = if ("${{ github.ref_name }}" -ne "main" -or $version.Contains("-")) { "true" } else { "false" }
+          Write-Host "Version: $version (Prerelease: $isPrerelease)"
           echo "version=$version" >> $env:GITHUB_OUTPUT
           echo "tag=v$version" >> $env:GITHUB_OUTPUT
+          echo "is_prerelease=$isPrerelease" >> $env:GITHUB_OUTPUT
 
       # ---------------------------------------------------------------
       # 8. Generar icon.ico desde icon.png
@@ -171,7 +173,7 @@ jobs:
           }
 
       # ---------------------------------------------------------------
-      # 10. Crear GitHub Release
+      # 10. Crear GitHub Release (aislado si es rama nube con prerelease: true)
       # ---------------------------------------------------------------
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
@@ -179,24 +181,21 @@ jobs:
           tag_name: ${{ steps.version.outputs.tag }}
           name: PosBit ${{ steps.version.outputs.tag }}
           body: |
-            ## PosBit ${{ steps.version.outputs.tag }}
+            ## PosBit ${{ steps.version.outputs.tag }} (Rama `${{ github.ref_name }}`)
 
             ### 📦 Instalación
             Descarga `PosBit-Setup-${{ steps.version.outputs.version }}.exe` y ejecútalo.
             El instalador configurará todo automáticamente.
 
-            ### 🔄 Actualización
-            Si ya tienes PosBit instalado, la aplicación te notificará automáticamente
-            de esta actualización. Solo haz clic en "Descargar ahora" cuando aparezca.
-
             ---
-            *Build automático desde commit ${{ github.sha }}*
+            *Build automático desde rama `${{ github.ref_name }}` (commit ${{ github.sha }})*
           draft: false
-          prerelease: false
+          prerelease: ${{ steps.version.outputs.is_prerelease == 'true' }}
+          make_latest: ${{ steps.version.outputs.is_prerelease == 'false' }}
           files: |
             dist-electron/*.exe
             dist-electron/*.exe.blockmap
-            dist-electron/latest.yml
+            dist-electron/*.yml
           fail_on_unmatched_files: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
