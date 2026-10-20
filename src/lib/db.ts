@@ -6,25 +6,26 @@ const globalForPool = globalThis as unknown as {
   dbInit: Promise<void> | undefined;
 };
 
+export const pool =
+  globalForPool.pool ??
+  new Pool({
+    connectionString: process.env.DATABASE_URL,
+    max: 10,
+    idleTimeoutMillis: 30000,
+    connectionTimeoutMillis: 10000,
+  });
+
+// Reutilizar el pool tanto en desarrollo como en producción (Vercel serverless warm instances)
+globalForPool.pool = pool;
+
 if (!globalForPool.dbInit) {
-  globalForPool.dbInit = ensureDatabase().catch((err) => {
-    // Durante `next build` no hay PostgreSQL — esto es normal.
-    // En runtime, las queries fallarán con su propio error de conexión.
+  globalForPool.dbInit = ensureDatabase(pool).catch((err) => {
+    // Durante `next build` sin PostgreSQL disponible esto es normal.
     console.warn("⚠ DB init falló (normal durante build):", err.message ?? err);
   });
 }
 
 const dbInit = globalForPool.dbInit;
-
-export const pool =
-  globalForPool.pool ??
-  new Pool({
-    connectionString: process.env.DATABASE_URL,
-  });
-
-if (process.env.NODE_ENV !== "production") {
-  globalForPool.pool = pool;
-}
 
 export async function query<T = any>(text: string, params?: any[]): Promise<T[]> {
   await dbInit;
@@ -51,14 +52,10 @@ export async function transaction<T>(fn: (client: any) => Promise<T>): Promise<T
     const result = await fn(client);
     await client.query("COMMIT");
     return result;
-  } catch (error) {
+  } catch (e) {
     await client.query("ROLLBACK");
-    throw error;
+    throw e;
   } finally {
     client.release();
   }
-}
-
-export async function waitForDB(): Promise<void> {
-  await dbInit;
 }

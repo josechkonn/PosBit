@@ -15,31 +15,66 @@ function getAdminUrl(): string {
   return `postgresql://${url.username}:${url.password}@${url.hostname}${url.port ? `:${url.port}` : ""}/postgres`;
 }
 
+function isLocalDatabaseUrl(): boolean {
+  try {
+    const host = new URL(process.env.DATABASE_URL!).hostname;
+    return host === "localhost" || host === "127.0.0.1";
+  } catch {
+    return false;
+  }
+}
+
 const LOCK_ID = 42;
 
-export async function ensureDatabase(): Promise<void> {
-  const dbName = getDbName();
+export async function ensureDatabase(sharedPool?: Pool): Promise<void> {
+  if (!process.env.DATABASE_URL) {
+    throw new Error("DATABASE_URL no está definida");
+  }
+
+  // Fast-path para producción / serverless (Vercel + Supabase):
+  // Si la última tabla del esquema (`sync_config`) y el usuario admin ya existen,
+  // no re-ejecutar los 9 archivos SQL ni las 40 consultas de migración en cada petición.
+  if (sharedPool) {
+    try {
+      const fastCheck = await sharedPool.query(`
+        SELECT 
+          EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'sync_config') AS has_sync,
+          EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'compra_abonos') AS has_abonos
+      `);
+      if (fastCheck.rows[0]?.has_sync && fastCheck.rows[0]?.has_abonos) {
+        return;
+      }
+    } catch {
+      // Si la BD aún no existe en local, continúa al flujo completo de inicialización
+    }
+  }
 
   // En local (Postgres propio/embebido) crea la BD si no existe.
-  // En la nube (Supabase, Neon, Render, Railway) la BD ya viene creada y puede no permitir CREATE DATABASE.
-  try {
-    const adminPool = new Pool({ connectionString: getAdminUrl(), max: 1, connectionTimeoutMillis: 5000 });
+  if (isLocalDatabaseUrl()) {
+    const dbName = getDbName();
     try {
-      const { rowCount } = await adminPool.query(
-        "SELECT 1 FROM pg_database WHERE datname = $1",
-        [dbName]
-      );
+      const adminPool = new Pool({
+        connectionString: getAdminUrl(),
+        max: 1,
+        connectionTimeoutMillis: 4000,
+      });
+      try {
+        const { rowCount } = await adminPool.query(
+          "SELECT 1 FROM pg_database WHERE datname = $1",
+          [dbName]
+        );
 
-      if (rowCount === 0) {
-        console.log(`Creando base de datos "${dbName}"...`);
-        await adminPool.query(`CREATE DATABASE "${dbName}"`);
-        console.log(`Base de datos "${dbName}" creada.`);
+        if (rowCount === 0) {
+          console.log(`Creando base de datos "${dbName}"...`);
+          await adminPool.query(`CREATE DATABASE "${dbName}"`);
+          console.log(`Base de datos "${dbName}" creada.`);
+        }
+      } finally {
+        await adminPool.end().catch(() => {});
       }
-    } finally {
-      await adminPool.end().catch(() => {});
+    } catch {
+      // Ignorar si no tiene permisos de superuser
     }
-  } catch {
-    // Normal en proveedores cloud (Supabase / Neon) donde la base de datos ya existe
   }
 
   const appPool = new Pool({ connectionString: process.env.DATABASE_URL!, max: 1 });
@@ -47,11 +82,6 @@ export async function ensureDatabase(): Promise<void> {
   try {
     await appPool.query("SELECT pg_advisory_lock($1)", [LOCK_ID]);
 
-    // Buscar schema.sql en múltiples ubicaciones:
-    // - process.cwd()/sql/schema.sql (desarrollo con next dev)
-    // - process.resourcesPath/standalone/sql/schema.sql (Electron empaquetado)
-    // - ../sql/schema.sql relativo a este archivo (standalone build)
-    // - sql/schema.sql en el directorio de trabajo del standalone server
     const currentDir =
       typeof __dirname !== "undefined"
         ? __dirname
@@ -70,7 +100,12 @@ export async function ensureDatabase(): Promise<void> {
     ].filter(Boolean);
 
     const schemaPath = candidates.find((p) => {
-      try { readFileSync(p, "utf-8"); return true; } catch { return false; }
+      try {
+        readFileSync(/*turbopackIgnore: true*/ p, "utf-8");
+        return true;
+      } catch {
+        return false;
+      }
     });
     if (!schemaPath) throw new Error(`schema.sql no encontrado. Buscado en: ${candidates.join(", ")}`);
 
@@ -83,12 +118,15 @@ export async function ensureDatabase(): Promise<void> {
     }
 
     // 2. Aplicar/verificar esquema base
-    const schema = readFileSync(schemaPath, "utf-8");
+    const schema = readFileSync(/*turbopackIgnore: true*/ schemaPath, "utf-8");
     try {
       await appPool.query(schema);
       console.log("Tablas y datos iniciales verificados.");
     } catch (schemaErr: any) {
-      console.warn("Aviso al aplicar schema.sql (continuando con migraciones incrementales):", schemaErr?.message || schemaErr);
+      console.warn(
+        "Aviso al aplicar schema.sql (continuando con migraciones incrementales):",
+        schemaErr?.message || schemaErr
+      );
     }
 
     // 3. SQL migraciones incrementales: se ejecutan en orden e idénticamente en dev y Electron
