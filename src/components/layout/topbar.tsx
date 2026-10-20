@@ -16,6 +16,7 @@ import {
 } from "lucide-react";
 import { pathLabel } from "./nav";
 import type { AppUser } from "./app-shell";
+import { CloudSyncBadge } from "./cloud-sync-badge";
 import { Avatar } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
 import { userInitials } from "@/lib/utils";
@@ -126,6 +127,9 @@ export function Topbar({
       </div>
 
       <div className="flex-1" />
+
+      {/* Indicador de Estado Offline / Sincronización en la Nube */}
+      <CloudSyncBadge />
 
       {/* Acceso directo y destacado al Punto de Venta */}
       <Link

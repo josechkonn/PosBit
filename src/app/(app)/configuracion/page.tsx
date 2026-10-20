@@ -11,6 +11,7 @@ import { Modal } from "@/components/ui/modal";
 import { PageHeader } from "@/components/ui/page-header";
 import { Select } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
+import { CloudSyncCard } from "@/components/configuracion/cloud-sync-card";
 import { userInitials, cn } from "@/lib/utils";
 
 interface ConfigItem {
@@ -574,6 +575,8 @@ export default function ConfiguracionPage() {
               {recalcResult && <p className="text-xs text-success">{recalcResult}</p>}
             </CardContent>
           </Card>
+
+          <CloudSyncCard />
         </div>
 
         <div className="space-y-4">

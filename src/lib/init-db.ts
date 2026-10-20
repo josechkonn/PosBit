@@ -20,21 +20,26 @@ const LOCK_ID = 42;
 export async function ensureDatabase(): Promise<void> {
   const dbName = getDbName();
 
-  const adminPool = new Pool({ connectionString: getAdminUrl(), max: 1 });
-
+  // En local (Postgres propio/embebido) crea la BD si no existe.
+  // En la nube (Supabase, Neon, Render, Railway) la BD ya viene creada y puede no permitir CREATE DATABASE.
   try {
-    const { rowCount } = await adminPool.query(
-      "SELECT 1 FROM pg_database WHERE datname = $1",
-      [dbName]
-    );
+    const adminPool = new Pool({ connectionString: getAdminUrl(), max: 1, connectionTimeoutMillis: 5000 });
+    try {
+      const { rowCount } = await adminPool.query(
+        "SELECT 1 FROM pg_database WHERE datname = $1",
+        [dbName]
+      );
 
-    if (rowCount === 0) {
-      console.log(`Creando base de datos "${dbName}"...`);
-      await adminPool.query(`CREATE DATABASE "${dbName}"`);
-      console.log(`Base de datos "${dbName}" creada.`);
+      if (rowCount === 0) {
+        console.log(`Creando base de datos "${dbName}"...`);
+        await adminPool.query(`CREATE DATABASE "${dbName}"`);
+        console.log(`Base de datos "${dbName}" creada.`);
+      }
+    } finally {
+      await adminPool.end().catch(() => {});
     }
-  } finally {
-    await adminPool.end();
+  } catch {
+    // Normal en proveedores cloud (Supabase / Neon) donde la base de datos ya existe
   }
 
   const appPool = new Pool({ connectionString: process.env.DATABASE_URL!, max: 1 });
@@ -95,6 +100,7 @@ export async function ensureDatabase(): Promise<void> {
       { file: "ventas-cobros-extra.sql", desc: "Cobros extra en ventas" },
       { file: "compras-descuentos.sql", desc: "Descuentos en compras" },
       { file: "compras-abonos.sql", desc: "Sistema de abonos y deudas de compras" },
+      { file: "cloud-sync.sql", desc: "Infraestructura de sincronización Offline/Nube" },
     ];
 
     const sqlDir = dirname(schemaPath);

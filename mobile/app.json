@@ -1,0 +1,38 @@
+{
+  "expo": {
+    "name": "PosBit Mobile",
+    "slug": "posbit-mobile",
+    "version": "0.1.22",
+    "orientation": "portrait",
+    "userInterfaceStyle": "dark",
+    "splash": {
+      "backgroundColor": "#090d16"
+    },
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.posbit.mobile"
+    },
+    "android": {
+      "package": "com.posbit.mobile",
+      "versionCode": 1,
+      "permissions": [
+        "CAMERA",
+        "INTERNET",
+        "ACCESS_NETWORK_STATE"
+      ],
+      "adaptiveIcon": {
+        "backgroundColor": "#090d16"
+      }
+    },
+    "plugins": [
+      "expo-sqlite",
+      "expo-secure-store",
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "Permitir a PosBit usar la cámara para escanear códigos de barras de productos."
+        }
+      ]
+    ]
+  }
+}
