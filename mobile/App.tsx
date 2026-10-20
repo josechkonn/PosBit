@@ -231,7 +231,7 @@ export default function App() {
   const [posSubView, setPosSubView] = useState<"catalogo" | "carrito">("catalogo");
   const [posSearch, setPosSearch] = useState("");
   const [posCategoriaId, setPosCategoriaId] = useState<string | null>(null);
-  const [monedaSeleccionada, setMonedaSeleccionada] = useState<string>("USD");
+  const [monedaSeleccionada, setMonedaSeleccionada] = useState<string>("COP");
   const [metodoPagoSeleccionado, setMetodoPagoSeleccionado] = useState<string>("");
   const [cajaSeleccionada, setCajaSeleccionada] = useState<string>("");
   const [cart, setCart] = useState<CartItem[]>([]);
@@ -356,19 +356,36 @@ export default function App() {
 
     if (m.length > 0) {
       setMonedaSeleccionada((prev) => {
+        const cop = m.find((x) => x.codigo === "COP");
+        if (cop) return "COP";
         if (prev && m.some((x) => x.codigo === prev)) return prev;
         const base = m.find((x) => x.es_base === 1) || m[0];
         return base.codigo;
       });
     }
     if (mp.length > 0) {
+      const mpCop = mp.find((x) => x.moneda_codigo === "COP") || mp[0];
       setMetodoPagoSeleccionado((prev) => {
-        if (prev && mp.some((x) => String(x.id) === String(prev))) return prev;
-        return String(mp[0].id);
+        if (prev && mp.some((x) => String(x.id) === String(prev))) {
+          const cur = mp.find((x) => String(x.id) === String(prev));
+          if (cur?.moneda_codigo !== "COP" && mp.some((x) => x.moneda_codigo === "COP")) {
+            return String(mpCop.id);
+          }
+          return prev;
+        }
+        return String(mpCop.id);
       });
       setCajaSeleccionada((prev) => {
-        if (prev) return prev;
-        return mp[0].caja_id ? String(mp[0].caja_id) : c[0]?.id ? String(c[0].id) : "";
+        if (prev) {
+          if (mpCop?.moneda_codigo === "COP") {
+            const cur = mp.find((x) => String(x.id) === String(metodoPagoSeleccionado));
+            if (cur?.moneda_codigo !== "COP") {
+              return mpCop.caja_id ? String(mpCop.caja_id) : prev;
+            }
+          }
+          return prev;
+        }
+        return mpCop.caja_id ? String(mpCop.caja_id) : c[0]?.id ? String(c[0].id) : "";
       });
     }
   }, []);
@@ -1211,7 +1228,7 @@ export default function App() {
 
   // ── Modal Crear / Editar Cliente ──
   const openCreateClienteModal = useCallback(
-    (cli?: LocalCliente | null) => {
+    (cli?: LocalCliente | null, initialNombre?: string) => {
       if (cli) {
         setEditingCliente(cli);
         setClFormNombre(cli.nombre);
@@ -1230,7 +1247,7 @@ export default function App() {
         setClFormLimites(map);
       } else {
         setEditingCliente(null);
-        setClFormNombre("");
+        setClFormNombre(initialNombre || "");
         setClFormTipo("Persona Natural");
         setClFormDoc("");
         setClFormTel("");
@@ -2565,9 +2582,26 @@ export default function App() {
                       )}
 
                       <View style={styles.posProdFooter}>
-                        <Text style={styles.posProdPrice}>
-                          {fmt(precioMostrado, monedaSeleccionada)}
-                        </Text>
+                        <View style={{ flex: 1, minWidth: 0, paddingRight: 4 }}>
+                          <Text style={styles.posProdPrice} numberOfLines={1}>
+                            {fmt(precioMostrado, monedaSeleccionada)}
+                          </Text>
+                          <View style={{ flexDirection: "row", gap: 4, flexWrap: "wrap", marginTop: 2 }}>
+                            {monedas
+                              .filter((m) => m.codigo !== monedaSeleccionada)
+                              .map((m) => {
+                                const pAlt = precioUnitarioEnMoneda(item, m.codigo);
+                                return (
+                                  <Text
+                                    key={m.codigo}
+                                    style={{ fontSize: 9.5, color: THEME.mutedForeground, fontWeight: "600" }}
+                                  >
+                                    {fmt(pAlt, m.codigo)}
+                                  </Text>
+                                );
+                              })}
+                          </View>
+                        </View>
                         <View
                           style={[
                             styles.stockBadge,
@@ -2695,25 +2729,41 @@ export default function App() {
                   </View>
 
                   <TouchableOpacity
-                    style={styles.clienteDropdownBtn}
+                    style={styles.clienteSearchTrigger}
                     onPress={() => {
                       setClientePickerSearch("");
                       setShowClientePickerModal(true);
                     }}
                   >
-                    <Feather name="user" size={15} color={THEME.mutedForeground} />
-                    <Text style={styles.clienteDropdownText} numberOfLines={1}>
+                    <Feather
+                      name={clienteSeleccionadoObj ? "user-check" : "search"}
+                      size={15}
+                      color={clienteSeleccionadoObj ? THEME.primary : THEME.mutedForeground}
+                    />
+                    <Text
+                      style={[
+                        styles.clienteSearchTriggerText,
+                        clienteSeleccionadoObj && { color: THEME.foreground, fontWeight: "700" },
+                      ]}
+                      numberOfLines={1}
+                    >
                       {clienteSeleccionadoObj
                         ? `${clienteSeleccionadoObj.nombre}${
                             clienteSeleccionadoObj.documento
                               ? ` (${clienteSeleccionadoObj.documento})`
                               : ""
                           }`
-                        : "Consumidor Final (Sin registrar)"}
+                        : "Buscar cliente o Consumidor Final..."}
                     </Text>
                     {clienteId ? (
-                      <TouchableOpacity onPress={() => setClienteId(null)}>
-                        <Feather name="x" size={16} color={THEME.mutedForeground} />
+                      <TouchableOpacity
+                        onPress={(e) => {
+                          e.stopPropagation();
+                          setClienteId(null);
+                        }}
+                        hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                      >
+                        <Feather name="x-circle" size={16} color={THEME.mutedForeground} />
                       </TouchableOpacity>
                     ) : (
                       <Feather name="chevron-down" size={16} color={THEME.mutedForeground} />
@@ -4832,28 +4882,41 @@ export default function App() {
                     </View>
 
                     <TouchableOpacity
-                      style={styles.clienteDropdownBtn}
+                      style={styles.clienteSearchTrigger}
                       onPress={() => {
                         setClientePickerSearch("");
                         setShowClientePickerModal(true);
                       }}
                     >
-                      <Feather name="user" size={15} color={THEME.mutedForeground} />
-                      <Text style={styles.clienteDropdownText} numberOfLines={1}>
+                      <Feather
+                        name={clienteSeleccionadoObj ? "user-check" : "search"}
+                        size={15}
+                        color={clienteSeleccionadoObj ? THEME.primary : THEME.mutedForeground}
+                      />
+                      <Text
+                        style={[
+                          styles.clienteSearchTriggerText,
+                          clienteSeleccionadoObj && { color: THEME.foreground, fontWeight: "700" },
+                        ]}
+                        numberOfLines={1}
+                      >
                         {clienteSeleccionadoObj
                           ? `${clienteSeleccionadoObj.nombre}${
                               clienteSeleccionadoObj.documento
                                 ? ` (${clienteSeleccionadoObj.documento})`
                                 : ""
                             }`
-                          : "Consumidor Final (Sin registrar)"}
+                          : "Buscar cliente o Consumidor Final..."}
                       </Text>
                       {clienteId ? (
                         <TouchableOpacity
-                          onPress={() => setClienteId(null)}
+                          onPress={(e) => {
+                            e.stopPropagation();
+                            setClienteId(null);
+                          }}
                           hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
                         >
-                          <Feather name="x" size={16} color={THEME.mutedForeground} />
+                          <Feather name="x-circle" size={16} color={THEME.mutedForeground} />
                         </TouchableOpacity>
                       ) : (
                         <Feather name="chevron-down" size={16} color={THEME.mutedForeground} />
@@ -5456,71 +5519,154 @@ export default function App() {
         <View style={styles.modalBackdrop}>
           <View style={styles.modalSheet}>
             <View style={styles.modalHeader}>
-              <Text style={styles.modalTitle}>Seleccionar Cliente</Text>
-              <TouchableOpacity onPress={() => setShowClientePickerModal(false)}>
-                <Feather name="x" size={20} color={THEME.mutedForeground} />
-              </TouchableOpacity>
+              <View>
+                <Text style={styles.modalTitle}>Buscar Cliente</Text>
+                <Text style={styles.clientCardMeta}>
+                  {clientes.length} cliente{clientes.length === 1 ? "" : "s"} registrados
+                </Text>
+              </View>
+              <View style={{ flexDirection: "row", alignItems: "center", gap: 10 }}>
+                <TouchableOpacity
+                  style={[styles.outlineSmallBtn, { paddingHorizontal: 10, paddingVertical: 5 }]}
+                  onPress={() => {
+                    setShowClientePickerModal(false);
+                    openCreateClienteModal(null, clientePickerSearch);
+                  }}
+                >
+                  <Feather name="user-plus" size={13} color={THEME.primary} />
+                  <Text style={[styles.outlineSmallBtnText, { color: THEME.primary, fontWeight: "700" }]}>
+                    + Nuevo
+                  </Text>
+                </TouchableOpacity>
+                <TouchableOpacity onPress={() => setShowClientePickerModal(false)}>
+                  <Feather name="x" size={20} color={THEME.mutedForeground} />
+                </TouchableOpacity>
+              </View>
             </View>
 
-            <View style={[styles.searchBox, { marginBottom: 10 }]}>
-              <Feather name="search" size={15} color={THEME.mutedForeground} />
+            {/* Buscador interactivo de clientes */}
+            <View style={[styles.searchBox, { marginBottom: 10, height: 44, paddingHorizontal: 12 }]}>
+              <Feather name="search" size={16} color={THEME.primary} />
               <TextInput
-                style={styles.searchBoxInput}
-                placeholder="Buscar por nombre o documento..."
+                style={[styles.searchBoxInput, { fontSize: 14 }]}
+                placeholder="Buscar por nombre, documento o teléfono..."
                 placeholderTextColor={THEME.mutedForeground}
                 value={clientePickerSearch}
                 onChangeText={setClientePickerSearch}
+                autoFocus={true}
               />
-            </View>
-
-            <TouchableOpacity
-              style={styles.pickerRow}
-              onPress={() => {
-                setClienteId(null);
-                setShowClientePickerModal(false);
-              }}
-            >
-              <Text style={{ fontWeight: "700", color: THEME.foreground }}>
-                Consumidor Final (Sin registrar)
-              </Text>
-            </TouchableOpacity>
-
-            <FlatList
-              data={clientes.filter(
-                (c) =>
-                  !clientePickerSearch.trim() ||
-                  c.nombre.toLowerCase().includes(clientePickerSearch.toLowerCase()) ||
-                  (c.documento &&
-                    c.documento.toLowerCase().includes(clientePickerSearch.toLowerCase()))
-              )}
-              keyExtractor={(item) => String(item.id)}
-              style={{ maxHeight: 340 }}
-              renderItem={({ item }) => (
+              {clientePickerSearch.length > 0 && (
                 <TouchableOpacity
-                  style={styles.pickerRow}
-                  onPress={() => {
-                    setClienteId(item.id);
-                    setShowClientePickerModal(false);
-                  }}
+                  onPress={() => setClientePickerSearch("")}
+                  hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
                 >
-                  <View style={{ flex: 1 }}>
-                    <Text style={styles.clientCardName}>{item.nombre}</Text>
-                    <Text style={styles.clientCardMeta}>
-                      {item.documento || "Sin doc"}
-                      {item.telefono ? ` · ${item.telefono}` : ""}
-                    </Text>
-                  </View>
-                  {item.deuda_total && item.deuda_total.length > 0 && (
-                    <View style={styles.deudaChip}>
-                      <Text style={styles.deudaChipText}>
-                        Deuda: {item.deuda_total[0].simbolo}{" "}
-                        {item.deuda_total[0].monto.toFixed(2)}
-                      </Text>
-                    </View>
-                  )}
+                  <Feather name="x-circle" size={16} color={THEME.mutedForeground} />
                 </TouchableOpacity>
               )}
-            />
+            </View>
+
+            {/* Opción Consumidor Final */}
+            {!clientePickerSearch.trim() && (
+              <TouchableOpacity
+                style={[styles.pickerRow, !clienteId && { backgroundColor: THEME.secondary }]}
+                onPress={() => {
+                  setClienteId(null);
+                  setShowClientePickerModal(false);
+                }}
+              >
+                <View style={{ flex: 1 }}>
+                  <Text style={{ fontWeight: "700", color: THEME.foreground, fontSize: 13.5 }}>
+                    Consumidor Final
+                  </Text>
+                  <Text style={styles.clientCardMeta}>Venta rápida sin registrar cliente</Text>
+                </View>
+                {!clienteId && <Feather name="check" size={18} color={THEME.primary} />}
+              </TouchableOpacity>
+            )}
+
+            {/* Lista de clientes filtrados */}
+            {(() => {
+              const q = clientePickerSearch.trim().toLowerCase();
+              const filtered = clientes.filter(
+                (c) =>
+                  !q ||
+                  c.nombre.toLowerCase().includes(q) ||
+                  (c.documento && c.documento.toLowerCase().includes(q)) ||
+                  (c.telefono && c.telefono.toLowerCase().includes(q))
+              );
+
+              if (filtered.length === 0 && q) {
+                return (
+                  <View style={{ padding: 24, alignItems: "center", gap: 10 }}>
+                    <Feather name="user-x" size={32} color={THEME.mutedForeground} />
+                    <Text style={{ fontSize: 13, color: THEME.mutedForeground, textAlign: "center" }}>
+                      No se encontró ningún cliente con "{clientePickerSearch}"
+                    </Text>
+                    <TouchableOpacity
+                      style={[styles.primarySmallBtn, { paddingHorizontal: 16, paddingVertical: 9, marginTop: 4 }]}
+                      onPress={() => {
+                        setShowClientePickerModal(false);
+                        openCreateClienteModal(null, clientePickerSearch);
+                      }}
+                    >
+                      <Feather name="user-plus" size={14} color="#fff" />
+                      <Text style={[styles.primarySmallBtnText, { color: "#fff", fontWeight: "700" }]}>
+                        + Crear cliente "{clientePickerSearch}"
+                      </Text>
+                    </TouchableOpacity>
+                  </View>
+                );
+              }
+
+              return (
+                <FlatList
+                  data={filtered}
+                  keyExtractor={(item) => String(item.id)}
+                  style={{ maxHeight: 360 }}
+                  keyboardShouldPersistTaps="handled"
+                  renderItem={({ item }) => {
+                    const isSelected = item.id === clienteId;
+                    const tieneDeuda =
+                      item.deuda_total && item.deuda_total.some((d) => Number(d.monto) > 0);
+                    return (
+                      <TouchableOpacity
+                        style={[styles.pickerRow, isSelected && { backgroundColor: THEME.secondary }]}
+                        onPress={() => {
+                          setClienteId(item.id);
+                          setShowClientePickerModal(false);
+                        }}
+                      >
+                        <View style={{ flex: 1 }}>
+                          <Text
+                            style={[
+                              styles.clientCardName,
+                              isSelected && { color: THEME.primary, fontWeight: "800" },
+                            ]}
+                          >
+                            {item.nombre}
+                          </Text>
+                          <Text style={styles.clientCardMeta}>
+                            {item.documento || "Sin doc"}
+                            {item.telefono ? ` · Tel: ${item.telefono}` : ""}
+                          </Text>
+                        </View>
+                        {tieneDeuda && (
+                          <View style={styles.deudaChip}>
+                            <Text style={styles.deudaChipText}>
+                              Deuda: {item.deuda_total[0].simbolo}{" "}
+                              {Number(item.deuda_total[0].monto).toFixed(2)}
+                            </Text>
+                          </View>
+                        )}
+                        {isSelected && (
+                          <Feather name="check" size={18} color={THEME.primary} style={{ marginLeft: 6 }} />
+                        )}
+                      </TouchableOpacity>
+                    );
+                  }}
+                />
+              );
+            })()}
           </View>
         </View>
       </Modal>
@@ -7275,6 +7421,22 @@ const styles = StyleSheet.create({
     borderRadius: 8,
     paddingHorizontal: 11,
     paddingVertical: 9,
+  },
+  clienteSearchTrigger: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    backgroundColor: THEME.inputBg,
+    borderWidth: 1.5,
+    borderColor: THEME.border,
+    borderRadius: 8,
+    paddingHorizontal: 11,
+    paddingVertical: 9,
+  },
+  clienteSearchTriggerText: {
+    flex: 1,
+    fontSize: 13,
+    color: THEME.mutedForeground,
   },
   clienteDropdownText: {
     flex: 1,
