@@ -62,14 +62,14 @@ export async function PUT(request: Request) {
 
     const updated = await queryOne(
       `UPDATE sync_config
-          SET nombre_dispositivo = $1,
-              modo_conexion = $2,
-              cloud_url = $3,
-              cloud_api_key = $4,
-              cloud_database_url = $5,
-              auto_sync = $6,
-              intervalo_segundos = $7,
-              ultimo_estado = CASE WHEN $2 = 'desactivado' THEN 'sin_configurar' ELSE COALESCE(NULLIF(ultimo_estado, 'sin_configurar'), $8) END,
+          SET nombre_dispositivo = $1::varchar,
+              modo_conexion = $2::varchar,
+              cloud_url = $3::text,
+              cloud_api_key = $4::text,
+              cloud_database_url = $5::text,
+              auto_sync = $6::boolean,
+              intervalo_segundos = $7::integer,
+              ultimo_estado = CASE WHEN $2::varchar = 'desactivado' THEN 'sin_configurar' ELSE COALESCE(NULLIF(ultimo_estado, 'sin_configurar'), $8::varchar) END,
               actualizado_en = NOW()
         WHERE id = 1
         RETURNING *`,
