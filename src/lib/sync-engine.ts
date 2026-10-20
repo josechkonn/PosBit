@@ -332,41 +332,88 @@ export async function applyDeltaToDb(
   }
 
   try {
-    // 1. Pre-cargar mapas de reconciliación de entidades base existentes en el destino
-    const existingMonedas = await client.query(`SELECT id, codigo FROM monedas`);
+    // 1. Pre-cargar esquemas de columnas y mapas de reconciliación en bloque (mínimas idas y vueltas de red)
+    const allColsRes = await client.query(
+      `SELECT table_name, column_name FROM information_schema.columns WHERE table_schema = 'public'`
+    );
+    const colsByTable = new Map<string, Set<string>>();
+    for (const r of allColsRes.rows) {
+      let set = colsByTable.get(r.table_name);
+      if (!set) {
+        set = new Set<string>();
+        colsByTable.set(r.table_name, set);
+      }
+      set.add(r.column_name);
+    }
+
+    const [
+      existingMonedas,
+      existingCajas,
+      existingCats,
+      existingMarcas,
+      existingProvs,
+      existingProds,
+      existingMps,
+      existingCfgs,
+      existingPps,
+      existingClcs,
+      existingPres,
+    ] = await Promise.all([
+      client.query(`SELECT id, codigo FROM monedas`),
+      client.query(`SELECT id, nombre FROM cajas`),
+      client.query(`SELECT id, nombre FROM categorias`),
+      client.query(`SELECT id, nombre FROM marcas`),
+      client.query(`SELECT id, nombre FROM proveedores`),
+      client.query(`SELECT id, codigo FROM productos`),
+      client.query(`SELECT id, nombre, caja_id FROM metodos_pago`),
+      client.query(`SELECT id, clave FROM configuracion`),
+      client.query(`SELECT id, producto_id, moneda_id FROM producto_precios`),
+      client.query(`SELECT id, cliente_id, moneda_id FROM cliente_limites_credito`),
+      client.query(`SELECT id, producto_id, nombre FROM producto_presentaciones`),
+    ]);
+
     const monedaByCodigo = new Map<string, any>(
       existingMonedas.rows.map((r: any) => [String(r.codigo).toUpperCase().trim(), r.id])
     );
-
-    const existingCajas = await client.query(`SELECT id, nombre FROM cajas`);
     const cajaByNombre = new Map<string, any>(
       existingCajas.rows.map((r: any) => [String(r.nombre).toLowerCase().trim(), r.id])
     );
-
-    const existingCats = await client.query(`SELECT id, nombre FROM categorias`);
     const catByNombre = new Map<string, any>(
       existingCats.rows.map((r: any) => [String(r.nombre).toLowerCase().trim(), r.id])
     );
-
-    const existingMarcas = await client.query(`SELECT id, nombre FROM marcas`);
     const marcaByNombre = new Map<string, any>(
       existingMarcas.rows.map((r: any) => [String(r.nombre).toLowerCase().trim(), r.id])
     );
-
-    const existingProvs = await client.query(`SELECT id, nombre FROM proveedores`);
     const provByNombre = new Map<string, any>(
       existingProvs.rows.map((r: any) => [String(r.nombre).toLowerCase().trim(), r.id])
     );
-
-    const existingProds = await client.query(`SELECT id, codigo FROM productos`);
     const prodByCodigo = new Map<string, any>(
       existingProds.rows.map((r: any) => [String(r.codigo).toLowerCase().trim(), r.id])
     );
+    const mpByKey = new Map<string, any>(
+      existingMps.rows.map((r: any) => [
+        `${String(r.nombre).toLowerCase().trim()}::${r.caja_id ? String(r.caja_id) : ""}`,
+        r.id,
+      ])
+    );
+    const cfgByClave = new Map<string, any>(
+      existingCfgs.rows.map((r: any) => [String(r.clave), r.id])
+    );
+    const ppByKey = new Map<string, any>(
+      existingPps.rows.map((r: any) => [`${r.producto_id}::${r.moneda_id}`, r.id])
+    );
+    const clcByKey = new Map<string, any>(
+      existingClcs.rows.map((r: any) => [`${r.cliente_id}::${r.moneda_id}`, r.id])
+    );
+    const presByKey = new Map<string, any>(
+      existingPres.rows.map((r: any) => [
+        `${r.producto_id}::${String(r.nombre).toLowerCase().trim()}`,
+        r.id,
+      ])
+    );
 
-    // Helper para traducir referencias foráneas si el padre tenía otro ID en la BD origen
-    const translateForeignKeys = (table: string, row: Record<string, any>): Record<string, any> => {
+    const translateForeignKeys = (row: Record<string, any>): Record<string, any> => {
       const r = { ...row };
-
       const mapFk = (field: string, map: Map<string, any>) => {
         if (r[field] !== null && r[field] !== undefined) {
           const mapped = map.get(String(r[field]));
@@ -380,7 +427,6 @@ export async function applyDeltaToDb(
       mapFk("tasa_ref_moneda_id", monedaIdMap);
       mapFk("moneda_transito_compras_id", monedaIdMap);
       mapFk("moneda_transito_ventas_id", monedaIdMap);
-
       mapFk("caja_id", cajaIdMap);
       mapFk("metodo_pago_id", metodoPagoIdMap);
       mapFk("categoria_id", categoriaIdMap);
@@ -391,23 +437,21 @@ export async function applyDeltaToDb(
       return r;
     };
 
-    // 2. Iterar por cada tabla en orden topológico e insertar/actualizar
+    // 2. Iterar por cada tabla en orden topológico e insertar/actualizar en lotes (batches de 100 filas)
     for (const table of SYNC_TABLES_ORDER) {
-      const rows = payload.tables?.[table];
-      if (!Array.isArray(rows) || rows.length === 0) continue;
+      const rawRows = payload.tables?.[table];
+      if (!Array.isArray(rawRows) || rawRows.length === 0) continue;
 
-      // Obtener las columnas reales que existen en la tabla destino para ser tolerante a versiones
-      const colInfo = await client.query(
-        `SELECT column_name FROM information_schema.columns WHERE table_schema = 'public' AND table_name = $1`,
-        [table]
-      );
-      const validCols = new Set<string>(colInfo.rows.map((c: any) => c.column_name));
-      if (validCols.size === 0) continue;
+      const validCols = colsByTable.get(table);
+      if (!validCols || validCols.size === 0) continue;
 
-      for (const rawRow of rows) {
-        const row = translateForeignKeys(table, rawRow);
+      // Normalizar y reconciliar llaves naturales en memoria
+      const normalizedRows: Record<string, any>[] = [];
+      const seenKeysInBatch = new Map<string, number>();
 
-        // Reconciliación de llaves únicas naturales antes del upsert
+      for (const rawRow of rawRows) {
+        const row = translateForeignKeys(rawRow);
+
         if (table === "monedas" && row.codigo) {
           const key = String(row.codigo).toUpperCase().trim();
           const localId = monedaByCodigo.get(key);
@@ -463,96 +507,98 @@ export async function applyDeltaToDb(
             prodByCodigo.set(key, row.id);
           }
         } else if (table === "metodos_pago" && row.nombre) {
-          const existingMp = await client.query(
-            `SELECT id FROM metodos_pago WHERE LOWER(TRIM(nombre)) = LOWER(TRIM($1)) AND ($2::text IS NULL OR caja_id::text = $2::text) LIMIT 1`,
-            [row.nombre, row.caja_id ? String(row.caja_id) : null]
-          );
-          if (existingMp.rows.length > 0) {
-            const localId = existingMp.rows[0].id;
-            if (String(localId) !== String(row.id)) {
-              metodoPagoIdMap.set(String(row.id), localId);
-              row.id = localId;
-            }
+          const key = `${String(row.nombre).toLowerCase().trim()}::${row.caja_id ? String(row.caja_id) : ""}`;
+          const localId = mpByKey.get(key);
+          if (localId !== undefined && String(localId) !== String(row.id)) {
+            metodoPagoIdMap.set(String(row.id), localId);
+            row.id = localId;
+          } else {
+            mpByKey.set(key, row.id);
           }
         } else if (table === "configuracion" && row.clave) {
-          const existingCfg = await client.query(
-            `SELECT id FROM configuracion WHERE clave = $1 LIMIT 1`,
-            [row.clave]
-          );
-          if (existingCfg.rows.length > 0) {
-            row.id = existingCfg.rows[0].id;
-          }
+          const localId = cfgByClave.get(String(row.clave));
+          if (localId !== undefined) row.id = localId;
+          else cfgByClave.set(String(row.clave), row.id);
         } else if (table === "producto_precios" && row.producto_id && row.moneda_id) {
-          const existingPp = await client.query(
-            `SELECT id FROM producto_precios WHERE producto_id = $1 AND moneda_id = $2 LIMIT 1`,
-            [row.producto_id, row.moneda_id]
-          );
-          if (existingPp.rows.length > 0) {
-            row.id = existingPp.rows[0].id;
-          }
+          const key = `${row.producto_id}::${row.moneda_id}`;
+          const localId = ppByKey.get(key);
+          if (localId !== undefined) row.id = localId;
+          else ppByKey.set(key, row.id);
         } else if (table === "cliente_limites_credito" && row.cliente_id && row.moneda_id) {
-          const existingClc = await client.query(
-            `SELECT id FROM cliente_limites_credito WHERE cliente_id = $1 AND moneda_id = $2 LIMIT 1`,
-            [row.cliente_id, row.moneda_id]
-          );
-          if (existingClc.rows.length > 0) {
-            row.id = existingClc.rows[0].id;
-          }
+          const key = `${row.cliente_id}::${row.moneda_id}`;
+          const localId = clcByKey.get(key);
+          if (localId !== undefined) row.id = localId;
+          else clcByKey.set(key, row.id);
         } else if (table === "producto_presentaciones" && row.producto_id && row.nombre) {
-          const existingPres = await client.query(
-            `SELECT id FROM producto_presentaciones WHERE producto_id = $1 AND LOWER(TRIM(nombre)) = LOWER(TRIM($2)) LIMIT 1`,
-            [row.producto_id, row.nombre]
-          );
-          if (existingPres.rows.length > 0) {
-            row.id = existingPres.rows[0].id;
-          }
+          const key = `${row.producto_id}::${String(row.nombre).toLowerCase().trim()}`;
+          const localId = presByKey.get(key);
+          if (localId !== undefined) row.id = localId;
+          else presByKey.set(key, row.id);
         }
 
-        // Filtrar solo columnas existentes en la tabla destino
-        const cols = Object.keys(row).filter((c) => validCols.has(c) && row[c] !== undefined);
-        if (cols.length === 0) continue;
-
-        const colNames = cols.map((c) => `"${c}"`).join(", ");
-        const placeholders = cols.map((_, i) => `$${i + 1}`).join(", ");
-        const values = cols.map((c) => {
-          const val = row[c];
-          if (val !== null && typeof val === "object" && !(val instanceof Date)) {
-            return JSON.stringify(val);
-          }
-          return val;
-        });
-
-        // Determinar columnas de conflicto (PK / Unique)
-        const conflictTarget =
+        const pkKey =
           table === "producto_proveedores"
-            ? `("producto_id", "proveedor_id")`
-            : `("id")`;
+            ? `${row.producto_id}::${row.proveedor_id}`
+            : String(row.id);
 
-        const updateCols = cols.filter(
-          (c) => c !== "id" && !(table === "producto_proveedores" && (c === "producto_id" || c === "proveedor_id"))
-        );
-
-        let sql: string;
-        if (updateCols.length === 0) {
-          sql = `INSERT INTO "${table}" (${colNames}) VALUES (${placeholders}) ON CONFLICT ${conflictTarget} DO NOTHING`;
+        if (seenKeysInBatch.has(pkKey)) {
+          normalizedRows[seenKeysInBatch.get(pkKey)!] = row;
         } else {
-          const updateSet = updateCols.map((c) => `"${c}" = EXCLUDED."${c}"`).join(", ");
-          // Si la tabla tiene actualizado_en, aplicamos Last-Write-Wins (solo actualizar si el entrante es >= al existente)
-          const lwwWhere =
-            validCols.has("actualizado_en") && cols.includes("actualizado_en")
-              ? ` WHERE "${table}".actualizado_en IS NULL OR EXCLUDED.actualizado_en >= "${table}".actualizado_en`
-              : "";
-          sql = `INSERT INTO "${table}" (${colNames}) VALUES (${placeholders}) ON CONFLICT ${conflictTarget} DO UPDATE SET ${updateSet}${lwwWhere}`;
+          seenKeysInBatch.set(pkKey, normalizedRows.length);
+          normalizedRows.push(row);
         }
+      }
+
+      if (normalizedRows.length === 0) continue;
+
+      const cols = Object.keys(normalizedRows[0]).filter((c) => validCols.has(c));
+      if (cols.length === 0) continue;
+
+      const colNames = cols.map((c) => `"${c}"`).join(", ");
+      const conflictTarget =
+        table === "producto_proveedores" ? `("producto_id", "proveedor_id")` : `("id")`;
+      const updateCols = cols.filter(
+        (c) => c !== "id" && !(table === "producto_proveedores" && (c === "producto_id" || c === "proveedor_id"))
+      );
+      const updateSet = updateCols.map((c) => `"${c}" = EXCLUDED."${c}"`).join(", ");
+      const lwwWhere =
+        validCols.has("actualizado_en") && cols.includes("actualizado_en")
+          ? ` WHERE "${table}".actualizado_en IS NULL OR EXCLUDED.actualizado_en >= "${table}".actualizado_en`
+          : "";
+
+      const BATCH_SIZE = 100;
+      for (let i = 0; i < normalizedRows.length; i += BATCH_SIZE) {
+        const batch = normalizedRows.slice(i, i + BATCH_SIZE);
+        const valueClauses: string[] = [];
+        const params: any[] = [];
+        let paramIdx = 1;
+
+        for (const r of batch) {
+          const rowPlaceholders: string[] = [];
+          for (const c of cols) {
+            rowPlaceholders.push(`$${paramIdx++}`);
+            let val = r[c];
+            if (val !== null && typeof val === "object" && !(val instanceof Date)) {
+              val = JSON.stringify(val);
+            }
+            params.push(val ?? null);
+          }
+          valueClauses.push(`(${rowPlaceholders.join(", ")})`);
+        }
+
+        const batchSql =
+          updateCols.length === 0
+            ? `INSERT INTO "${table}" (${colNames}) VALUES ${valueClauses.join(", ")} ON CONFLICT ${conflictTarget} DO NOTHING`
+            : `INSERT INTO "${table}" (${colNames}) VALUES ${valueClauses.join(", ")} ON CONFLICT ${conflictTarget} DO UPDATE SET ${updateSet}${lwwWhere}`;
 
         try {
-          await client.query("SAVEPOINT sp_sync_row");
-          const res = await client.query(sql, values);
-          await client.query("RELEASE SAVEPOINT sp_sync_row");
+          await client.query("SAVEPOINT sp_sync_batch");
+          const res = await client.query(batchSql, params);
+          await client.query("RELEASE SAVEPOINT sp_sync_batch");
           appliedRows += res.rowCount ?? 0;
-        } catch (rowErr: any) {
-          await client.query("ROLLBACK TO SAVEPOINT sp_sync_row");
-          console.warn(`[Sync] Aviso al sincronizar fila en ${table}:`, rowErr?.message);
+        } catch (batchErr: any) {
+          await client.query("ROLLBACK TO SAVEPOINT sp_sync_batch");
+          console.warn(`[Sync] Aviso en lote de ${table}:`, batchErr?.message);
         }
       }
     }

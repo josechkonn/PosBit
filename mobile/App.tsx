@@ -40,9 +40,9 @@ export default function App() {
   const [user, setUser] = useState<{ id: string; name: string; email: string; role: string } | null>(
     null
   );
-  const [serverUrl, setServerUrl] = useState("https://");
+  const [serverUrl, setServerUrl] = useState("https://pos-bit-pi.vercel.app");
   const [email, setEmail] = useState("admin@admin.com");
-  const [password, setPassword] = useState("");
+  const [password, setPassword] = useState("123123123");
   const [authLoading, setAuthLoading] = useState(false);
 
   const [activeTab, setActiveTab] = useState<TabType>("catalogo");

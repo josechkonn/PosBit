@@ -27,6 +27,9 @@ export async function POST(request: Request) {
       );
     }
 
+    // Asegurar que ensureDatabase() haya terminado antes de que Better Auth consulte "user"
+    await queryOne("SELECT 1");
+
     let signInResult: any;
     try {
       signInResult = await auth.api.signInEmail({

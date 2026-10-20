@@ -38,6 +38,10 @@ BEGIN
         END IF;
     END LOOP;
 
+    -- Eliminar vistas dependientes antes de re-tipar columnas a UUID
+    DROP VIEW IF EXISTS vista_deuda_compras CASCADE;
+    DROP VIEW IF EXISTS vista_deuda_proveedores CASCADE;
+
     -- 2. Eliminar TODAS las FKs que apunten a tablas que vamos a convertir
     -- (incluye FKs desde productos, que no se convierte)
     CREATE TEMP TABLE temp_fks AS

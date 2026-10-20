@@ -396,11 +396,6 @@ ALTER TABLE compras ADD COLUMN IF NOT EXISTS saldo_pendiente NUMERIC(18, 6) NOT 
 ALTER TABLE compras ADD COLUMN IF NOT EXISTS descuento_pct NUMERIC(6, 3) NOT NULL DEFAULT 0;
 ALTER TABLE compras ADD COLUMN IF NOT EXISTS descuento_monto NUMERIC(18, 6) NOT NULL DEFAULT 0;
 
-ALTER TABLE compra_items ADD COLUMN IF NOT EXISTS descuento1_pct NUMERIC(6, 3) NOT NULL DEFAULT 0;
-ALTER TABLE compra_items ADD COLUMN IF NOT EXISTS descuento2_pct NUMERIC(6, 3) NOT NULL DEFAULT 0;
-ALTER TABLE compra_items ADD COLUMN IF NOT EXISTS subtotal_bruto NUMERIC(18, 6) NOT NULL DEFAULT 0;
-ALTER TABLE compra_items ADD COLUMN IF NOT EXISTS descuento_monto NUMERIC(18, 6) NOT NULL DEFAULT 0;
-
 -- Migración: eliminar proveedores duplicados conservando el de menor id
 -- y reasignando las compras al proveedor conservado (requiere tabla compras).
 -- Solo aplica si `proveedores.id` es numérico: tras la migración a UUID,
@@ -456,6 +451,11 @@ CREATE TABLE IF NOT EXISTS compra_items (
     subtotal DECIMAL(18, 2) NOT NULL,
     subtotal_base DECIMAL(18, 2) NOT NULL
 );
+
+ALTER TABLE compra_items ADD COLUMN IF NOT EXISTS descuento1_pct NUMERIC(6, 3) NOT NULL DEFAULT 0;
+ALTER TABLE compra_items ADD COLUMN IF NOT EXISTS descuento2_pct NUMERIC(6, 3) NOT NULL DEFAULT 0;
+ALTER TABLE compra_items ADD COLUMN IF NOT EXISTS subtotal_bruto NUMERIC(18, 6) NOT NULL DEFAULT 0;
+ALTER TABLE compra_items ADD COLUMN IF NOT EXISTS descuento_monto NUMERIC(18, 6) NOT NULL DEFAULT 0;
 
 -- Migración: SNAPSHOT de la presentación comprada (ej. "1 Caja de 24 unidades").
 -- `cantidad` sigue SIENDO unidades (pivota el stock/kardex/retornos); estas
