@@ -45,6 +45,17 @@ export interface LocalPresentacion {
   margen_override: number | null;
 }
 
+export interface LocalConfiguracionGlobal {
+  metodo_conversion_compras: "directa" | "triangulacion";
+  metodo_conversion_ventas: "directa" | "triangulacion";
+  moneda_transito_compras_id: string | null;
+  moneda_transito_ventas_id: string | null;
+  auto_precio_compra?: boolean;
+  redondeo_activo?: boolean;
+  redondeo_multiplo?: number;
+  redondeo_no_bajar_de_costo?: boolean;
+}
+
 export interface LocalProducto {
   id: number;
   codigo: string;
@@ -57,6 +68,7 @@ export interface LocalProducto {
   precio_base: number;
   costo_base?: number;
   moneda_base_id: string | null;
+  moneda_costo_id?: string | null;
   iva_incluido?: number;
   imagen?: string | null;
   activo: number;
@@ -190,7 +202,7 @@ export interface LocalAbonoPendiente {
 
 let dbInstance: SQLite.SQLiteDatabase | null = null;
 let schemaVersionApplied = 0;
-const CURRENT_SCHEMA_VERSION = 5;
+const CURRENT_SCHEMA_VERSION = 6;
 
 export async function getMobileDb(): Promise<SQLite.SQLiteDatabase> {
   if (dbInstance && schemaVersionApplied === CURRENT_SCHEMA_VERSION) return dbInstance;
@@ -387,6 +399,7 @@ export async function getMobileDb(): Promise<SQLite.SQLiteDatabase> {
     `ALTER TABLE productos ADD COLUMN marca_nombre TEXT`,
     `ALTER TABLE productos ADD COLUMN stock_minimo INTEGER NOT NULL DEFAULT 5`,
     `ALTER TABLE productos ADD COLUMN costo_base REAL NOT NULL DEFAULT 0`,
+    `ALTER TABLE productos ADD COLUMN moneda_costo_id TEXT`,
     `ALTER TABLE productos ADD COLUMN iva_incluido INTEGER NOT NULL DEFAULT 1`,
     `ALTER TABLE productos ADD COLUMN imagen TEXT`,
     `ALTER TABLE ventas_locales ADD COLUMN cliente_id INTEGER`,
@@ -589,6 +602,17 @@ export async function saveCatalogOffline(data: {
             cl.actualizado_en ? String(cl.actualizado_en) : new Date().toISOString(),
           ]
         );
+        if (Array.isArray(cl.limites_credito)) {
+          for (const lc of cl.limites_credito) {
+            if (!lc || !lc.moneda_id) continue;
+            await db.runAsync(
+              `INSERT INTO cliente_limites_credito (cliente_id, moneda_id, limite)
+               VALUES (?, ?, ?)
+               ON CONFLICT(cliente_id, moneda_id) DO UPDATE SET limite = excluded.limite`,
+              [Number(cl.id), String(lc.moneda_id), Number(lc.limite) || 0]
+            );
+          }
+        }
       }
     }
 
@@ -606,8 +630,8 @@ export async function saveCatalogOffline(data: {
     if (Array.isArray(data.productos)) {
       for (const p of data.productos) {
         await db.runAsync(
-          `INSERT INTO productos (id, codigo, nombre, categoria_id, categoria_nombre, marca_nombre, stock, stock_minimo, precio_base, costo_base, moneda_base_id, iva_incluido, imagen, activo, actualizado_en)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          `INSERT INTO productos (id, codigo, nombre, categoria_id, categoria_nombre, marca_nombre, stock, stock_minimo, precio_base, costo_base, moneda_base_id, moneda_costo_id, iva_incluido, imagen, activo, actualizado_en)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT(id) DO UPDATE SET
              codigo = excluded.codigo,
              nombre = excluded.nombre,
@@ -619,6 +643,7 @@ export async function saveCatalogOffline(data: {
              precio_base = excluded.precio_base,
              costo_base = excluded.costo_base,
              moneda_base_id = excluded.moneda_base_id,
+             moneda_costo_id = excluded.moneda_costo_id,
              iva_incluido = excluded.iva_incluido,
              imagen = COALESCE(excluded.imagen, productos.imagen),
              activo = excluded.activo,
@@ -635,6 +660,7 @@ export async function saveCatalogOffline(data: {
             Number(p.precio_base) || 0,
             Number(p.costo_base) || 0,
             p.moneda_base_id ? String(p.moneda_base_id) : null,
+            p.moneda_costo_id ? String(p.moneda_costo_id) : null,
             p.iva_incluido === false ? 0 : 1,
             p.imagen ? String(p.imagen) : null,
             p.activo === false ? 0 : 1,
@@ -792,6 +818,39 @@ export async function saveCatalogOffline(data: {
       }
     }
   });
+}
+
+export async function getLocalConfiguracionGlobal(): Promise<LocalConfiguracionGlobal> {
+  const raw = await getMeta("configuracion_global");
+  if (raw) {
+    try {
+      const parsed = JSON.parse(raw);
+      return {
+        metodo_conversion_compras:
+          parsed.metodo_conversion_compras === "triangulacion" ? "triangulacion" : "directa",
+        metodo_conversion_ventas:
+          parsed.metodo_conversion_ventas === "triangulacion" ? "triangulacion" : "directa",
+        moneda_transito_compras_id: parsed.moneda_transito_compras_id
+          ? String(parsed.moneda_transito_compras_id)
+          : null,
+        moneda_transito_ventas_id: parsed.moneda_transito_ventas_id
+          ? String(parsed.moneda_transito_ventas_id)
+          : null,
+        auto_precio_compra: Boolean(parsed.auto_precio_compra),
+        redondeo_activo: Boolean(parsed.redondeo_activo),
+        redondeo_multiplo: Number(parsed.redondeo_multiplo) || 0,
+        redondeo_no_bajar_de_costo: parsed.redondeo_no_bajar_de_costo !== false,
+      };
+    } catch {
+      // Fallback
+    }
+  }
+  return {
+    metodo_conversion_compras: "directa",
+    metodo_conversion_ventas: "directa",
+    moneda_transito_compras_id: null,
+    moneda_transito_ventas_id: null,
+  };
 }
 
 export async function getLocalMonedas(): Promise<LocalMoneda[]> {

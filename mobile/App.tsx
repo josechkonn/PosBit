@@ -18,6 +18,7 @@ import {
 import { Feather } from "@expo/vector-icons";
 import {
   LocalMoneda,
+  LocalConfiguracionGlobal,
   LocalCaja,
   LocalMetodoPago,
   LocalCategoria,
@@ -29,6 +30,7 @@ import {
   LocalVentaPendiente,
   LocalVentaRemota,
   getLocalMonedas,
+  getLocalConfiguracionGlobal,
   getLocalCajas,
   getLocalMetodosPago,
   getLocalCategorias,
@@ -183,6 +185,12 @@ export default function App() {
 
   // Catalog & Data State
   const [monedas, setMonedas] = useState<LocalMoneda[]>([]);
+  const [cfgGlobal, setCfgGlobal] = useState<LocalConfiguracionGlobal>({
+    metodo_conversion_compras: "directa",
+    metodo_conversion_ventas: "directa",
+    moneda_transito_compras_id: null,
+    moneda_transito_ventas_id: null,
+  });
   const [cajas, setCajas] = useState<LocalCaja[]>([]);
   const [metodosPago, setMetodosPago] = useState<LocalMetodoPago[]>([]);
   const [categorias, setCategorias] = useState<LocalCategoria[]>([]);
@@ -271,8 +279,9 @@ export default function App() {
   }, []);
 
   const refreshLocalState = useCallback(async (search = "") => {
-    const [m, c, mp, cats, p, cls, creds, vl, vr, abPend, lastIso] = await Promise.all([
+    const [m, cfg, c, mp, cats, p, cls, creds, vl, vr, abPend, lastIso] = await Promise.all([
       getLocalMonedas(),
+      getLocalConfiguracionGlobal(),
       getLocalCajas(),
       getLocalMetodosPago(),
       getLocalCategorias(),
@@ -286,6 +295,7 @@ export default function App() {
     ]);
 
     setMonedas(m);
+    setCfgGlobal(cfg);
     setCajas(c);
     setMetodosPago(mp);
     setCategorias(cats);
@@ -371,10 +381,15 @@ export default function App() {
     getLocalProductos(posSearch).then(setProductos);
   }, [posSearch, session]);
 
-  // ── Helpers de Moneda y Conversión (idénticos a la Web) ──
+  // ── Motor Oficial de Monedas y Conversión (idéntico a src/lib/money.ts de la Web) ──
   const activeMonedaObj = useMemo(
     () => monedas.find((m) => m.codigo === monedaSeleccionada) || monedas[0] || null,
     [monedas, monedaSeleccionada]
+  );
+
+  const baseMonedaSistema = useMemo(
+    () => monedas.find((m) => m.es_base === 1) || monedas[0] || null,
+    [monedas]
   );
 
   const decMoneda = useCallback(
@@ -385,28 +400,140 @@ export default function App() {
     [monedas, monedaSeleccionada]
   );
 
+  const redondear = useCallback((valor: number, decimales = 2): number => {
+    if (!Number.isFinite(valor)) return 0;
+    const factor = Math.pow(10, decimales);
+    return Math.round((valor + Number.EPSILON) * factor) / factor;
+  }, []);
+
+  const tasaNumerica = useCallback((m: LocalMoneda | null | undefined): number => {
+    const t = Number(m?.tasa);
+    return Number.isFinite(t) && t > 0 ? t : 1;
+  }, []);
+
+  const tasaDirectaUsd = useCallback((m: LocalMoneda | null | undefined): number | null => {
+    if (!m?.usa_tasa_usd_directa) return null;
+    const t = Number(m.tasa_usd_directa);
+    return Number.isFinite(t) && t > 0 ? t : null;
+  }, []);
+
+  const tasaUsd = useCallback(
+    (moneda: LocalMoneda | null | undefined, catalogo: LocalMoneda[] = monedas): number => {
+      if (!moneda) return 1;
+      const directa = tasaDirectaUsd(moneda);
+      if (directa !== null) return directa;
+
+      let tasa = tasaNumerica(moneda);
+      const vistos = new Set<string>([String(moneda.id)]);
+      let refId = moneda.tasa_ref_moneda_id ?? null;
+      let saltos = 0;
+
+      while (refId !== null && refId !== undefined && saltos++ < 10) {
+        const refClave = String(refId);
+        if (vistos.has(refClave)) break;
+        vistos.add(refClave);
+        const ref = catalogo.find((x) => String(x.id) === refClave);
+        if (!ref) break;
+        tasa *= tasaNumerica(ref);
+        refId = ref.tasa_ref_moneda_id ?? null;
+      }
+      return tasa;
+    },
+    [monedas, tasaDirectaUsd, tasaNumerica]
+  );
+
+  const tasaPar = useCallback(
+    (
+      desde: LocalMoneda | null | undefined,
+      hasta: LocalMoneda | null | undefined,
+      catalogo: LocalMoneda[] = monedas
+    ): number => {
+      if (!desde || !hasta) return 1;
+      if (String(desde.id) === String(hasta.id)) return 1;
+
+      const refDesde =
+        desde.tasa_ref_moneda_id == null ? null : String(desde.tasa_ref_moneda_id);
+      if (refDesde !== null && refDesde === String(hasta.id)) {
+        const x =
+          tasaDirectaUsd(desde) !== null
+            ? tasaNumerica(desde)
+            : tasaUsd(desde, catalogo) / tasaUsd(hasta, catalogo);
+        return x > 0 ? 1 / x : 1;
+      }
+
+      const refHasta =
+        hasta.tasa_ref_moneda_id == null ? null : String(hasta.tasa_ref_moneda_id);
+      if (refHasta !== null && refHasta === String(desde.id)) {
+        const x =
+          tasaDirectaUsd(hasta) !== null
+            ? tasaNumerica(hasta)
+            : tasaUsd(hasta, catalogo) / tasaUsd(desde, catalogo);
+        return x > 0 ? x : 1;
+      }
+
+      const tDesde = tasaUsd(desde, catalogo);
+      if (tDesde <= 0) return 1;
+      return tasaUsd(hasta, catalogo) / tDesde;
+    },
+    [monedas, tasaDirectaUsd, tasaNumerica, tasaUsd]
+  );
+
+  const convertirConRegla = useCallback(
+    (
+      monto: number,
+      desde: LocalMoneda | null | undefined,
+      hasta: LocalMoneda | null | undefined,
+      lado: "ventas" | "compras" = "ventas",
+      decimales?: number
+    ): number => {
+      if (!Number.isFinite(monto) || !desde || !hasta) return 0;
+      if (String(desde.id) === String(hasta.id)) return monto;
+      const dec = decimales ?? Number(hasta.decimales ?? 2);
+      const metodo =
+        lado === "compras"
+          ? cfgGlobal.metodo_conversion_compras
+          : cfgGlobal.metodo_conversion_ventas;
+      const transitoId =
+        lado === "compras"
+          ? cfgGlobal.moneda_transito_compras_id
+          : cfgGlobal.moneda_transito_ventas_id;
+      const monedaTransito = transitoId
+        ? monedas.find((m) => String(m.id) === String(transitoId)) || null
+        : null;
+
+      if (metodo === "triangulacion" && monedaTransito) {
+        const factor =
+          tasaPar(desde, monedaTransito, monedas) *
+          tasaPar(monedaTransito, hasta, monedas);
+        return redondear(monto * factor, dec);
+      }
+      return redondear(monto * tasaPar(desde, hasta, monedas), dec);
+    },
+    [cfgGlobal, monedas, tasaPar, redondear]
+  );
+
   const convertirMonto = useCallback(
-    (monto: number, origenIdOrCod: string | null | undefined, destinoCod: string): number => {
+    (
+      monto: number,
+      origenIdOrCod: string | null | undefined,
+      destinoCod: string,
+      lado: "ventas" | "compras" = "ventas"
+    ): number => {
       if (!monto || !Number.isFinite(monto)) return 0;
       const origen =
-        monedas.find((m) => String(m.id) === String(origenIdOrCod) || m.codigo === origenIdOrCod) ||
-        monedas.find((m) => m.es_base === 1) ||
+        monedas.find(
+          (m) => String(m.id) === String(origenIdOrCod) || m.codigo === origenIdOrCod
+        ) ||
+        baseMonedaSistema ||
         monedas[0];
       const destino =
-        monedas.find((m) => m.codigo === destinoCod || String(m.id) === String(destinoCod)) ||
-        activeMonedaObj;
-      if (!origen || !destino || String(origen.id) === String(destino.id)) {
-        return monto;
-      }
-      const tasaOrigen = Number(origen.tasa) || 1;
-      const tasaDestino = Number(destino.tasa) || 1;
-      const enBase = origen.es_base ? monto : monto / tasaOrigen;
-      const convertido = destino.es_base ? enBase : enBase * tasaDestino;
-      const dec = Number(destino.decimales ?? 2);
-      const factor = Math.pow(10, dec);
-      return Math.round((convertido + Number.EPSILON) * factor) / factor;
+        monedas.find(
+          (m) => m.codigo === destinoCod || String(m.id) === String(destinoCod)
+        ) || activeMonedaObj;
+      if (!origen || !destino) return monto;
+      return convertirConRegla(monto, origen, destino, lado, Number(destino.decimales ?? 2));
     },
-    [monedas, activeMonedaObj]
+    [monedas, baseMonedaSistema, activeMonedaObj, convertirConRegla]
   );
 
   const fmt = useCallback(
@@ -415,8 +542,8 @@ export default function App() {
       const m = monedas.find((x) => x.codigo === cod) || activeMonedaObj;
       const sym = m?.simbolo || "$";
       const dec = Number(m?.decimales ?? 2);
-      return `${sym} ${ (Number(val) || 0).toLocaleString("es-VE", {
-        minimumFractionDigits: dec,
+      return `${sym} ${(Number(val) || 0).toLocaleString("es-VE", {
+        minimumFractionDigits: Math.min(2, dec),
         maximumFractionDigits: dec,
       })}`;
     },
@@ -425,9 +552,35 @@ export default function App() {
 
   const precioUnitarioEnMoneda = useCallback(
     (p: LocalProducto, codMoneda = monedaSeleccionada): number => {
-      return convertirMonto(Number(p.precio_base) || 0, p.moneda_base_id, codMoneda);
+      return convertirMonto(Number(p.precio_base) || 0, p.moneda_base_id, codMoneda, "ventas");
     },
     [convertirMonto, monedaSeleccionada]
+  );
+
+  const costoUnitarioEnMoneda = useCallback(
+    (p: LocalProducto, codMoneda = monedaSeleccionada): number => {
+      return convertirMonto(
+        Number(p.costo_base) || 0,
+        p.moneda_costo_id || p.moneda_base_id,
+        codMoneda,
+        "compras"
+      );
+    },
+    [convertirMonto, monedaSeleccionada]
+  );
+
+  const preciosProductoTresMonedas = useCallback(
+    (p: LocalProducto) => {
+      return monedas.map((m) => ({
+        id: m.id,
+        codigo: m.codigo,
+        simbolo: m.simbolo,
+        es_base_prod: String(m.id) === String(p.moneda_base_id || baseMonedaSistema?.id),
+        precio: precioUnitarioEnMoneda(p, m.codigo),
+        costo: costoUnitarioEnMoneda(p, m.codigo),
+      }));
+    },
+    [monedas, baseMonedaSistema, precioUnitarioEnMoneda, costoUnitarioEnMoneda]
   );
 
   const precioDeLineaEnMoneda = useCallback(
@@ -2508,6 +2661,11 @@ export default function App() {
                 value={productosSearch}
                 onChangeText={setProductosSearch}
               />
+              {productosSearch.length > 0 && (
+                <TouchableOpacity onPress={() => setProductosSearch("")}>
+                  <Feather name="x-circle" size={16} color={THEME.mutedForeground} />
+                </TouchableOpacity>
+              )}
             </View>
           </View>
 
@@ -2521,22 +2679,148 @@ export default function App() {
             keyExtractor={(item) => String(item.id)}
             contentContainerStyle={{ padding: 12, paddingBottom: 90, gap: 10 }}
             renderItem={({ item }) => {
-              const precio = precioUnitarioEnMoneda(item, monedaSeleccionada);
+              const preciosTres = preciosProductoTresMonedas(item);
+              const sinStock = item.stock <= 0;
+              const bajoStock = item.stock > 0 && item.stock <= (item.stock_minimo || 5);
+              const pBase = Number(item.precio_base) || 0;
+              const cBase = Number(item.costo_base) || 0;
+              const margen =
+                pBase > 0 && cBase > 0 ? redondear(((pBase - cBase) / cBase) * 100, 2) : null;
+
               return (
                 <View style={styles.card}>
                   <View style={styles.creditoCardHeader}>
                     <View style={{ flex: 1 }}>
-                      <Text style={styles.clientCardName}>{item.nombre}</Text>
+                      <View style={{ flexDirection: "row", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+                        <Text style={styles.clientCardName}>{item.nombre}</Text>
+                        <View
+                          style={[
+                            styles.ivaBadge,
+                            item.iva_incluido !== 0 && {
+                              backgroundColor: THEME.secondary,
+                              borderColor: THEME.primary,
+                            },
+                          ]}
+                        >
+                          <Text
+                            style={[
+                              styles.ivaBadgeText,
+                              item.iva_incluido !== 0 && { color: THEME.primary600 },
+                            ]}
+                          >
+                            {item.iva_incluido !== 0 ? "IVA Incl." : "+IVA"}
+                          </Text>
+                        </View>
+                        {margen !== null && (
+                          <View
+                            style={[
+                              styles.ivaBadge,
+                              {
+                                backgroundColor: THEME.warningSoft,
+                                borderColor: THEME.warningBorder,
+                              },
+                            ]}
+                          >
+                            <Text style={styles.ivaBadgeText}>Margen {margen}%</Text>
+                          </View>
+                        )}
+                      </View>
                       <Text style={styles.clientCardMeta}>
                         Código: {item.codigo}
                         {item.categoria_nombre ? ` · ${item.categoria_nombre}` : ""}
+                        {item.marca_nombre ? ` · ${item.marca_nombre}` : ""}
                       </Text>
                     </View>
-                    <View style={{ alignItems: "flex-end" }}>
-                      <Text style={styles.posProdPrice}>
-                        {fmt(precio, monedaSeleccionada)}
+
+                    <View
+                      style={[
+                        styles.stockBadge,
+                        sinStock
+                          ? styles.stockBadgeDanger
+                          : bajoStock
+                          ? styles.stockBadgeWarning
+                          : styles.stockBadgeSuccess,
+                      ]}
+                    >
+                      <Text
+                        style={[
+                          styles.stockBadgeText,
+                          sinStock
+                            ? { color: THEME.dangerStrong }
+                            : bajoStock
+                            ? { color: THEME.warningStrong }
+                            : { color: THEME.successStrong },
+                        ]}
+                      >
+                        Stock: {item.stock}
                       </Text>
-                      <Text style={styles.clientCardMeta}>Stock: {item.stock} und.</Text>
+                    </View>
+                  </View>
+
+                  {/* Precios de Venta y Costos en las 3 Monedas (USD, VES, COP) */}
+                  <View
+                    style={{
+                      marginTop: 10,
+                      backgroundColor: THEME.inputBg,
+                      borderRadius: 8,
+                      borderWidth: 1,
+                      borderColor: THEME.border,
+                      padding: 9,
+                      gap: 6,
+                    }}
+                  >
+                    <Text style={styles.fieldLabelSmall}>
+                      PRECIO DE VENTA POR MONEDA ({cfgGlobal.metodo_conversion_ventas.toUpperCase()})
+                    </Text>
+                    <View style={{ flexDirection: "row", justifyContent: "space-between", gap: 6 }}>
+                      {preciosTres.map((pm) => (
+                        <View
+                          key={`pv-${pm.codigo}`}
+                          style={{
+                            flex: 1,
+                            backgroundColor: pm.codigo === monedaSeleccionada ? THEME.accent : THEME.card,
+                            borderWidth: 1,
+                            borderColor: pm.codigo === monedaSeleccionada ? THEME.primary : THEME.border,
+                            borderRadius: 6,
+                            paddingHorizontal: 7,
+                            paddingVertical: 5,
+                          }}
+                        >
+                          <Text
+                            style={{
+                              fontSize: 9,
+                              fontWeight: "800",
+                              color:
+                                pm.codigo === monedaSeleccionada
+                                  ? THEME.primary600
+                                  : THEME.mutedForeground,
+                            }}
+                          >
+                            {pm.codigo} {pm.es_base_prod ? "★" : ""}
+                          </Text>
+                          <Text
+                            style={{
+                              fontSize: 12,
+                              fontWeight: "800",
+                              color: THEME.foreground,
+                              marginTop: 1,
+                            }}
+                            numberOfLines={1}
+                          >
+                            {fmt(pm.precio, pm.codigo)}
+                          </Text>
+                          <Text
+                            style={{
+                              fontSize: 9,
+                              color: THEME.mutedForeground,
+                              marginTop: 1,
+                            }}
+                            numberOfLines={1}
+                          >
+                            Costo: {fmt(pm.costo, pm.codigo)}
+                          </Text>
+                        </View>
+                      ))}
                     </View>
                   </View>
                 </View>
@@ -2604,19 +2888,118 @@ export default function App() {
             </View>
           </View>
 
-          {/* Tasas de Cambio Activas */}
+          {/* Tasas de Cambio Activas (con detalle de Directo USD y Referencia) */}
           <View style={styles.card}>
             <Text style={styles.cardSectionTitle}>Monedas y Tasas Sincronizadas</Text>
-            {monedas.map((m) => (
-              <View key={m.id} style={styles.summaryRow}>
-                <Text style={styles.summaryLabel}>
-                  {m.nombre} ({m.codigo}) {m.es_base === 1 ? "· Base" : ""}
-                </Text>
-                <Text style={styles.summaryVal}>
-                  {m.simbolo} {Number(m.tasa).toFixed(2)}
+            <View style={{ gap: 8, marginTop: 8 }}>
+              {monedas.map((m) => {
+                const refMon = m.tasa_ref_moneda_id
+                  ? monedas.find((x) => String(x.id) === String(m.tasa_ref_moneda_id))
+                  : baseMonedaSistema;
+                const directa = tasaDirectaUsd(m);
+                const tasaEfectivaUsd = tasaUsd(m, monedas);
+
+                return (
+                  <View
+                    key={m.id}
+                    style={{
+                      backgroundColor: THEME.inputBg,
+                      borderWidth: 1,
+                      borderColor: THEME.border,
+                      borderRadius: 8,
+                      padding: 10,
+                      gap: 4,
+                    }}
+                  >
+                    <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center" }}>
+                      <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
+                        <Text style={{ fontSize: 13, fontWeight: "800", color: THEME.foreground }}>
+                          {m.nombre} ({m.codigo})
+                        </Text>
+                        {m.es_base === 1 && (
+                          <View
+                            style={[
+                              styles.statusBadge,
+                              { backgroundColor: THEME.secondary, borderColor: THEME.primary },
+                            ]}
+                          >
+                            <Text style={[styles.statusBadgeText, { color: THEME.primary600 }]}>
+                              Moneda Base
+                            </Text>
+                          </View>
+                        )}
+                        {directa !== null && (
+                          <View
+                            style={[
+                              styles.statusBadge,
+                              { backgroundColor: THEME.successSoft, borderColor: THEME.successBorder },
+                            ]}
+                          >
+                            <Text style={[styles.statusBadgeText, { color: THEME.successStrong }]}>
+                              USD ↔ {m.codigo} Directo
+                            </Text>
+                          </View>
+                        )}
+                      </View>
+                      <Text style={{ fontSize: 13, fontWeight: "800", color: THEME.primary600 }}>
+                        1 USD = {m.simbolo} {Number(tasaEfectivaUsd).toLocaleString("es-VE", { maximumFractionDigits: 4 })}
+                      </Text>
+                    </View>
+
+                    {m.es_base !== 1 && (
+                      <View style={{ flexDirection: "row", justifyContent: "space-between", flexWrap: "wrap", gap: 6 }}>
+                        <Text style={styles.clientCardMeta}>
+                          Tasa Ref ({refMon?.codigo || "USD"}): 1 {refMon?.codigo || "USD"} = {m.simbolo}{" "}
+                          {Number(m.tasa).toLocaleString("es-VE", { maximumFractionDigits: 4 })} {m.codigo}
+                        </Text>
+                        {directa !== null && (
+                          <Text style={[styles.clientCardMeta, { color: THEME.successStrong, fontWeight: "700" }]}>
+                            Tasa Directa USD: {m.simbolo} {Number(directa).toLocaleString("es-VE", { maximumFractionDigits: 4 })} / USD
+                          </Text>
+                        )}
+                      </View>
+                    )}
+                  </View>
+                );
+              })}
+            </View>
+          </View>
+
+          {/* Motor de Conversión (CPP) sincronizado con la principal */}
+          <View style={styles.card}>
+            <Text style={styles.cardSectionTitle}>Reglas del Motor de Conversión (CPP)</Text>
+            <View style={{ marginTop: 6, gap: 4 }}>
+              <View style={styles.summaryRow}>
+                <Text style={styles.summaryLabel}>Conversión en Ventas:</Text>
+                <Text style={[styles.summaryVal, { color: THEME.primary600 }]}>
+                  {cfgGlobal.metodo_conversion_ventas === "triangulacion"
+                    ? `Triangulación (vía ${
+                        monedas.find((x) => String(x.id) === String(cfgGlobal.moneda_transito_ventas_id))
+                          ?.codigo || "Base"
+                      })`
+                    : "Directa"}
                 </Text>
               </View>
-            ))}
+              <View style={styles.summaryRow}>
+                <Text style={styles.summaryLabel}>Conversión en Compras:</Text>
+                <Text style={styles.summaryVal}>
+                  {cfgGlobal.metodo_conversion_compras === "triangulacion"
+                    ? `Triangulación (vía ${
+                        monedas.find((x) => String(x.id) === String(cfgGlobal.moneda_transito_compras_id))
+                          ?.codigo || "Base"
+                      })`
+                    : "Directa"}
+                </Text>
+              </View>
+              <View style={styles.summaryRow}>
+                <Text style={styles.summaryLabel}>Redondeo de Precios:</Text>
+                <Text style={styles.summaryVal}>
+                  {cfgGlobal.redondeo_activo
+                    ? `Activo (Múltiplo ${cfgGlobal.redondeo_multiplo || 0})`
+                    : "Inactivo"}
+                </Text>
+              </View>
+            </View>
           </View>
 
           {/* Estado de Sincronización Automática */}

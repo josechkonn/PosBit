@@ -11,6 +11,7 @@ import { NextResponse } from "next/server";
 import { requireSession, requireRole } from "@/lib/auth-server";
 import { transaction } from "@/lib/db";
 import { getConfiguracionGlobal } from "@/lib/global-config";
+import { triggerBackgroundSync } from "@/lib/sync-engine";
 
 export async function GET() {
   try {
@@ -59,6 +60,7 @@ export async function PUT(request: Request) {
     });
 
     const cfg = await getConfiguracionGlobal();
+    triggerBackgroundSync();
     return NextResponse.json(cfg);
   } catch (error) {
     console.error("Error al guardar configuracion_global:", error);

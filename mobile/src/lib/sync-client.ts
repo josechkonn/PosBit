@@ -201,13 +201,31 @@ export async function syncMobileWithCloud(): Promise<{
     }
   }
 
-  // 3. Descargar catálogo e inventario optimizado (`mode=mobile`) desde `/api/sync`
+  // 3. Descargar catálogo, monedas, configuración de conversión, clientes y créditos en paralelo
   const lastSync = await getMeta("last_pull_iso");
   const syncUrl = lastSync
     ? `${serverUrl}/api/sync?mode=mobile&since=${encodeURIComponent(lastSync)}`
     : `${serverUrl}/api/sync?mode=mobile`;
 
-  const pullRes = await fetch(syncUrl, { method: "GET", headers });
+  const fetchJsonSafe = async (url: string) => {
+    try {
+      const r = await fetch(url, { method: "GET", headers });
+      if (!r.ok) return null;
+      return await r.json();
+    } catch {
+      return null;
+    }
+  };
+
+  const [pullRes, monedasDirect, cfgGlobalDirect, clientesDirect, creditosDirect] =
+    await Promise.all([
+      fetch(syncUrl, { method: "GET", headers }),
+      fetchJsonSafe(`${serverUrl}/api/monedas`),
+      fetchJsonSafe(`${serverUrl}/api/configuracion-global`),
+      fetchJsonSafe(`${serverUrl}/api/clientes?limit=500`),
+      fetchJsonSafe(`${serverUrl}/api/creditos`),
+    ]);
+
   const pullText = await pullRes.text();
   let delta: any;
   try {
@@ -228,17 +246,30 @@ export async function syncMobileWithCloud(): Promise<{
   }
 
   const prods = delta.tables?.productos || [];
+  const monedasMerged =
+    Array.isArray(monedasDirect) && monedasDirect.length > 0
+      ? monedasDirect
+      : delta.tables?.monedas;
+  const clientesMerged =
+    Array.isArray(clientesDirect?.data) && clientesDirect.data.length > 0
+      ? clientesDirect.data
+      : delta.tables?.clientes;
+  const creditosMerged =
+    Array.isArray(creditosDirect?.creditos) && creditosDirect.creditos.length > 0
+      ? creditosDirect.creditos
+      : delta.tables?.creditos;
+
   await saveCatalogOffline({
-    configuracion_global: delta.tables?.configuracion_global,
-    monedas: delta.tables?.monedas,
+    configuracion_global: cfgGlobalDirect || delta.tables?.configuracion_global,
+    monedas: monedasMerged,
     cajas: delta.tables?.cajas,
     metodos_pago: delta.tables?.metodos_pago,
     categorias: delta.tables?.categorias,
-    clientes: delta.tables?.clientes,
+    clientes: clientesMerged,
     cliente_limites_credito: delta.tables?.cliente_limites_credito,
     productos: prods,
     producto_presentaciones: delta.tables?.producto_presentaciones,
-    creditos: delta.tables?.creditos,
+    creditos: creditosMerged,
     abonos: delta.tables?.abonos,
     ventas: delta.tables?.ventas,
     eliminados: delta.eliminados,
