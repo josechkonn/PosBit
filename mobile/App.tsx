@@ -29,6 +29,7 @@ import {
   LocalAbono,
   LocalVentaPendiente,
   LocalVentaRemota,
+  LocalVentaItemRemoto,
   getLocalMonedas,
   getLocalConfiguracionGlobal,
   getLocalCajas,
@@ -39,6 +40,7 @@ import {
   getLocalCreditos,
   getLocalAbonosByCredito,
   getLocalVentasRemotas,
+  getLocalVentaItemsRemotos,
   getVentasLocales,
   getAbonosLocalesPendientes,
   createOfflineSale,
@@ -52,6 +54,8 @@ import {
   saveClienteCloud,
   patchClienteLimiteCloud,
   registrarAbonoMobile,
+  pagarDeudaGlobalMobile,
+  fetchClientePerfilCloud,
 } from "./src/lib/sync-client";
 
 const DEFAULT_CLOUD_URL = "https://pos-bit-pi.vercel.app";
@@ -124,6 +128,16 @@ interface CobroExtra {
   concepto: string;
   montoStr: string;
   monedaCodigo: string;
+}
+
+interface PerfilMoneda {
+  moneda_id: string;
+  codigo: string;
+  simbolo: string;
+  es_base: boolean;
+  decimales: number;
+  limite: number;
+  deuda: number;
 }
 
 const PRESETS_COBRO_EXTRA = ["Delivery", "Envío", "Bolsa", "Propina", "Servicio"];
@@ -204,6 +218,7 @@ export default function App() {
   }>({ creditos: [], por_cobrar: [], pendientes: 0, pagados: 0 });
   const [ventasLocales, setVentasLocales] = useState<LocalVentaPendiente[]>([]);
   const [ventasRemotas, setVentasRemotas] = useState<LocalVentaRemota[]>([]);
+  const [ventaItemsRemotos, setVentaItemsRemotos] = useState<LocalVentaItemRemoto[]>([]);
   const [abonosPendCount, setAbonosPendCount] = useState(0);
 
   // Sync Status
@@ -239,8 +254,37 @@ export default function App() {
   const [limiteInputStr, setLimiteInputStr] = useState("");
   const [receiptModal, setReceiptModal] = useState<any | null>(null);
 
-  // Clientes Module State
+  // Clientes Module & Perfil del Cliente State
   const [clientesSearch, setClientesSearch] = useState("");
+  const [perfilClienteId, setPerfilClienteId] = useState<string | null>(null);
+  const [perfilTab, setPerfilTab] = useState<"ventas" | "creditos" | "retornos" | "productos">("ventas");
+  const [perfilCloudData, setPerfilCloudData] = useState<{
+    detalle: any | null;
+    ventas: any[];
+    ventaItems: any[];
+    creditos: any[];
+    retornos: any[];
+    retornoItems: any[];
+  } | null>(null);
+  const [perfilLoadingCloud, setPerfilLoadingCloud] = useState(false);
+  const [ventaDetailModal, setVentaDetailModal] = useState<{ venta: any; items: any[] } | null>(null);
+
+  // Modal Ajustar Límite de Crédito (clon de CreditoLimiteModal web)
+  const [creditoLimiteCliente, setCreditoLimiteCliente] = useState<LocalCliente | null>(null);
+  const [clLimMonedaId, setClLimMonedaId] = useState<string>("");
+  const [clLimOperacion, setClLimOperacion] = useState<"add" | "remove">("add");
+  const [clLimMontoStr, setClLimMontoStr] = useState<string>("");
+  const [savingCreditoLimite, setSavingCreditoLimite] = useState(false);
+
+  // Modal Pagar Deuda Global / Abono Global FIFO (clon de PagarDeudaModal web)
+  const [pagoDeudaCliente, setPagoDeudaCliente] = useState<LocalCliente | null>(null);
+  const [pdMonedaId, setPdMonedaId] = useState<string>("");
+  const [pdMontoStr, setPdMontoStr] = useState<string>("");
+  const [pdMetodoPagoId, setPdMetodoPagoId] = useState<string>("");
+  const [pdCajaId, setPdCajaId] = useState<string>("");
+  const [pdObs, setPdObs] = useState<string>("");
+  const [savingPagoDeuda, setSavingPagoDeuda] = useState(false);
+
   const [clienteModalOpen, setClienteModalOpen] = useState(false);
   const [editingCliente, setEditingCliente] = useState<LocalCliente | null>(null);
   const [clFormNombre, setClFormNombre] = useState("");
@@ -279,7 +323,7 @@ export default function App() {
   }, []);
 
   const refreshLocalState = useCallback(async (search = "") => {
-    const [m, cfg, c, mp, cats, p, cls, creds, vl, vr, abPend, lastIso] = await Promise.all([
+    const [m, cfg, c, mp, cats, p, cls, creds, vl, vr, vir, abPend, lastIso] = await Promise.all([
       getLocalMonedas(),
       getLocalConfiguracionGlobal(),
       getLocalCajas(),
@@ -290,6 +334,7 @@ export default function App() {
       getLocalCreditos(),
       getVentasLocales(),
       getLocalVentasRemotas(),
+      getLocalVentaItemsRemotos(),
       getAbonosLocalesPendientes(),
       getMeta("last_pull_iso"),
     ]);
@@ -304,6 +349,7 @@ export default function App() {
     setCreditosData(creds);
     setVentasLocales(vl);
     setVentasRemotas(vr);
+    setVentaItemsRemotos(vir);
     setAbonosPendCount(abPend.length);
     setLastSyncIso(lastIso);
 
@@ -1243,6 +1289,11 @@ export default function App() {
 
       setAbonoModalCredito(null);
       await refreshLocalState(posSearch);
+      if (perfilClienteId) {
+        fetchClientePerfilCloud(perfilClienteId).then((res) => {
+          if (res) setPerfilCloudData(res);
+        });
+      }
       runSilentSync();
       showToast("Abono registrado correctamente", "success");
     } catch (e: any) {
@@ -1258,10 +1309,470 @@ export default function App() {
     setHistorialAbonos(list);
   };
 
+  // ── Perfil del Cliente (Clon completo de /clientes/[id] de la Web) ──
+  const openPerfilCliente = useCallback(async (cid: string) => {
+    setPerfilClienteId(cid);
+    setPerfilTab("ventas");
+    setPerfilCloudData(null);
+    setRoute("clientes");
+    setPerfilLoadingCloud(true);
+    try {
+      const cloud = await fetchClientePerfilCloud(cid);
+      if (cloud) {
+        setPerfilCloudData(cloud);
+      }
+    } finally {
+      setPerfilLoadingCloud(false);
+    }
+  }, []);
+
+  const perfilClienteObj = useMemo(
+    () => (perfilClienteId ? clientes.find((c) => String(c.id) === String(perfilClienteId)) || null : null),
+    [clientes, perfilClienteId]
+  );
+
+  // Monedas del perfil con límite y deuda en cada moneda activa (igual que en /clientes/[id])
+  const perfilMonedas = useMemo<PerfilMoneda[]>(() => {
+    if (!perfilClienteObj) return [];
+    if (Array.isArray(perfilCloudData?.detalle?.cliente?.monedas) && perfilCloudData.detalle.cliente.monedas.length > 0) {
+      return perfilCloudData.detalle.cliente.monedas.map((m: any) => ({
+        moneda_id: String(m.moneda_id),
+        codigo: String(m.codigo),
+        simbolo: String(m.simbolo || "$"),
+        es_base: Boolean(m.es_base),
+        decimales: Number(m.decimales ?? 2),
+        limite: Number(m.limite) || 0,
+        deuda: Number(m.deuda) || 0,
+      }));
+    }
+    return monedas.map((m) => {
+      const limRow = perfilClienteObj.limites_credito.find((l) => String(l.moneda_id) === String(m.id) || l.codigo === m.codigo);
+      const deudaRow = perfilClienteObj.deuda_total.find((d) => d.codigo === m.codigo);
+      return {
+        moneda_id: m.id,
+        codigo: m.codigo,
+        simbolo: m.simbolo,
+        es_base: m.es_base === 1,
+        decimales: m.decimales,
+        limite: Number(limRow?.limite ?? 0),
+        deuda: Number(deudaRow?.monto ?? 0),
+      };
+    });
+  }, [perfilClienteObj, perfilCloudData, monedas]);
+
+  // Ventas del cliente (combina servidor o SQLite local + ventas móviles pendientes)
+  const perfilVentas = useMemo(() => {
+    if (!perfilClienteId) return [];
+    if (Array.isArray(perfilCloudData?.ventas) && perfilCloudData.ventas.length > 0) {
+      return perfilCloudData.ventas;
+    }
+    const remotasCli = ventasRemotas
+      .filter((v) => String(v.cliente_id) === String(perfilClienteId))
+      .map((v) => {
+        const itemsCnt = ventaItemsRemotos.filter((vi) => String(vi.venta_id) === String(v.id)).length;
+        const cr = creditosData.creditos.find((c) => String(c.venta_id) === String(v.id));
+        return {
+          ...v,
+          items_count: itemsCnt,
+          credito_id: cr?.id || null,
+          credito_saldo: cr?.saldo || 0,
+          credito_estado: cr?.estado || null,
+        };
+      });
+    const localesCli = ventasLocales
+      .filter((v) => String(v.cliente_id) === String(perfilClienteId) && v.sincronizado === 0)
+      .map((v) => {
+        const mon = monedas.find((m) => String(m.id) === String(v.moneda_id));
+        let parsedItems: any[] = [];
+        try {
+          parsedItems = JSON.parse(v.items_json || "[]");
+        } catch {}
+        return {
+          id: v.id,
+          numero: v.numero,
+          cliente_id: v.cliente_id,
+          cliente_nombre: v.cliente_nombre,
+          fecha: v.fecha,
+          total: v.total,
+          moneda_id: v.moneda_id,
+          moneda_codigo: mon?.codigo || "USD",
+          moneda_simbolo: mon?.simbolo || "$",
+          tipo_pago: v.tipo_pago || "Contado",
+          metodo_pago_nombre: "App Móvil (En cola)",
+          estado: "Sincronizando",
+          items_count: parsedItems.length,
+          local_items: parsedItems,
+        };
+      });
+    return [...localesCli, ...remotasCli];
+  }, [perfilClienteId, perfilCloudData, ventasRemotas, ventaItemsRemotos, creditosData.creditos, ventasLocales, monedas]);
+
+  // Créditos del cliente
+  const perfilCreditos = useMemo(() => {
+    if (!perfilClienteId) return [];
+    const localCreds = creditosData.creditos.filter((cr) => String(cr.cliente_id) === String(perfilClienteId));
+    if (localCreds.length > 0) return localCreds;
+    if (Array.isArray(perfilCloudData?.creditos)) {
+      return perfilCloudData.creditos.map((r: any) => ({
+        id: String(r.id),
+        numero: String(r.numero),
+        venta_id: r.venta_id ? String(r.venta_id) : null,
+        venta_numero: r.venta_numero || null,
+        cliente_id: String(r.cliente_id),
+        cliente_nombre: String(r.cliente_nombre || perfilClienteObj?.nombre || ""),
+        cliente_documento: r.cliente_documento || null,
+        cliente_telefono: r.cliente_telefono || null,
+        fecha: String(r.fecha || "").slice(0, 10),
+        fecha_vencimiento: null,
+        moneda_id: String(r.moneda_id),
+        moneda_codigo: String(r.moneda_codigo || "USD"),
+        moneda_simbolo: String(r.moneda_simbolo || "$"),
+        monto_total: Number(r.monto_total) || 0,
+        saldo: Number(r.saldo) || 0,
+        abonado: Number(r.abonado) || Math.max(0, (Number(r.monto_total) || 0) - (Number(r.saldo) || 0)),
+        estado: r.estado || "Pendiente",
+        abonos_count: Number(r.abonos_count) || 0,
+      }));
+    }
+    return [];
+  }, [perfilClienteId, creditosData.creditos, perfilCloudData, perfilClienteObj]);
+
+  // Retornos del cliente
+  const perfilRetornos = useMemo(() => {
+    if (!perfilClienteId) return [];
+    return Array.isArray(perfilCloudData?.retornos) ? perfilCloudData.retornos : [];
+  }, [perfilClienteId, perfilCloudData]);
+
+  // Top Productos más comprados por el cliente (usa el ranking del servidor o lo calcula de SQLite)
+  const perfilTopProductos = useMemo(() => {
+    if (!perfilClienteId) return [];
+    if (Array.isArray(perfilCloudData?.detalle?.top_productos) && perfilCloudData.detalle.top_productos.length > 0) {
+      return perfilCloudData.detalle.top_productos;
+    }
+    // Cálculo offline instantáneo desde ventas_remotas + venta_items_remotos
+    const ventaIdsSet = new Set(
+      ventasRemotas
+        .filter((v) => String(v.cliente_id) === String(perfilClienteId))
+        .map((v) => String(v.id))
+    );
+    const map = new Map<
+      number,
+      {
+        producto_id: number;
+        codigo: string;
+        nombre: string;
+        cantidad_total: number;
+        ventasSet: Set<string>;
+        monto_base: number;
+      }
+    >();
+    for (const vi of ventaItemsRemotos) {
+      if (!ventaIdsSet.has(String(vi.venta_id))) continue;
+      const pid = Number(vi.producto_id);
+      const curr = map.get(pid) || {
+        producto_id: pid,
+        codigo: vi.producto_codigo || `#${pid}`,
+        nombre: vi.producto_nombre || "Producto",
+        cantidad_total: 0,
+        ventasSet: new Set<string>(),
+        monto_base: 0,
+      };
+      curr.cantidad_total += Number(vi.cantidad) || 0;
+      curr.ventasSet.add(String(vi.venta_id));
+      curr.monto_base += Math.max(0, (Number(vi.subtotal_base) || 0) - (Number(vi.descuento_base) || 0));
+      map.set(pid, curr);
+    }
+    return Array.from(map.values())
+      .map((x) => ({
+        producto_id: x.producto_id,
+        codigo: x.codigo,
+        nombre: x.nombre,
+        cantidad_total: x.cantidad_total,
+        veces: x.ventasSet.size,
+        monto_base: x.monto_base,
+      }))
+      .sort((a, b) => b.monto_base - a.monto_base)
+      .slice(0, 20);
+  }, [perfilClienteId, perfilCloudData, ventasRemotas, ventaItemsRemotos]);
+
+  // Estadísticas agregadas del perfil (Total comprado USD, Ticket promedio USD, Última compra)
+  const perfilStats = useMemo(() => {
+    if (perfilCloudData?.detalle?.stats) {
+      return {
+        ventas_count: Number(perfilCloudData.detalle.stats.ventas_count || perfilVentas.length),
+        retornos_count: Number(perfilCloudData.detalle.stats.retornos_count || perfilRetornos.length),
+        total_comprado_base: Number(perfilCloudData.detalle.stats.total_comprado_base || 0),
+        ticket_promedio_base: Number(perfilCloudData.detalle.stats.ticket_promedio_base || 0),
+        ultima_compra: perfilCloudData.detalle.stats.ultima_compra || (perfilVentas[0]?.fecha ?? null),
+      };
+    }
+    const baseCod = baseMonedaSistema?.codigo || "USD";
+    let sumaBase = 0;
+    let ultima: string | null = null;
+    for (const v of perfilVentas) {
+      const mCod = v.moneda_codigo || baseCod;
+      sumaBase += convertirMonto(Number(v.total) || 0, mCod, baseCod);
+      if (v.fecha && (!ultima || String(v.fecha) > ultima)) {
+        ultima = String(v.fecha).slice(0, 10);
+      }
+    }
+    const cnt = perfilVentas.length;
+    return {
+      ventas_count: cnt,
+      retornos_count: perfilRetornos.length,
+      total_comprado_base: sumaBase,
+      ticket_promedio_base: cnt > 0 ? sumaBase / cnt : 0,
+      ultima_compra: ultima,
+    };
+  }, [perfilCloudData, perfilVentas, perfilRetornos, baseMonedaSistema, convertirMonto]);
+
+  // Ver ítems de una factura en el perfil
+  const handleOpenVentaDetail = useCallback(
+    (v: any) => {
+      if (Array.isArray(v.local_items)) {
+        setVentaDetailModal({ venta: v, items: v.local_items });
+        return;
+      }
+      const cloudItems = Array.isArray(perfilCloudData?.ventaItems)
+        ? perfilCloudData.ventaItems.filter((i: any) => String(i.venta_id) === String(v.id))
+        : [];
+      if (cloudItems.length > 0) {
+        setVentaDetailModal({ venta: v, items: cloudItems });
+        return;
+      }
+      const localItems = ventaItemsRemotos.filter((i) => String(i.venta_id) === String(v.id));
+      setVentaDetailModal({ venta: v, items: localItems });
+    },
+    [perfilCloudData, ventaItemsRemotos]
+  );
+
+  // ── Modal Ajustar Límite de Crédito (clon de CreditoLimiteModal web) ──
+  const openAjustarCreditoModal = useCallback(
+    (cli: LocalCliente, monedaInicialId?: string, op: "add" | "remove" = "add") => {
+      setCreditoLimiteCliente(cli);
+      const baseM = monedas.find((m) => m.es_base === 1) || monedas[0];
+      setClLimMonedaId(monedaInicialId || baseM?.id || "");
+      setClLimOperacion(op);
+      setClLimMontoStr("");
+    },
+    [monedas]
+  );
+
+  const handleConfirmAjustarCredito = async () => {
+    if (!creditoLimiteCliente || !clLimMonedaId) return;
+    const val = parseFloat(clLimMontoStr.replace(",", "."));
+    if (!Number.isFinite(val) || val <= 0) {
+      showToast("Ingresa un monto válido mayor a 0", "error");
+      return;
+    }
+    const limRow = creditoLimiteCliente.limites_credito.find(
+      (l) => String(l.moneda_id) === String(clLimMonedaId)
+    );
+    const limiteActual = Number(limRow?.limite ?? 0);
+    const nuevoLimite =
+      clLimOperacion === "add" ? limiteActual + val : Math.max(0, limiteActual - val);
+    const monObj = monedas.find((m) => String(m.id) === String(clLimMonedaId));
+
+    setSavingCreditoLimite(true);
+    try {
+      await patchClienteLimiteCloud({
+        id: creditoLimiteCliente.id,
+        moneda_id: clLimMonedaId,
+        limite: nuevoLimite,
+        ...(clLimOperacion === "add" ? { recibe_credito: true } : {}),
+      });
+      await refreshLocalState(posSearch);
+      if (perfilClienteId) {
+        fetchClientePerfilCloud(perfilClienteId).then((res) => {
+          if (res) setPerfilCloudData(res);
+        });
+      }
+      setCreditoLimiteCliente(null);
+      showToast(
+        clLimOperacion === "add"
+          ? `Crédito añadido: límite en ${monObj?.codigo || ""} ahora es ${fmt(nuevoLimite, monObj?.codigo)}`
+          : `Crédito reducido: límite en ${monObj?.codigo || ""} ahora es ${fmt(nuevoLimite, monObj?.codigo)}`,
+        "success"
+      );
+    } catch (e: any) {
+      showToast(e?.message || "Error al actualizar el límite de crédito", "error");
+    } finally {
+      setSavingCreditoLimite(false);
+    }
+  };
+
+  // ── Modal Pagar Deuda Global / Abono Global FIFO (clon exacto de PagarDeudaModal web) ──
+  const openPagoDeudaGlobal = useCallback(
+    (cli: LocalCliente, monedaInicialId?: string) => {
+      setPagoDeudaCliente(cli);
+      const baseM = monedas.find((m) => m.es_base === 1) || monedas[0];
+      setPdMonedaId(monedaInicialId || baseM?.id || "");
+      setPdMontoStr("");
+      const mpDefault = metodosPago[0];
+      setPdMetodoPagoId(mpDefault ? String(mpDefault.id) : "");
+      setPdCajaId(mpDefault?.caja_id ? String(mpDefault.caja_id) : "");
+      setPdObs("");
+    },
+    [monedas, metodosPago]
+  );
+
+  // Facturas pendientes del cliente ordenadas desde la más antigua (FIFO, igual que el backend)
+  const pagoDeudaPendientesFifo = useMemo(() => {
+    if (!pagoDeudaCliente) return [];
+    const list = creditosData.creditos.filter(
+      (cr) =>
+        String(cr.cliente_id) === String(pagoDeudaCliente.id) &&
+        cr.estado !== "Pagado" &&
+        cr.saldo > 0.009
+    );
+    return [...list].sort((a, b) =>
+      a.fecha === b.fecha ? String(b.id).localeCompare(String(a.id)) : a.fecha < b.fecha ? -1 : 1
+    );
+  }, [pagoDeudaCliente, creditosData.creditos]);
+
+  const pagoDeudaMonedaObj = useMemo(
+    () => monedas.find((m) => String(m.id) === String(pdMonedaId)) || baseMonedaSistema,
+    [monedas, pdMonedaId, baseMonedaSistema]
+  );
+
+  const pagoDeudaTotalBase = useMemo(() => {
+    if (!baseMonedaSistema) return 0;
+    return pagoDeudaPendientesFifo.reduce((sum, cr) => {
+      const mCr =
+        monedas.find((m) => String(m.id) === String(cr.moneda_id) || m.codigo === cr.moneda_codigo) ||
+        baseMonedaSistema;
+      return sum + convertirConRegla(Number(cr.saldo) || 0, mCr, baseMonedaSistema, "ventas", 6);
+    }, 0);
+  }, [pagoDeudaPendientesFifo, monedas, baseMonedaSistema, convertirConRegla]);
+
+  // Vista previa en vivo de cómo se reparte el abono global entre cada factura pendiente
+  const pagoDeudaPreview = useMemo(() => {
+    const val = parseFloat(pdMontoStr.replace(",", ".")) || 0;
+    if (
+      !pagoDeudaMonedaObj ||
+      !baseMonedaSistema ||
+      val <= 0 ||
+      pagoDeudaPendientesFifo.length === 0
+    ) {
+      return {
+        lineas: pagoDeudaPendientesFifo.map((cr) => ({
+          credito: cr,
+          estado: "pendiente" as "completa" | "parcial" | "pendiente",
+          monto: 0,
+        })),
+        restoBase: 0,
+      };
+    }
+
+    let poolBase = convertirConRegla(val, pagoDeudaMonedaObj, baseMonedaSistema, "ventas", 6);
+    const lineas: Array<{
+      credito: LocalCredito;
+      estado: "completa" | "parcial" | "pendiente";
+      monto: number;
+    }> = [];
+
+    for (const cr of pagoDeudaPendientesFifo) {
+      const mCr =
+        monedas.find((m) => String(m.id) === String(cr.moneda_id) || m.codigo === cr.moneda_codigo) ||
+        baseMonedaSistema;
+      const saldo = Number(cr.saldo) || 0;
+      const saldoBase = convertirConRegla(saldo, mCr, baseMonedaSistema, "ventas", 6);
+      if (poolBase <= 0.0005) {
+        lineas.push({ credito: cr, estado: "pendiente", monto: 0 });
+        continue;
+      }
+      const takeBase = Math.min(poolBase, saldoBase);
+      const takeEnMonedaCr = saldoBase > 0 ? (takeBase * saldo) / saldoBase : saldo;
+      const takeFinal = Math.min(takeEnMonedaCr, saldo);
+      poolBase = Math.max(0, poolBase - takeBase);
+      lineas.push({
+        credito: cr,
+        estado: takeBase >= saldoBase - 0.005 ? "completa" : "parcial",
+        monto: takeFinal,
+      });
+    }
+
+    return {
+      lineas,
+      restoBase: poolBase > 0.005 ? poolBase : 0,
+    };
+  }, [
+    pdMontoStr,
+    pagoDeudaMonedaObj,
+    baseMonedaSistema,
+    pagoDeudaPendientesFifo,
+    monedas,
+    convertirConRegla,
+  ]);
+
+  const rellenarTotalPagoDeuda = useCallback(() => {
+    if (!pagoDeudaMonedaObj || !baseMonedaSistema || pagoDeudaTotalBase <= 0) return;
+    const dec = Number(pagoDeudaMonedaObj.decimales ?? 2);
+    const totalEnMoneda = convertirConRegla(
+      pagoDeudaTotalBase,
+      baseMonedaSistema,
+      pagoDeudaMonedaObj,
+      "ventas",
+      dec
+    );
+    setPdMontoStr(String(totalEnMoneda));
+  }, [pagoDeudaMonedaObj, baseMonedaSistema, pagoDeudaTotalBase, convertirConRegla]);
+
+  const handleConfirmPagoDeudaGlobal = async () => {
+    if (!pagoDeudaCliente || !pagoDeudaMonedaObj) return;
+    const val = parseFloat(pdMontoStr.replace(",", ".")) || 0;
+    if (val <= 0) {
+      showToast("Ingresa un monto mayor a 0", "error");
+      return;
+    }
+    setSavingPagoDeuda(true);
+    try {
+      const fechaHoy = new Date().toISOString().split("T")[0];
+      const distOffline = pagoDeudaPreview.lineas
+        .filter((l) => l.monto > 0.0005)
+        .map((l) => ({
+          credito_id: l.credito.id,
+          moneda_id: l.credito.moneda_id,
+          monto_aplicado: l.monto,
+        }));
+
+      const res = await pagarDeudaGlobalMobile({
+        cliente_id: pagoDeudaCliente.id,
+        monto: val,
+        moneda_id: pagoDeudaMonedaObj.id,
+        fecha: fechaHoy,
+        metodo_pago_id: pdMetodoPagoId || null,
+        caja_id: pdCajaId || null,
+        observaciones: pdObs.trim() || null,
+        distribucionOffline: distOffline,
+      });
+
+      setPagoDeudaCliente(null);
+      await refreshLocalState(posSearch);
+      if (perfilClienteId) {
+        fetchClientePerfilCloud(perfilClienteId).then((cloud) => {
+          if (cloud) setPerfilCloudData(cloud);
+        });
+      }
+      runSilentSync();
+
+      let msg = `Pago aplicado a ${res.aplicadas} factura(s)`;
+      if (res.completadas > 0) msg += `, ${res.completadas} saldada(s)`;
+      if ((res.sobrante_base ?? 0) > 0.005 && baseMonedaSistema) {
+        msg += `. Sobrante: ${fmt(res.sobrante_base!, baseMonedaSistema.codigo)}`;
+      }
+      showToast(msg, "success");
+    } catch (e: any) {
+      showToast(e?.message || "Error al aplicar el pago de deuda", "error");
+    } finally {
+      setSavingPagoDeuda(false);
+    }
+  };
+
   // ── Filtros de Pantallas ──
   const posProductosFiltrados = useMemo(() => {
     if (!posCategoriaId) return productos;
-    return productos.filter((p) => Number(p.categoria_id) === Number(posCategoriaId));
+    return productos.filter((p) => String(p.categoria_id) === String(posCategoriaId));
   }, [productos, posCategoriaId]);
 
   const clientesFiltrados = useMemo(() => {
@@ -2188,50 +2699,39 @@ export default function App() {
         </View>
       )}
 
-      {/* ==================== 2. CLIENTES (/clientes) ==================== */}
+      {/* ==================== 2. CLIENTES & PERFIL DEL CLIENTE (/clientes y /clientes/[id]) ==================== */}
       {route === "clientes" && (
         <View style={{ flex: 1 }}>
-          <View style={styles.moduleHeaderBar}>
-            <View style={[styles.searchBox, { flex: 1 }]}>
-              <Feather name="search" size={16} color={THEME.mutedForeground} />
-              <TextInput
-                style={styles.searchBoxInput}
-                placeholder="Buscar cliente, documento o teléfono..."
-                placeholderTextColor={THEME.mutedForeground}
-                value={clientesSearch}
-                onChangeText={setClientesSearch}
-              />
-            </View>
-            <TouchableOpacity
-              style={styles.primarySmallBtn}
-              onPress={() => openCreateClienteModal(null)}
-            >
-              <Feather name="plus" size={15} color="#fff" />
-              <Text style={styles.primarySmallBtnText}>Nuevo Cliente</Text>
-            </TouchableOpacity>
-          </View>
+          {perfilClienteId && perfilClienteObj ? (
+            /* ── VISTA COMPLETA DE PERFIL DEL CLIENTE (clon exacto de src/app/(app)/clientes/[id]/page.tsx) ── */
+            <ScrollView contentContainerStyle={{ padding: 12, paddingBottom: 95, gap: 12 }}>
+              {/* Encabezado del Perfil */}
+              <View style={styles.card}>
+                <View style={{ flexDirection: "row", alignItems: "center", gap: 10 }}>
+                  <TouchableOpacity
+                    style={styles.outlineSmallBtn}
+                    onPress={() => setPerfilClienteId(null)}
+                  >
+                    <Feather name="arrow-left" size={16} color={THEME.foreground} />
+                  </TouchableOpacity>
 
-          <FlatList
-            data={clientesFiltrados}
-            keyExtractor={(item) => String(item.id)}
-            contentContainerStyle={{ padding: 12, paddingBottom: 90, gap: 10 }}
-            renderItem={({ item }) => (
-              <TouchableOpacity
-                style={styles.card}
-                onPress={() => openCreateClienteModal(item)}
-                activeOpacity={0.8}
-              >
-                <View style={styles.clientCardTop}>
-                  <View style={styles.avatarCircle}>
-                    <Text style={styles.avatarCircleText}>{userInitials(item.nombre)}</Text>
-                  </View>
                   <View style={{ flex: 1 }}>
-                    <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
-                      <Text style={styles.clientCardName}>{item.nombre}</Text>
+                    <Text style={[styles.clientCardName, { fontSize: 17 }]} numberOfLines={1}>
+                      {perfilClienteObj.nombre}
+                    </Text>
+                    <View
+                      style={{
+                        flexDirection: "row",
+                        flexWrap: "wrap",
+                        alignItems: "center",
+                        gap: 5,
+                        marginTop: 4,
+                      }}
+                    >
                       <View
                         style={[
                           styles.statusBadge,
-                          item.tipo === "Empresa"
+                          perfilClienteObj.tipo === "Empresa"
                             ? { backgroundColor: THEME.infoSoft, borderColor: THEME.infoBorder }
                             : { backgroundColor: THEME.muted, borderColor: THEME.border },
                         ]}
@@ -2241,77 +2741,879 @@ export default function App() {
                             styles.statusBadgeText,
                             {
                               color:
-                                item.tipo === "Empresa"
+                                perfilClienteObj.tipo === "Empresa"
                                   ? THEME.infoStrong
                                   : THEME.mutedForeground,
                             },
                           ]}
                         >
-                          {item.tipo}
+                          {perfilClienteObj.tipo}
+                        </Text>
+                      </View>
+                      <View
+                        style={[
+                          styles.statusBadge,
+                          { backgroundColor: THEME.successSoft, borderColor: THEME.successBorder },
+                        ]}
+                      >
+                        <Text style={[styles.statusBadgeText, { color: THEME.successStrong }]}>
+                          {perfilClienteObj.activo ? "Activo" : "Inactivo"}
+                        </Text>
+                      </View>
+                      <View
+                        style={[
+                          styles.statusBadge,
+                          perfilClienteObj.recibe_credito === 1
+                            ? { backgroundColor: THEME.infoSoft, borderColor: THEME.infoBorder }
+                            : { backgroundColor: THEME.muted, borderColor: THEME.border },
+                        ]}
+                      >
+                        <Text
+                          style={[
+                            styles.statusBadgeText,
+                            {
+                              color:
+                                perfilClienteObj.recibe_credito === 1
+                                  ? THEME.infoStrong
+                                  : THEME.mutedForeground,
+                            },
+                          ]}
+                        >
+                          {perfilClienteObj.recibe_credito === 1 ? "💳 Recibe crédito" : "Sin crédito"}
                         </Text>
                       </View>
                     </View>
-                    <Text style={styles.clientCardMeta}>
-                      {item.documento || "Sin documento"}
-                      {item.telefono ? ` · 📞 ${item.telefono}` : ""}
-                      {item.ciudad ? ` · 📍 ${item.ciudad}` : ""}
+                  </View>
+
+                  <TouchableOpacity
+                    style={styles.outlineSmallBtn}
+                    onPress={() => openCreateClienteModal(perfilClienteObj)}
+                  >
+                    <Feather name="edit-2" size={13} color={THEME.foreground} />
+                    <Text style={styles.outlineSmallBtnText}>Editar</Text>
+                  </TouchableOpacity>
+                </View>
+
+                {/* Banner de Avatar + 3 KPIs rápidos (Ventas, Retornos, Ticket Promedio) */}
+                <View
+                  style={{
+                    marginTop: 12,
+                    borderTopWidth: 1,
+                    borderTopColor: THEME.border,
+                    paddingTop: 12,
+                    flexDirection: "row",
+                    alignItems: "center",
+                    gap: 12,
+                  }}
+                >
+                  <View
+                    style={[
+                      styles.avatarCircle,
+                      { width: 48, height: 48, borderRadius: 14, backgroundColor: THEME.primary },
+                    ]}
+                  >
+                    <Text style={[styles.avatarCircleText, { color: "#fff", fontSize: 16 }]}>
+                      {userInitials(perfilClienteObj.nombre)}
                     </Text>
                   </View>
-                  <Feather name="edit-2" size={15} color={THEME.mutedForeground} />
+                  <View style={{ flex: 1, flexDirection: "row", justifyContent: "space-around" }}>
+                    <View style={{ alignItems: "center" }}>
+                      <Text style={{ fontSize: 16, fontWeight: "800", color: THEME.foreground }}>
+                        {perfilStats.ventas_count}
+                      </Text>
+                      <Text style={styles.fieldLabelSmall}>VENTAS</Text>
+                    </View>
+                    <View
+                      style={{
+                        width: 1,
+                        backgroundColor: THEME.border,
+                        alignSelf: "stretch",
+                      }}
+                    />
+                    <View style={{ alignItems: "center" }}>
+                      <Text style={{ fontSize: 16, fontWeight: "800", color: THEME.foreground }}>
+                        {perfilStats.retornos_count}
+                      </Text>
+                      <Text style={styles.fieldLabelSmall}>RETORNOS</Text>
+                    </View>
+                    <View
+                      style={{
+                        width: 1,
+                        backgroundColor: THEME.border,
+                        alignSelf: "stretch",
+                      }}
+                    />
+                    <View style={{ alignItems: "center" }}>
+                      <Text style={{ fontSize: 15, fontWeight: "800", color: THEME.primary600 }}>
+                        {fmt(perfilStats.ticket_promedio_base, baseMonedaSistema?.codigo || "USD")}
+                      </Text>
+                      <Text style={styles.fieldLabelSmall}>TICKET PROM.</Text>
+                    </View>
+                  </View>
+                </View>
+              </View>
+
+              {/* Tarjeta 2: Datos del Cliente */}
+              <View style={styles.card}>
+                <View style={{ flexDirection: "row", alignItems: "center", gap: 6, marginBottom: 8 }}>
+                  <Feather name="user" size={14} color={THEME.mutedForeground} />
+                  <Text style={styles.fieldLabelSmall}>DATOS DEL CLIENTE</Text>
+                  {perfilLoadingCloud && (
+                    <ActivityIndicator size="small" color={THEME.primary} style={{ marginLeft: "auto" }} />
+                  )}
                 </View>
 
-                <View style={styles.clientCardFooter}>
-                  {/* Límites de crédito configurados */}
-                  <View style={{ flex: 1 }}>
-                    <Text style={styles.fieldLabelSmall}>CRÉDITO HABILITADO</Text>
-                    {item.recibe_credito === 1 ? (
-                      <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 4, marginTop: 2 }}>
-                        {item.limites_credito
-                          .filter((l) => l.limite > 0)
-                          .map((l) => (
-                            <View key={l.codigo} style={styles.creditLimitTag}>
-                              <Text style={styles.creditLimitTagText}>
-                                Lím {l.codigo}: {l.simbolo} {l.limite.toFixed(0)}
-                              </Text>
-                            </View>
-                          ))}
-                        {item.limites_credito.every((l) => l.limite <= 0) && (
-                          <Text style={styles.mutedSmallText}>Sin límite asignado</Text>
+                <View style={{ flexDirection: "row", flexWrap: "wrap", rowGap: 10 }}>
+                  <View style={{ width: "50%" }}>
+                    <Text style={styles.fieldLabelSmall}>DOCUMENTO</Text>
+                    <Text style={{ fontSize: 13, fontWeight: "700", color: THEME.foreground }}>
+                      {perfilClienteObj.documento || "—"}
+                    </Text>
+                  </View>
+                  <View style={{ width: "50%" }}>
+                    <Text style={styles.fieldLabelSmall}>TELÉFONO</Text>
+                    <Text style={{ fontSize: 13, fontWeight: "700", color: THEME.foreground }}>
+                      {perfilClienteObj.telefono || "—"}
+                    </Text>
+                  </View>
+                  <View style={{ width: "50%" }}>
+                    <Text style={styles.fieldLabelSmall}>EMAIL</Text>
+                    <Text
+                      style={{ fontSize: 13, fontWeight: "600", color: THEME.foreground }}
+                      numberOfLines={1}
+                    >
+                      {perfilClienteObj.email || "—"}
+                    </Text>
+                  </View>
+                  <View style={{ width: "50%" }}>
+                    <Text style={styles.fieldLabelSmall}>CIUDAD</Text>
+                    <Text style={{ fontSize: 13, fontWeight: "600", color: THEME.foreground }}>
+                      {perfilClienteObj.ciudad || "—"}
+                    </Text>
+                  </View>
+                  <View style={{ width: "50%" }}>
+                    <Text style={styles.fieldLabelSmall}>ÚLTIMA COMPRA</Text>
+                    <Text style={{ fontSize: 13, fontWeight: "700", color: THEME.foreground }}>
+                      {perfilStats.ultima_compra
+                        ? String(perfilStats.ultima_compra).slice(0, 10)
+                        : "Sin compras"}
+                    </Text>
+                  </View>
+                  <View style={{ width: "50%" }}>
+                    <Text style={styles.fieldLabelSmall}>TOTAL COMPRADO</Text>
+                    <Text style={{ fontSize: 13, fontWeight: "800", color: THEME.successStrong }}>
+                      {fmt(perfilStats.total_comprado_base, baseMonedaSistema?.codigo || "USD")}
+                    </Text>
+                  </View>
+                </View>
+
+                <View
+                  style={{
+                    marginTop: 10,
+                    paddingTop: 8,
+                    borderTopWidth: 1,
+                    borderTopColor: THEME.border,
+                  }}
+                >
+                  <Text style={styles.fieldLabelSmall}>DIRECCIÓN</Text>
+                  <Text style={{ fontSize: 13, fontWeight: "500", color: THEME.foreground }}>
+                    {perfilClienteObj.direccion || "—"}
+                  </Text>
+                </View>
+              </View>
+
+              {/* Tarjeta 3: Deuda y Crédito por Moneda + Botones "+ Crédito" y "Pagar deuda" (Abono Global) */}
+              <View style={styles.card}>
+                <View
+                  style={{
+                    flexDirection: "row",
+                    alignItems: "center",
+                    justifyContent: "space-between",
+                    marginBottom: 10,
+                  }}
+                >
+                  <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
+                    <Feather name="credit-card" size={14} color={THEME.mutedForeground} />
+                    <Text style={styles.fieldLabelSmall}>DEUDA Y CRÉDITO</Text>
+                  </View>
+
+                  <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
+                    <TouchableOpacity
+                      style={styles.outlineSmallBtn}
+                      onPress={() => openAjustarCreditoModal(perfilClienteObj)}
+                    >
+                      <Feather name="plus" size={13} color={THEME.foreground} />
+                      <Text style={styles.outlineSmallBtnText}>Crédito</Text>
+                    </TouchableOpacity>
+
+                    <TouchableOpacity
+                      style={[
+                        styles.primarySmallBtn,
+                        {
+                          backgroundColor: THEME.danger,
+                          opacity: perfilMonedas.some((m) => m.deuda > 0.005) ? 1 : 0.4,
+                        },
+                      ]}
+                      disabled={!perfilMonedas.some((m) => m.deuda > 0.005)}
+                      onPress={() => openPagoDeudaGlobal(perfilClienteObj)}
+                    >
+                      <Feather name="dollar-sign" size={13} color="#fff" />
+                      <Text style={styles.primarySmallBtnText}>Pagar deuda</Text>
+                    </TouchableOpacity>
+                  </View>
+                </View>
+
+                {/* Cabecera de Tabla Moneda / Crédito / Deuda */}
+                <View
+                  style={{
+                    flexDirection: "row",
+                    paddingVertical: 6,
+                    borderBottomWidth: 1,
+                    borderBottomColor: THEME.border,
+                  }}
+                >
+                  <Text style={[styles.fieldLabelSmall, { flex: 1.1 }]}>MONEDA</Text>
+                  <Text style={[styles.fieldLabelSmall, { flex: 1, textAlign: "right" }]}>
+                    CRÉDITO
+                  </Text>
+                  <Text style={[styles.fieldLabelSmall, { flex: 1, textAlign: "right" }]}>
+                    DEUDA
+                  </Text>
+                </View>
+
+                {perfilMonedas.map((m) => {
+                  const excedido = m.limite > 0 && m.deuda > m.limite;
+                  return (
+                    <View
+                      key={m.moneda_id}
+                      style={{
+                        flexDirection: "row",
+                        alignItems: "center",
+                        paddingVertical: 8,
+                        borderBottomWidth: 1,
+                        borderBottomColor: THEME.inputBg,
+                      }}
+                    >
+                      <View
+                        style={{
+                          flex: 1.1,
+                          flexDirection: "row",
+                          alignItems: "center",
+                          gap: 5,
+                        }}
+                      >
+                        <Text style={{ fontWeight: "800", fontSize: 13, color: THEME.foreground }}>
+                          {m.codigo}
+                        </Text>
+                        {m.es_base && (
+                          <View
+                            style={{
+                              backgroundColor: THEME.muted,
+                              paddingHorizontal: 5,
+                              paddingVertical: 1,
+                              borderRadius: 4,
+                            }}
+                          >
+                            <Text
+                              style={{
+                                fontSize: 9,
+                                fontWeight: "700",
+                                color: THEME.mutedForeground,
+                              }}
+                            >
+                              BASE
+                            </Text>
+                          </View>
+                        )}
+                        {excedido && (
+                          <Feather name="alert-triangle" size={13} color={THEME.danger} />
                         )}
                       </View>
-                    ) : (
-                      <Text style={styles.mutedSmallText}>Solo contado</Text>
-                    )}
-                  </View>
 
-                  {/* Deuda Total por moneda */}
-                  <View style={{ alignItems: "flex-end" }}>
-                    <Text style={styles.fieldLabelSmall}>DEUDA TOTAL</Text>
-                    {item.deuda_total && item.deuda_total.length > 0 ? (
-                      item.deuda_total.map((d) => (
-                        <Text key={d.codigo} style={styles.clientDebtAmount}>
-                          {d.simbolo} {d.monto.toFixed(2)} {d.codigo}
+                      <TouchableOpacity
+                        style={{ flex: 1, alignItems: "flex-end" }}
+                        onPress={() => openAjustarCreditoModal(perfilClienteObj, m.moneda_id, "add")}
+                      >
+                        <Text style={{ fontWeight: "700", fontSize: 13, color: THEME.foreground }}>
+                          {fmt(m.limite, m.codigo)}
                         </Text>
-                      ))
-                    ) : (
-                      <Text style={[styles.mutedSmallText, { color: THEME.successStrong }]}>
-                        Solvente
-                      </Text>
-                    )}
-                  </View>
-                </View>
-              </TouchableOpacity>
-            )}
-            ListEmptyComponent={
-              <View style={styles.emptyBox}>
-                <Feather name="users" size={34} color={THEME.mutedForeground} />
-                <Text style={styles.emptyBoxTitle}>Sin clientes registrados</Text>
-                <Text style={styles.emptyBoxSub}>
-                  Crea tu primer cliente con el botón "+ Nuevo Cliente".
-                </Text>
+                      </TouchableOpacity>
+
+                      <TouchableOpacity
+                        style={{ flex: 1, alignItems: "flex-end" }}
+                        disabled={m.deuda <= 0.005}
+                        onPress={() => openPagoDeudaGlobal(perfilClienteObj, m.moneda_id)}
+                      >
+                        <Text
+                          style={{
+                            fontWeight: "800",
+                            fontSize: 13,
+                            color: m.deuda > 0.005 ? THEME.dangerStrong : THEME.mutedForeground,
+                          }}
+                        >
+                          {fmt(m.deuda, m.codigo)}
+                        </Text>
+                      </TouchableOpacity>
+                    </View>
+                  );
+                })}
               </View>
-            }
-          />
+
+              {/* 4 Pestañas del Perfil: Ventas, Créditos y abonos, Retornos, Productos más comprados (Top) */}
+              <ScrollView
+                horizontal
+                showsHorizontalScrollIndicator={false}
+                contentContainerStyle={{ gap: 6 }}
+              >
+                {(
+                  [
+                    { id: "ventas", label: `Ventas (${perfilVentas.length})`, icon: "shopping-cart" },
+                    {
+                      id: "creditos",
+                      label: `Créditos y abonos (${perfilCreditos.length})`,
+                      icon: "credit-card",
+                    },
+                    { id: "retornos", label: `Retornos (${perfilRetornos.length})`, icon: "rotate-ccw" },
+                    {
+                      id: "productos",
+                      label: `Top Productos (${perfilTopProductos.length})`,
+                      icon: "award",
+                    },
+                  ] as const
+                ).map((t) => {
+                  const active = perfilTab === t.id;
+                  return (
+                    <TouchableOpacity
+                      key={t.id}
+                      style={[styles.catChip, active && styles.catChipActive]}
+                      onPress={() => setPerfilTab(t.id)}
+                    >
+                      <Text style={[styles.catChipText, active && styles.catChipTextActive]}>
+                        {t.label}
+                      </Text>
+                    </TouchableOpacity>
+                  );
+                })}
+              </ScrollView>
+
+              {/* Contenido de Pestaña 1: VENTAS DEL CLIENTE */}
+              {perfilTab === "ventas" && (
+                <View style={{ gap: 8 }}>
+                  {perfilVentas.length === 0 ? (
+                    <View style={styles.emptyBox}>
+                      <Feather name="shopping-cart" size={28} color={THEME.mutedForeground} />
+                      <Text style={styles.emptyBoxTitle}>Sin ventas registradas</Text>
+                      <Text style={styles.emptyBoxSub}>
+                        Este cliente aún no tiene facturas en el sistema.
+                      </Text>
+                    </View>
+                  ) : (
+                    perfilVentas.map((v: any) => {
+                      const saldoCred = Number(v.credito_saldo ?? 0);
+                      const tieneSaldo = v.tipo_pago === "Credito" && saldoCred > 0.009;
+                      const crAsociado = perfilCreditos.find(
+                        (c) =>
+                          (v.credito_id && String(c.id) === String(v.credito_id)) ||
+                          String(c.venta_id) === String(v.id)
+                      );
+                      return (
+                        <View key={v.id} style={styles.card}>
+                          <View style={styles.creditoCardHeader}>
+                            <View style={{ flex: 1 }}>
+                              <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
+                                <Text style={styles.creditoNumero}>{v.numero}</Text>
+                                <View
+                                  style={[
+                                    styles.statusBadge,
+                                    v.tipo_pago === "Credito"
+                                      ? {
+                                          backgroundColor: THEME.warningSoft,
+                                          borderColor: THEME.warningBorder,
+                                        }
+                                      : {
+                                          backgroundColor: THEME.infoSoft,
+                                          borderColor: THEME.infoBorder,
+                                        },
+                                  ]}
+                                >
+                                  <Text
+                                    style={[
+                                      styles.statusBadgeText,
+                                      {
+                                        color:
+                                          v.tipo_pago === "Credito"
+                                            ? THEME.warningStrong
+                                            : THEME.infoStrong,
+                                      },
+                                    ]}
+                                  >
+                                    {v.tipo_pago === "Credito" ? "Crédito" : "Contado"}
+                                  </Text>
+                                </View>
+                              </View>
+                              <Text style={styles.clientCardMeta}>
+                                {String(v.fecha || "").slice(0, 10)} · {v.items_count ?? "—"} ítems
+                                {v.metodo_pago_nombre ? ` · ${v.metodo_pago_nombre}` : ""}
+                              </Text>
+                            </View>
+
+                            <View style={{ alignItems: "flex-end", gap: 4 }}>
+                              <Text style={styles.posProdPrice}>
+                                {fmt(Number(v.total) || 0, v.moneda_codigo || "USD")}
+                              </Text>
+                              {tieneSaldo && crAsociado ? (
+                                <TouchableOpacity
+                                  style={[
+                                    styles.primarySmallBtn,
+                                    {
+                                      backgroundColor: THEME.danger,
+                                      paddingVertical: 4,
+                                      paddingHorizontal: 10,
+                                    },
+                                  ]}
+                                  onPress={() => openAbonoModal(crAsociado)}
+                                >
+                                  <Feather name="dollar-sign" size={12} color="#fff" />
+                                  <Text style={styles.primarySmallBtnText}>
+                                    Pagar ({fmt(saldoCred, v.moneda_codigo || "USD")})
+                                  </Text>
+                                </TouchableOpacity>
+                              ) : (
+                                <View
+                                  style={[
+                                    styles.statusBadge,
+                                    {
+                                      backgroundColor: THEME.successSoft,
+                                      borderColor: THEME.successBorder,
+                                    },
+                                  ]}
+                                >
+                                  <Text
+                                    style={[
+                                      styles.statusBadgeText,
+                                      { color: THEME.successStrong },
+                                    ]}
+                                  >
+                                    ✓ {v.estado || "Pagada"}
+                                  </Text>
+                                </View>
+                              )}
+                            </View>
+                          </View>
+
+                          <View
+                            style={{
+                              flexDirection: "row",
+                              justifyContent: "flex-end",
+                              marginTop: 8,
+                              paddingTop: 8,
+                              borderTopWidth: 1,
+                              borderTopColor: THEME.inputBg,
+                            }}
+                          >
+                            <TouchableOpacity
+                              style={styles.outlineSmallBtn}
+                              onPress={() => handleOpenVentaDetail(v)}
+                            >
+                              <Feather name="eye" size={13} color={THEME.foreground} />
+                              <Text style={styles.outlineSmallBtnText}>Ver Factura / Ítems</Text>
+                            </TouchableOpacity>
+                          </View>
+                        </View>
+                      );
+                    })
+                  )}
+                </View>
+              )}
+
+              {/* Contenido de Pestaña 2: CRÉDITOS Y ABONOS DEL CLIENTE */}
+              {perfilTab === "creditos" && (
+                <View style={{ gap: 8 }}>
+                  {perfilCreditos.length === 0 ? (
+                    <View style={styles.emptyBox}>
+                      <Feather name="credit-card" size={28} color={THEME.mutedForeground} />
+                      <Text style={styles.emptyBoxTitle}>Sin créditos</Text>
+                      <Text style={styles.emptyBoxSub}>
+                        Este cliente no tiene créditos registrados.
+                      </Text>
+                    </View>
+                  ) : (
+                    perfilCreditos.map((cr) => {
+                      const isPagado = cr.estado === "Pagado" || cr.saldo <= 0.009;
+                      return (
+                        <View key={cr.id} style={styles.card}>
+                          <View style={styles.creditoCardHeader}>
+                            <View style={{ flex: 1 }}>
+                              <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
+                                <Text style={styles.creditoNumero}>{cr.numero}</Text>
+                                {cr.venta_numero && (
+                                  <Text style={styles.creditoVentaTag}>Venta {cr.venta_numero}</Text>
+                                )}
+                              </View>
+                              <Text style={styles.clientCardMeta}>{cr.fecha}</Text>
+                            </View>
+                            <View
+                              style={[
+                                styles.statusBadge,
+                                isPagado
+                                  ? {
+                                      backgroundColor: THEME.successSoft,
+                                      borderColor: THEME.successBorder,
+                                    }
+                                  : {
+                                      backgroundColor: THEME.dangerSoft,
+                                      borderColor: THEME.dangerBorder,
+                                    },
+                              ]}
+                            >
+                              <Text
+                                style={[
+                                  styles.statusBadgeText,
+                                  {
+                                    color: isPagado ? THEME.successStrong : THEME.dangerStrong,
+                                  },
+                                ]}
+                              >
+                                {cr.estado}
+                              </Text>
+                            </View>
+                          </View>
+
+                          <View style={styles.creditoAmountsGrid}>
+                            <View>
+                              <Text style={styles.fieldLabelSmall}>TOTAL</Text>
+                              <Text style={styles.creditoAmountTotal}>
+                                {fmt(cr.monto_total, cr.moneda_codigo)}
+                              </Text>
+                            </View>
+                            <View>
+                              <Text style={styles.fieldLabelSmall}>ABONADO</Text>
+                              <Text style={styles.creditoAmountAbonado}>
+                                {fmt(cr.abonado, cr.moneda_codigo)}
+                              </Text>
+                            </View>
+                            <View style={{ alignItems: "flex-end" }}>
+                              <Text style={styles.fieldLabelSmall}>SALDO</Text>
+                              <Text
+                                style={[
+                                  styles.creditoAmountSaldo,
+                                  isPagado && { color: THEME.successStrong },
+                                ]}
+                              >
+                                {fmt(cr.saldo, cr.moneda_codigo)}
+                              </Text>
+                            </View>
+                          </View>
+
+                          <View style={styles.creditoActionsRow}>
+                            <TouchableOpacity
+                              style={styles.outlineSmallBtn}
+                              onPress={() => openHistorialAbonos(cr)}
+                            >
+                              <Feather name="list" size={13} color={THEME.foreground} />
+                              <Text style={styles.outlineSmallBtnText}>
+                                Abonos ({cr.abonos_count || 0})
+                              </Text>
+                            </TouchableOpacity>
+                            {!isPagado && (
+                              <TouchableOpacity
+                                style={styles.primarySmallBtn}
+                                onPress={() => openAbonoModal(cr)}
+                              >
+                                <Feather name="dollar-sign" size={13} color="#fff" />
+                                <Text style={styles.primarySmallBtnText}>Registrar Abono</Text>
+                              </TouchableOpacity>
+                            )}
+                          </View>
+                        </View>
+                      );
+                    })
+                  )}
+                </View>
+              )}
+
+              {/* Contenido de Pestaña 3: RETORNOS DEL CLIENTE */}
+              {perfilTab === "retornos" && (
+                <View style={{ gap: 8 }}>
+                  {perfilRetornos.length === 0 ? (
+                    <View style={styles.emptyBox}>
+                      <Feather name="rotate-ccw" size={28} color={THEME.mutedForeground} />
+                      <Text style={styles.emptyBoxTitle}>Sin retornos</Text>
+                      <Text style={styles.emptyBoxSub}>
+                        Este cliente no ha devuelto productos.
+                      </Text>
+                    </View>
+                  ) : (
+                    perfilRetornos.map((r: any) => (
+                      <View key={r.id} style={styles.card}>
+                        <View style={styles.creditoCardHeader}>
+                          <View style={{ flex: 1 }}>
+                            <Text style={styles.creditoNumero}>{r.numero}</Text>
+                            <Text style={styles.clientCardMeta}>
+                              {String(r.fecha || "").slice(0, 10)} · Ref:{" "}
+                              {r.venta_numero || "—"} · {r.items_count || 0} ítems
+                            </Text>
+                          </View>
+                          <Text style={styles.posProdPrice}>
+                            {fmt(
+                              Number(r.total_moneda ?? r.total_base) || 0,
+                              r.moneda_codigo || "USD"
+                            )}
+                          </Text>
+                        </View>
+                      </View>
+                    ))
+                  )}
+                </View>
+              )}
+
+              {/* Contenido de Pestaña 4: TOP PRODUCTOS MÁS COMPRADOS */}
+              {perfilTab === "productos" && (
+                <View style={{ gap: 8 }}>
+                  {perfilTopProductos.length === 0 ? (
+                    <View style={styles.emptyBox}>
+                      <Feather name="package" size={28} color={THEME.mutedForeground} />
+                      <Text style={styles.emptyBoxTitle}>Sin datos de productos</Text>
+                      <Text style={styles.emptyBoxSub}>
+                        Cuando el cliente compre, aquí verás el ranking de lo que más lleva.
+                      </Text>
+                    </View>
+                  ) : (
+                    perfilTopProductos.map((p: any, idx: number) => {
+                      const baseCod = baseMonedaSistema?.codigo || "USD";
+                      const montoEnActiva = convertirMonto(
+                        Number(p.monto_base) || 0,
+                        baseCod,
+                        monedaSeleccionada
+                      );
+                      return (
+                        <View key={p.producto_id || idx} style={styles.card}>
+                          <View style={{ flexDirection: "row", alignItems: "center", gap: 10 }}>
+                            <View
+                              style={{
+                                width: 32,
+                                height: 32,
+                                borderRadius: 16,
+                                backgroundColor: idx < 3 ? THEME.accent : THEME.inputBg,
+                                borderWidth: 1,
+                                borderColor: idx < 3 ? THEME.primary : THEME.border,
+                                alignItems: "center",
+                                justifyContent: "center",
+                              }}
+                            >
+                              <Text
+                                style={{
+                                  fontWeight: "900",
+                                  fontSize: 12,
+                                  color: idx < 3 ? THEME.primary600 : THEME.mutedForeground,
+                                }}
+                              >
+                                #{idx + 1}
+                              </Text>
+                            </View>
+
+                            <View style={{ flex: 1 }}>
+                              <Text style={styles.posProdCode}>{p.codigo}</Text>
+                              <Text style={styles.posProdName}>{p.nombre}</Text>
+                              <Text style={styles.clientCardMeta}>
+                                {p.cantidad_total} unid. · {p.veces} compra
+                                {Number(p.veces) === 1 ? "" : "s"}
+                              </Text>
+                            </View>
+
+                            <View style={{ alignItems: "flex-end" }}>
+                              <Text style={styles.posProdPrice}>
+                                {fmt(Number(p.monto_base) || 0, baseCod)}
+                              </Text>
+                              {monedaSeleccionada !== baseCod && (
+                                <Text style={styles.clientCardMeta}>
+                                  {fmt(montoEnActiva, monedaSeleccionada)}
+                                </Text>
+                              )}
+                            </View>
+                          </View>
+                        </View>
+                      );
+                    })
+                  )}
+                </View>
+              )}
+            </ScrollView>
+          ) : (
+            /* ── DIRECTORIO DE CLIENTES ── */
+            <>
+              <View style={styles.moduleHeaderBar}>
+                <View style={[styles.searchBox, { flex: 1 }]}>
+                  <Feather name="search" size={16} color={THEME.mutedForeground} />
+                  <TextInput
+                    style={styles.searchBoxInput}
+                    placeholder="Buscar cliente, documento o teléfono..."
+                    placeholderTextColor={THEME.mutedForeground}
+                    value={clientesSearch}
+                    onChangeText={setClientesSearch}
+                  />
+                </View>
+                <TouchableOpacity
+                  style={styles.primarySmallBtn}
+                  onPress={() => openCreateClienteModal(null)}
+                >
+                  <Feather name="plus" size={15} color="#fff" />
+                  <Text style={styles.primarySmallBtnText}>Nuevo Cliente</Text>
+                </TouchableOpacity>
+              </View>
+
+              <FlatList
+                data={clientesFiltrados}
+                keyExtractor={(item) => String(item.id)}
+                contentContainerStyle={{ padding: 12, paddingBottom: 90, gap: 10 }}
+                renderItem={({ item }) => {
+                  const tieneDeuda = item.deuda_total && item.deuda_total.some((d) => d.monto > 0.005);
+                  return (
+                    <TouchableOpacity
+                      style={styles.card}
+                      onPress={() => openPerfilCliente(item.id)}
+                      activeOpacity={0.85}
+                    >
+                      <View style={styles.clientCardTop}>
+                        <View style={styles.avatarCircle}>
+                          <Text style={styles.avatarCircleText}>{userInitials(item.nombre)}</Text>
+                        </View>
+                        <View style={{ flex: 1 }}>
+                          <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
+                            <Text style={styles.clientCardName}>{item.nombre}</Text>
+                            <View
+                              style={[
+                                styles.statusBadge,
+                                item.tipo === "Empresa"
+                                  ? { backgroundColor: THEME.infoSoft, borderColor: THEME.infoBorder }
+                                  : { backgroundColor: THEME.muted, borderColor: THEME.border },
+                              ]}
+                            >
+                              <Text
+                                style={[
+                                  styles.statusBadgeText,
+                                  {
+                                    color:
+                                      item.tipo === "Empresa"
+                                        ? THEME.infoStrong
+                                        : THEME.mutedForeground,
+                                  },
+                                ]}
+                              >
+                                {item.tipo}
+                              </Text>
+                            </View>
+                          </View>
+                          <Text style={styles.clientCardMeta}>
+                            {item.documento || "Sin documento"}
+                            {item.telefono ? ` · 📞 ${item.telefono}` : ""}
+                            {item.ciudad ? ` · 📍 ${item.ciudad}` : ""}
+                          </Text>
+                        </View>
+                        <Feather name="chevron-right" size={18} color={THEME.mutedForeground} />
+                      </View>
+
+                      <View style={styles.clientCardFooter}>
+                        {/* Límites de crédito configurados */}
+                        <View style={{ flex: 1 }}>
+                          <Text style={styles.fieldLabelSmall}>CRÉDITO HABILITADO</Text>
+                          {item.recibe_credito === 1 ? (
+                            <View
+                              style={{
+                                flexDirection: "row",
+                                flexWrap: "wrap",
+                                gap: 4,
+                                marginTop: 2,
+                              }}
+                            >
+                              {item.limites_credito
+                                .filter((l) => l.limite > 0)
+                                .map((l) => (
+                                  <View key={l.codigo} style={styles.creditLimitTag}>
+                                    <Text style={styles.creditLimitTagText}>
+                                      Lím {l.codigo}: {l.simbolo} {l.limite.toFixed(0)}
+                                    </Text>
+                                  </View>
+                                ))}
+                              {item.limites_credito.every((l) => l.limite <= 0) && (
+                                <Text style={styles.mutedSmallText}>Sin límite asignado</Text>
+                              )}
+                            </View>
+                          ) : (
+                            <Text style={styles.mutedSmallText}>Solo contado</Text>
+                          )}
+                        </View>
+
+                        {/* Deuda Total por moneda */}
+                        <View style={{ alignItems: "flex-end" }}>
+                          <Text style={styles.fieldLabelSmall}>DEUDA TOTAL</Text>
+                          {tieneDeuda ? (
+                            item.deuda_total.map((d) => (
+                              <Text key={d.codigo} style={styles.clientDebtAmount}>
+                                {fmt(d.monto, d.codigo)}
+                              </Text>
+                            ))
+                          ) : (
+                            <Text style={[styles.mutedSmallText, { color: THEME.successStrong }]}>
+                              Solvente
+                            </Text>
+                          )}
+                        </View>
+                      </View>
+
+                      {/* Barra de Acciones Rápidas: Ver Perfil, Pagar Deuda Global, Editar */}
+                      <View
+                        style={{
+                          flexDirection: "row",
+                          alignItems: "center",
+                          justifyContent: "flex-end",
+                          gap: 6,
+                          marginTop: 10,
+                          paddingTop: 8,
+                          borderTopWidth: 1,
+                          borderTopColor: THEME.inputBg,
+                        }}
+                      >
+                        <TouchableOpacity
+                          style={styles.outlineSmallBtn}
+                          onPress={() => openPerfilCliente(item.id)}
+                        >
+                          <Feather name="user" size={13} color={THEME.foreground} />
+                          <Text style={styles.outlineSmallBtnText}>Ver Perfil</Text>
+                        </TouchableOpacity>
+
+                        {tieneDeuda && (
+                          <TouchableOpacity
+                            style={[styles.primarySmallBtn, { backgroundColor: THEME.danger }]}
+                            onPress={() => openPagoDeudaGlobal(item)}
+                          >
+                            <Feather name="dollar-sign" size={13} color="#fff" />
+                            <Text style={styles.primarySmallBtnText}>Pagar deuda</Text>
+                          </TouchableOpacity>
+                        )}
+
+                        <TouchableOpacity
+                          style={styles.outlineSmallBtn}
+                          onPress={() => openCreateClienteModal(item)}
+                        >
+                          <Feather name="edit-2" size={13} color={THEME.foreground} />
+                        </TouchableOpacity>
+                      </View>
+                    </TouchableOpacity>
+                  );
+                }}
+                ListEmptyComponent={
+                  <View style={styles.emptyBox}>
+                    <Feather name="users" size={34} color={THEME.mutedForeground} />
+                    <Text style={styles.emptyBoxTitle}>Sin clientes registrados</Text>
+                    <Text style={styles.emptyBoxSub}>
+                      Crea tu primer cliente con el botón "+ Nuevo Cliente".
+                    </Text>
+                  </View>
+                }
+              />
+            </>
+          )}
         </View>
       )}
 
@@ -2398,7 +3700,15 @@ export default function App() {
                           <Text style={styles.creditoVentaTag}>Venta {item.venta_numero}</Text>
                         )}
                       </View>
-                      <Text style={styles.creditoClienteName}>{item.cliente_nombre}</Text>
+                      <TouchableOpacity
+                        onPress={() => openPerfilCliente(item.cliente_id)}
+                        style={{ flexDirection: "row", alignItems: "center", gap: 4, marginTop: 1 }}
+                      >
+                        <Text style={[styles.creditoClienteName, { color: THEME.primary600 }]}>
+                          {item.cliente_nombre}
+                        </Text>
+                        <Feather name="external-link" size={12} color={THEME.primary600} />
+                      </TouchableOpacity>
                       <Text style={styles.clientCardMeta}>
                         {item.fecha}
                         {item.cliente_documento ? ` · ${item.cliente_documento}` : ""}
@@ -2468,7 +3778,7 @@ export default function App() {
                     </View>
                   </View>
 
-                  <View style={styles.creditoActionsRow}>
+                  <View style={[styles.creditoActionsRow, { flexWrap: "wrap" }]}>
                     <TouchableOpacity
                       style={styles.outlineSmallBtn}
                       onPress={() => openHistorialAbonos(item)}
@@ -2480,13 +3790,30 @@ export default function App() {
                     </TouchableOpacity>
 
                     {!isPagado && (
-                      <TouchableOpacity
-                        style={styles.primarySmallBtn}
-                        onPress={() => openAbonoModal(item)}
-                      >
-                        <Feather name="dollar-sign" size={13} color="#fff" />
-                        <Text style={styles.primarySmallBtnText}>Registrar Abono</Text>
-                      </TouchableOpacity>
+                      <>
+                        <TouchableOpacity
+                          style={[styles.primarySmallBtn, { backgroundColor: THEME.danger }]}
+                          onPress={() => {
+                            const cli = clientes.find((c) => String(c.id) === String(item.cliente_id));
+                            if (cli) {
+                              openPagoDeudaGlobal(cli, item.moneda_id);
+                            } else {
+                              openAbonoModal(item);
+                            }
+                          }}
+                        >
+                          <Feather name="layers" size={13} color="#fff" />
+                          <Text style={styles.primarySmallBtnText}>Abono Global</Text>
+                        </TouchableOpacity>
+
+                        <TouchableOpacity
+                          style={styles.primarySmallBtn}
+                          onPress={() => openAbonoModal(item)}
+                        >
+                          <Feather name="dollar-sign" size={13} color="#fff" />
+                          <Text style={styles.primarySmallBtnText}>Abonar Factura</Text>
+                        </TouchableOpacity>
+                      </>
                     )}
                   </View>
                 </View>
@@ -4050,6 +5377,662 @@ export default function App() {
                     </Text>
                   }
                 />
+              </>
+            )}
+          </View>
+        </View>
+      </Modal>
+
+      {/* ==================== MODAL AJUSTAR LÍMITE DE CRÉDITO (clon de CreditoLimiteModal web) ==================== */}
+      <Modal
+        visible={!!creditoLimiteCliente}
+        transparent
+        animationType="slide"
+        onRequestClose={() => setCreditoLimiteCliente(null)}
+      >
+        <View style={styles.modalBackdrop}>
+          <View style={styles.modalSheet}>
+            {creditoLimiteCliente &&
+              (() => {
+                const monSel =
+                  monedas.find((m) => String(m.id) === String(clLimMonedaId)) || monedas[0];
+                const limRow = creditoLimiteCliente.limites_credito.find(
+                  (l) => String(l.moneda_id) === String(monSel?.id) || l.codigo === monSel?.codigo
+                );
+                const deudaRow = creditoLimiteCliente.deuda_total.find(
+                  (d) => d.codigo === monSel?.codigo
+                );
+                const limiteActual = Number(limRow?.limite ?? 0);
+                const deudaActual = Number(deudaRow?.monto ?? 0);
+                const disponibleActual = limiteActual - deudaActual;
+                const val = parseFloat(clLimMontoStr.replace(",", ".")) || 0;
+                const nuevoLimite =
+                  clLimOperacion === "add"
+                    ? limiteActual + val
+                    : Math.max(0, limiteActual - val);
+
+                return (
+                  <>
+                    <View style={styles.modalHeader}>
+                      <View>
+                        <Text style={styles.modalTitle}>Ajustar crédito</Text>
+                        <Text style={styles.clientCardMeta}>
+                          Cliente: {creditoLimiteCliente.nombre}
+                        </Text>
+                      </View>
+                      <TouchableOpacity onPress={() => setCreditoLimiteCliente(null)}>
+                        <Feather name="x" size={20} color={THEME.mutedForeground} />
+                      </TouchableOpacity>
+                    </View>
+
+                    <Text style={styles.fieldLabelSmall}>MONEDA</Text>
+                    <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 6, marginVertical: 8 }}>
+                      {monedas.map((m) => {
+                        const active = String(m.id) === String(monSel?.id);
+                        return (
+                          <TouchableOpacity
+                            key={m.id}
+                            style={[styles.catChip, active && styles.catChipActive]}
+                            onPress={() => setClLimMonedaId(m.id)}
+                          >
+                            <Text style={[styles.catChipText, active && styles.catChipTextActive]}>
+                              {m.codigo}
+                              {m.es_base ? " (base)" : ""}
+                            </Text>
+                          </TouchableOpacity>
+                        );
+                      })}
+                    </View>
+
+                    {monSel && (
+                      <View style={styles.checkoutBalanceBanner}>
+                        <View style={styles.summaryRow}>
+                          <Text style={styles.summaryLabel}>Límite actual</Text>
+                          <Text style={styles.summaryVal}>
+                            {fmt(limiteActual, monSel.codigo)}
+                          </Text>
+                        </View>
+                        <View style={styles.summaryRow}>
+                          <Text style={styles.summaryLabel}>Deuda</Text>
+                          <Text style={[styles.summaryVal, { color: THEME.dangerStrong }]}>
+                            {fmt(deudaActual, monSel.codigo)}
+                          </Text>
+                        </View>
+                        <View style={styles.summaryTotalRow}>
+                          <Text style={styles.summaryTotalLabel}>Disponible</Text>
+                          <Text
+                            style={[
+                              styles.summaryTotalValue,
+                              {
+                                color:
+                                  disponibleActual > 0
+                                    ? THEME.successStrong
+                                    : THEME.mutedForeground,
+                              },
+                            ]}
+                          >
+                            {fmt(disponibleActual, monSel.codigo)}
+                          </Text>
+                        </View>
+                      </View>
+                    )}
+
+                    {/* Toggle Añadir / Quitar */}
+                    <View
+                      style={{
+                        flexDirection: "row",
+                        gap: 6,
+                        marginTop: 10,
+                        backgroundColor: THEME.inputBg,
+                        padding: 4,
+                        borderRadius: 10,
+                      }}
+                    >
+                      {(["add", "remove"] as const).map((op) => {
+                        const active = clLimOperacion === op;
+                        return (
+                          <TouchableOpacity
+                            key={op}
+                            style={[
+                              {
+                                flex: 1,
+                                flexDirection: "row",
+                                alignItems: "center",
+                                justifyContent: "center",
+                                gap: 5,
+                                paddingVertical: 8,
+                                borderRadius: 8,
+                              },
+                              active && { backgroundColor: THEME.card },
+                            ]}
+                            onPress={() => setClLimOperacion(op)}
+                          >
+                            <Feather
+                              name={op === "add" ? "plus" : "minus"}
+                              size={14}
+                              color={
+                                active
+                                  ? op === "add"
+                                    ? THEME.successStrong
+                                    : THEME.dangerStrong
+                                  : THEME.mutedForeground
+                              }
+                            />
+                            <Text
+                              style={{
+                                fontWeight: "700",
+                                fontSize: 13,
+                                color: active
+                                  ? op === "add"
+                                    ? THEME.successStrong
+                                    : THEME.dangerStrong
+                                  : THEME.mutedForeground,
+                              }}
+                            >
+                              {op === "add" ? "Añadir" : "Quitar"}
+                            </Text>
+                          </TouchableOpacity>
+                        );
+                      })}
+                    </View>
+
+                    <Text style={[styles.fieldLabelSmall, { marginTop: 10 }]}>
+                      MONTO A {clLimOperacion === "add" ? "AÑADIR" : "QUITAR"} (
+                      {monSel?.codigo || ""})
+                    </Text>
+                    <TextInput
+                      style={styles.input}
+                      keyboardType="decimal-pad"
+                      placeholder="0.00"
+                      value={clLimMontoStr}
+                      onChangeText={setClLimMontoStr}
+                    />
+
+                    {monSel && val > 0 && (
+                      <View
+                        style={[
+                          styles.checkoutBalanceBanner,
+                          {
+                            marginTop: 10,
+                            backgroundColor:
+                              clLimOperacion === "add" ? THEME.successSoft : THEME.dangerSoft,
+                            borderColor:
+                              clLimOperacion === "add" ? THEME.successBorder : THEME.dangerBorder,
+                          },
+                        ]}
+                      >
+                        <View style={styles.summaryRow}>
+                          <Text style={styles.summaryLabel}>Nuevo límite</Text>
+                          <Text
+                            style={[
+                              styles.summaryVal,
+                              {
+                                fontWeight: "800",
+                                color:
+                                  clLimOperacion === "add"
+                                    ? THEME.successStrong
+                                    : THEME.dangerStrong,
+                              },
+                            ]}
+                          >
+                            {fmt(nuevoLimite, monSel.codigo)}
+                          </Text>
+                        </View>
+                      </View>
+                    )}
+
+                    <TouchableOpacity
+                      style={[styles.primaryBtn, { marginTop: 14 }]}
+                      disabled={savingCreditoLimite || val <= 0}
+                      onPress={handleConfirmAjustarCredito}
+                    >
+                      {savingCreditoLimite ? (
+                        <ActivityIndicator color="#fff" />
+                      ) : (
+                        <>
+                          <Feather name="check" size={16} color="#fff" />
+                          <Text style={styles.primaryBtnText}>
+                            {clLimOperacion === "add" ? "Añadir crédito" : "Quitar crédito"}
+                          </Text>
+                        </>
+                      )}
+                    </TouchableOpacity>
+                  </>
+                );
+              })()}
+          </View>
+        </View>
+      </Modal>
+
+      {/* ==================== MODAL PAGAR DEUDA GLOBAL / ABONO GLOBAL FIFO (clon de PagarDeudaModal web) ==================== */}
+      <Modal
+        visible={!!pagoDeudaCliente}
+        transparent
+        animationType="slide"
+        onRequestClose={() => setPagoDeudaCliente(null)}
+      >
+        <View style={styles.modalBackdrop}>
+          <View style={styles.modalSheet}>
+            {pagoDeudaCliente &&
+              (() => {
+                const val = parseFloat(pdMontoStr.replace(",", ".")) || 0;
+                const baseCod = baseMonedaSistema?.codigo || "USD";
+                const comoBase =
+                  pagoDeudaMonedaObj &&
+                  baseMonedaSistema &&
+                  val > 0 &&
+                  String(pagoDeudaMonedaObj.id) !== String(baseMonedaSistema.id)
+                    ? convertirConRegla(
+                        val,
+                        pagoDeudaMonedaObj,
+                        baseMonedaSistema,
+                        "ventas",
+                        2
+                      )
+                    : null;
+
+                return (
+                  <>
+                    <View style={styles.modalHeader}>
+                      <View>
+                        <Text style={styles.modalTitle}>Pagar deuda (Abono Global)</Text>
+                        <Text style={styles.clientCardMeta}>{pagoDeudaCliente.nombre}</Text>
+                      </View>
+                      <TouchableOpacity onPress={() => setPagoDeudaCliente(null)}>
+                        <Feather name="x" size={20} color={THEME.mutedForeground} />
+                      </TouchableOpacity>
+                    </View>
+
+                    <ScrollView
+                      style={{ maxHeight: 520 }}
+                      contentContainerStyle={{ gap: 10, paddingBottom: 14 }}
+                      keyboardShouldPersistTaps="handled"
+                    >
+                      {/* Resumen de Deuda Total del Cliente */}
+                      <View style={styles.checkoutTopSummary}>
+                        <View style={{ flex: 1 }}>
+                          <Text style={styles.fieldLabelSmall}>DEUDA TOTAL ACUMULADA</Text>
+                          <Text style={[styles.checkoutBigTotal, { color: THEME.dangerStrong }]}>
+                            {fmt(pagoDeudaTotalBase, baseCod)}
+                          </Text>
+                          <Text style={styles.clientCardMeta}>
+                            {pagoDeudaPendientesFifo.length} factura
+                            {pagoDeudaPendientesFifo.length === 1 ? "" : "s"} pendiente
+                            {pagoDeudaPendientesFifo.length === 1 ? "" : "s"}
+                          </Text>
+                        </View>
+
+                        <View style={{ alignItems: "flex-end", gap: 4 }}>
+                          {pagoDeudaCliente.deuda_total.map((d) => (
+                            <View key={d.codigo} style={styles.deudaChip}>
+                              <Text style={styles.deudaChipText}>
+                                {fmt(d.monto, d.codigo)}
+                              </Text>
+                            </View>
+                          ))}
+                        </View>
+                      </View>
+
+                      {/* Selector de Moneda del Pago */}
+                      <View>
+                        <Text style={styles.fieldLabelSmall}>MONEDA DEL PAGO</Text>
+                        <View
+                          style={{
+                            flexDirection: "row",
+                            flexWrap: "wrap",
+                            gap: 6,
+                            marginTop: 6,
+                          }}
+                        >
+                          {monedas.map((m) => {
+                            const activa = String(m.id) === String(pagoDeudaMonedaObj?.id);
+                            return (
+                              <TouchableOpacity
+                                key={m.id}
+                                style={[styles.catChip, activa && styles.catChipActive]}
+                                onPress={() => setPdMonedaId(m.id)}
+                              >
+                                <Text
+                                  style={[styles.catChipText, activa && styles.catChipTextActive]}
+                                >
+                                  {m.codigo}
+                                  {m.es_base ? " (base)" : ""}
+                                </Text>
+                              </TouchableOpacity>
+                            );
+                          })}
+                        </View>
+                      </View>
+
+                      {/* Monto a pagar + Botón "Pagar todo" */}
+                      <View>
+                        <View
+                          style={{
+                            flexDirection: "row",
+                            alignItems: "center",
+                            justifyContent: "space-between",
+                          }}
+                        >
+                          <Text style={styles.fieldLabelSmall}>
+                            MONTO A PAGAR ({pagoDeudaMonedaObj?.codigo || ""})
+                          </Text>
+                          <TouchableOpacity
+                            onPress={rellenarTotalPagoDeuda}
+                            disabled={pagoDeudaTotalBase <= 0}
+                          >
+                            <Text
+                              style={{
+                                fontSize: 12,
+                                fontWeight: "800",
+                                color: THEME.primary600,
+                              }}
+                            >
+                              Pagar todo
+                            </Text>
+                          </TouchableOpacity>
+                        </View>
+
+                        <TextInput
+                          style={styles.input}
+                          keyboardType="decimal-pad"
+                          placeholder="0.00"
+                          value={pdMontoStr}
+                          onChangeText={setPdMontoStr}
+                        />
+
+                        <Text style={[styles.clientCardMeta, { marginTop: 4 }]}>
+                          {comoBase !== null
+                            ? `Equivale a ${fmt(comoBase, baseCod)} · se reparte entre las facturas automáticamente`
+                            : "Se reparte automáticamente entre las facturas más antiguas."}
+                        </Text>
+                      </View>
+
+                      {/* Método de pago */}
+                      <View>
+                        <Text style={styles.fieldLabelSmall}>MÉTODO DE PAGO</Text>
+                        <ScrollView
+                          horizontal
+                          showsHorizontalScrollIndicator={false}
+                          contentContainerStyle={{ gap: 6, marginTop: 6 }}
+                        >
+                          {metodosPago.map((mp) => {
+                            const active = String(mp.id) === String(pdMetodoPagoId);
+                            return (
+                              <TouchableOpacity
+                                key={mp.id}
+                                style={[styles.metodoChip, active && styles.metodoChipActive]}
+                                onPress={() => {
+                                  setPdMetodoPagoId(String(mp.id));
+                                  setPdCajaId(mp.caja_id ? String(mp.caja_id) : "");
+                                }}
+                              >
+                                <Text style={{ fontSize: 12 }}>
+                                  {getMetodoEmoji(mp.tipo, mp.nombre)}
+                                </Text>
+                                <Text
+                                  style={[
+                                    styles.metodoChipText,
+                                    active && styles.metodoChipTextActive,
+                                  ]}
+                                >
+                                  {mp.nombre} ({mp.moneda_codigo || "USD"})
+                                </Text>
+                              </TouchableOpacity>
+                            );
+                          })}
+                        </ScrollView>
+                      </View>
+
+                      {/* Observaciones */}
+                      <View>
+                        <Text style={styles.fieldLabelSmall}>OBSERVACIONES (OPCIONAL)</Text>
+                        <TextInput
+                          style={styles.input}
+                          placeholder="Notas del pago global..."
+                          value={pdObs}
+                          onChangeText={setPdObs}
+                        />
+                      </View>
+
+                      {/* Vista previa en vivo: Facturas pendientes (Más antigua primero) */}
+                      {pagoDeudaPendientesFifo.length > 0 && (
+                        <View
+                          style={{
+                            borderWidth: 1,
+                            borderColor: THEME.border,
+                            borderRadius: 12,
+                            overflow: "hidden",
+                            backgroundColor: THEME.card,
+                          }}
+                        >
+                          <View
+                            style={{
+                              flexDirection: "row",
+                              justifyContent: "space-between",
+                              alignItems: "center",
+                              backgroundColor: THEME.inputBg,
+                              paddingHorizontal: 12,
+                              paddingVertical: 8,
+                              borderBottomWidth: 1,
+                              borderBottomColor: THEME.border,
+                            }}
+                          >
+                            <Text style={styles.fieldLabelSmall}>FACTURAS PENDIENTES</Text>
+                            <Text style={{ fontSize: 11, color: THEME.mutedForeground }}>
+                              Más antigua primero
+                            </Text>
+                          </View>
+
+                          {pagoDeudaPreview.lineas.map(
+                            ({ credito, estado, monto: montoAplicado }) => (
+                              <View
+                                key={credito.id}
+                                style={{
+                                  flexDirection: "row",
+                                  alignItems: "center",
+                                  justifyContent: "space-between",
+                                  paddingHorizontal: 12,
+                                  paddingVertical: 9,
+                                  borderBottomWidth: 1,
+                                  borderBottomColor: THEME.inputBg,
+                                  gap: 8,
+                                }}
+                              >
+                                <View style={{ flex: 1 }}>
+                                  <Text
+                                    style={{
+                                      fontWeight: "800",
+                                      fontSize: 13,
+                                      color: THEME.foreground,
+                                    }}
+                                  >
+                                    {credito.numero}
+                                  </Text>
+                                  <Text style={styles.clientCardMeta}>{credito.fecha}</Text>
+                                </View>
+
+                                <Text
+                                  style={{
+                                    fontWeight: "700",
+                                    fontSize: 13,
+                                    color: THEME.foreground,
+                                  }}
+                                >
+                                  {fmt(credito.saldo, credito.moneda_codigo)}
+                                </Text>
+
+                                <View
+                                  style={[
+                                    styles.statusBadge,
+                                    estado === "completa"
+                                      ? {
+                                          backgroundColor: THEME.successSoft,
+                                          borderColor: THEME.successBorder,
+                                        }
+                                      : estado === "parcial"
+                                      ? {
+                                          backgroundColor: THEME.warningSoft,
+                                          borderColor: THEME.warningBorder,
+                                        }
+                                      : {
+                                          backgroundColor: THEME.muted,
+                                          borderColor: THEME.border,
+                                        },
+                                  ]}
+                                >
+                                  <Text
+                                    style={[
+                                      styles.statusBadgeText,
+                                      {
+                                        color:
+                                          estado === "completa"
+                                            ? THEME.successStrong
+                                            : estado === "parcial"
+                                            ? THEME.warningStrong
+                                            : THEME.mutedForeground,
+                                      },
+                                    ]}
+                                  >
+                                    {estado === "completa"
+                                      ? "Se paga"
+                                      : estado === "parcial"
+                                      ? `Abona ${fmt(montoAplicado, credito.moneda_codigo)}`
+                                      : "Pendiente"}
+                                  </Text>
+                                </View>
+                              </View>
+                            )
+                          )}
+
+                          {pagoDeudaPreview.restoBase > 0 && (
+                            <View
+                              style={{
+                                flexDirection: "row",
+                                justifyContent: "space-between",
+                                backgroundColor: THEME.inputBg,
+                                paddingHorizontal: 12,
+                                paddingVertical: 8,
+                              }}
+                            >
+                              <Text style={{ fontSize: 12, color: THEME.mutedForeground }}>
+                                Resto sin aplicar
+                              </Text>
+                              <Text
+                                style={{
+                                  fontSize: 12,
+                                  fontWeight: "800",
+                                  color: THEME.foreground,
+                                }}
+                              >
+                                {fmt(pagoDeudaPreview.restoBase, baseCod)}
+                              </Text>
+                            </View>
+                          )}
+                        </View>
+                      )}
+
+                      <TouchableOpacity
+                        style={[styles.primaryBtn, { marginTop: 6 }]}
+                        disabled={savingPagoDeuda || val <= 0}
+                        onPress={handleConfirmPagoDeudaGlobal}
+                      >
+                        {savingPagoDeuda ? (
+                          <ActivityIndicator color="#fff" />
+                        ) : (
+                          <>
+                            <Feather name="check-circle" size={16} color="#fff" />
+                            <Text style={styles.primaryBtnText}>
+                              Aplicar pago{" "}
+                              {val > 0 && pagoDeudaMonedaObj
+                                ? `(${fmt(val, pagoDeudaMonedaObj.codigo)})`
+                                : ""}
+                            </Text>
+                          </>
+                        )}
+                      </TouchableOpacity>
+                    </ScrollView>
+                  </>
+                );
+              })()}
+          </View>
+        </View>
+      </Modal>
+
+      {/* ==================== MODAL DETALLE DE FACTURA / VENTA ==================== */}
+      <Modal
+        visible={!!ventaDetailModal}
+        transparent
+        animationType="slide"
+        onRequestClose={() => setVentaDetailModal(null)}
+      >
+        <View style={styles.modalBackdrop}>
+          <View style={styles.modalSheet}>
+            {ventaDetailModal && (
+              <>
+                <View style={styles.modalHeader}>
+                  <View>
+                    <Text style={styles.modalTitle}>
+                      Factura {ventaDetailModal.venta.numero}
+                    </Text>
+                    <Text style={styles.clientCardMeta}>
+                      {String(ventaDetailModal.venta.fecha || "").slice(0, 10)} ·{" "}
+                      {ventaDetailModal.venta.cliente_nombre ||
+                        ventaDetailModal.venta.cliente ||
+                        "Cliente"}
+                    </Text>
+                  </View>
+                  <TouchableOpacity onPress={() => setVentaDetailModal(null)}>
+                    <Feather name="x" size={20} color={THEME.mutedForeground} />
+                  </TouchableOpacity>
+                </View>
+
+                <FlatList
+                  data={ventaDetailModal.items}
+                  keyExtractor={(it, idx) => String(it.id || idx)}
+                  style={{ maxHeight: 340 }}
+                  renderItem={({ item }) => (
+                    <View style={styles.pickerRow}>
+                      <View style={{ flex: 1 }}>
+                        <Text style={styles.clientCardName}>
+                          {item.producto_nombre || item.nombre || "Producto"}
+                        </Text>
+                        <Text style={styles.clientCardMeta}>
+                          {item.cantidad} x{" "}
+                          {fmt(
+                            Number(item.precio_unit) || 0,
+                            ventaDetailModal.venta.moneda_codigo || "USD"
+                          )}
+                          {item.presentacion_nombre
+                            ? ` (${item.presentacion_nombre})`
+                            : ""}
+                        </Text>
+                      </View>
+                      <Text style={styles.posProdPrice}>
+                        {fmt(
+                          Number(item.subtotal) || 0,
+                          ventaDetailModal.venta.moneda_codigo || "USD"
+                        )}
+                      </Text>
+                    </View>
+                  )}
+                  ListEmptyComponent={
+                    <Text style={[styles.clientCardMeta, { padding: 16, textAlign: "center" }]}>
+                      Detalle de productos sincronizándose...
+                    </Text>
+                  }
+                />
+
+                <View style={[styles.checkoutBalanceBanner, { marginTop: 10 }]}>
+                  <View style={styles.summaryTotalRow}>
+                    <Text style={styles.summaryTotalLabel}>Total Factura</Text>
+                    <Text style={styles.summaryTotalValue}>
+                      {fmt(
+                        Number(ventaDetailModal.venta.total) || 0,
+                        ventaDetailModal.venta.moneda_codigo || "USD"
+                      )}
+                    </Text>
+                  </View>
+                </View>
               </>
             )}
           </View>
