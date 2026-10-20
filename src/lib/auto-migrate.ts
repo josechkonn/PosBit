@@ -272,6 +272,9 @@ export async function ensureSchemaAndMigrate(customPool?: Pool | PoolClient): Pr
           ALTER TABLE productos ADD COLUMN IF NOT EXISTS precio_auto BOOLEAN NOT NULL DEFAULT false;
           ALTER TABLE productos ADD COLUMN IF NOT EXISTS precio_actualizado_en TIMESTAMP;
           ALTER TABLE productos ADD COLUMN IF NOT EXISTS iva_incluido BOOLEAN NOT NULL DEFAULT true;
+          ALTER TABLE productos ADD COLUMN IF NOT EXISTS eliminado BOOLEAN NOT NULL DEFAULT false;
+          ALTER TABLE productos ADD COLUMN IF NOT EXISTS eliminado_en TIMESTAMP;
+          CREATE INDEX IF NOT EXISTS idx_productos_eliminado ON productos(eliminado);
           IF v_monedas_id_type = 'uuid' THEN
             ALTER TABLE productos ADD COLUMN IF NOT EXISTS moneda_costo_id UUID REFERENCES monedas(id) ON DELETE SET NULL;
           ELSE

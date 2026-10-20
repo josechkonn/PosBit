@@ -1280,6 +1280,30 @@ export default function App() {
     [metodosPago, decMoneda]
   );
 
+  const handleSelectMetodoAbono = useCallback(
+    (mpId: string) => {
+      const mpNuevo = metodosPago.find((x) => String(x.id) === String(mpId));
+      const mpAnterior = metodosPago.find((x) => String(x.id) === String(abonoMetodoId));
+      const codAnterior = mpAnterior?.moneda_codigo || abonoModalCredito?.moneda_codigo;
+      const codNuevo = mpNuevo?.moneda_codigo || abonoModalCredito?.moneda_codigo;
+
+      if (codAnterior && codNuevo && codAnterior !== codNuevo) {
+        const val = parseFloat(abonoMontoStr.replace(",", "."));
+        if (Number.isFinite(val) && val > 0) {
+          const monAnterior = monedas.find((m) => m.codigo === codAnterior);
+          const monNuevo = monedas.find((m) => m.codigo === codNuevo);
+          if (monAnterior && monNuevo) {
+            const dec = Number(monNuevo.decimales ?? 2);
+            const conv = convertirConRegla(val, monAnterior, monNuevo, "ventas", dec);
+            setAbonoMontoStr(String(conv));
+          }
+        }
+      }
+      setAbonoMetodoId(mpId);
+    },
+    [metodosPago, abonoMetodoId, abonoModalCredito, abonoMontoStr, monedas, convertirConRegla]
+  );
+
   const handleConfirmAbono = async () => {
     if (!abonoModalCredito) return;
     setSavingAbono(true);
@@ -1666,6 +1690,25 @@ export default function App() {
     [monedas]
   );
 
+  const handleCambioMonedaAjustarCredito = useCallback(
+    (nuevaMonedaId: string) => {
+      if (nuevaMonedaId === clLimMonedaId) return;
+      const val = parseFloat(clLimMontoStr.replace(",", "."));
+      if (Number.isFinite(val) && val > 0) {
+        const monAnterior =
+          monedas.find((m) => String(m.id) === String(clLimMonedaId)) || baseMonedaSistema;
+        const monNueva = monedas.find((m) => String(m.id) === String(nuevaMonedaId));
+        if (monAnterior && monNueva) {
+          const dec = Number(monNueva.decimales ?? 2);
+          const conv = convertirConRegla(val, monAnterior, monNueva, "ventas", dec);
+          setClLimMontoStr(String(conv));
+        }
+      }
+      setClLimMonedaId(nuevaMonedaId);
+    },
+    [clLimMonedaId, clLimMontoStr, monedas, baseMonedaSistema, convertirConRegla]
+  );
+
   const handleConfirmAjustarCredito = async () => {
     if (!creditoLimiteCliente || !clLimMonedaId) return;
     const val = parseFloat(clLimMontoStr.replace(",", "."));
@@ -1722,6 +1765,25 @@ export default function App() {
       setPdObs("");
     },
     [monedas, metodosPago]
+  );
+
+  const handleCambioMonedaPagoDeuda = useCallback(
+    (nuevaMonedaId: string) => {
+      if (nuevaMonedaId === pdMonedaId) return;
+      const val = parseFloat(pdMontoStr.replace(",", "."));
+      if (Number.isFinite(val) && val > 0) {
+        const monAnterior =
+          monedas.find((m) => String(m.id) === String(pdMonedaId)) || baseMonedaSistema;
+        const monNueva = monedas.find((m) => String(m.id) === String(nuevaMonedaId));
+        if (monAnterior && monNueva) {
+          const dec = Number(monNueva.decimales ?? 2);
+          const conv = convertirConRegla(val, monAnterior, monNueva, "ventas", dec);
+          setPdMontoStr(String(conv));
+        }
+      }
+      setPdMonedaId(nuevaMonedaId);
+    },
+    [pdMonedaId, pdMontoStr, monedas, baseMonedaSistema, convertirConRegla]
   );
 
   // Facturas pendientes del cliente ordenadas desde la más antigua (FIFO, igual que el backend)
@@ -5461,7 +5523,7 @@ export default function App() {
                       <TouchableOpacity
                         key={mp.id}
                         style={[styles.metodoChip, active && styles.metodoChipActive]}
-                        onPress={() => setAbonoMetodoId(String(mp.id))}
+                        onPress={() => handleSelectMetodoAbono(String(mp.id))}
                       >
                         <Text style={{ fontSize: 12 }}>{getMetodoEmoji(mp.tipo, mp.nombre)}</Text>
                         <Text
@@ -5621,7 +5683,7 @@ export default function App() {
                           <TouchableOpacity
                             key={m.id}
                             style={[styles.catChip, active && styles.catChipActive]}
-                            onPress={() => setClLimMonedaId(m.id)}
+                            onPress={() => handleCambioMonedaAjustarCredito(m.id)}
                           >
                             <Text style={[styles.catChipText, active && styles.catChipTextActive]}>
                               {m.codigo}
@@ -5878,7 +5940,7 @@ export default function App() {
                               <TouchableOpacity
                                 key={m.id}
                                 style={[styles.catChip, activa && styles.catChipActive]}
-                                onPress={() => setPdMonedaId(m.id)}
+                                onPress={() => handleCambioMonedaPagoDeuda(m.id)}
                               >
                                 <Text
                                   style={[styles.catChipText, activa && styles.catChipTextActive]}

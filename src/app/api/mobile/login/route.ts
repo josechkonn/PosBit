@@ -91,9 +91,16 @@ export async function POST(request: Request) {
          FROM productos p
          LEFT JOIN categorias c ON p.categoria_id = c.id
          LEFT JOIN marcas m ON p.marca_id = m.id
+         WHERE (p.eliminado IS NULL OR p.eliminado = false)
          ORDER BY p.nombre ASC`
       ),
-      query(`SELECT * FROM producto_presentaciones WHERE activo = true ORDER BY unidades ASC`),
+      query(
+        `SELECT pp.*
+         FROM producto_presentaciones pp
+         JOIN productos p ON p.id = pp.producto_id
+         WHERE pp.activo = true AND (p.eliminado IS NULL OR p.eliminado = false)
+         ORDER BY pp.unidades ASC`
+      ),
       query(`SELECT * FROM creditos ORDER BY fecha DESC, id DESC LIMIT 300`),
       query(`SELECT * FROM abonos ORDER BY fecha DESC, id DESC LIMIT 500`),
       query(`SELECT * FROM ventas ORDER BY fecha DESC, id DESC LIMIT 200`),

@@ -9,6 +9,8 @@ import { Field } from "@/components/ui/label";
 import { Select } from "@/components/ui/select";
 import { cn } from "@/lib/utils";
 import { fmt } from "@/lib/format";
+import { useReglasConversion } from "@/lib/use-reglas-conversion";
+import type { MonedaConversion } from "@/lib/money";
 
 export interface MonedaCredito {
   moneda_id: string;
@@ -49,8 +51,22 @@ export function CreditoLimiteModal({
   const [monedaId, setMonedaId] = useState("");
   const [operacion, setOperacion] = useState<Operacion>("add");
   const [monto, setMonto] = useState("");
+  const [catalogoMonedas, setCatalogoMonedas] = useState<MonedaConversion[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+
+  const { convertirProducto } = useReglasConversion(catalogoMonedas);
+
+  useEffect(() => {
+    if (open) {
+      if (catalogoMonedas.length === 0) {
+        fetch("/api/monedas")
+          .then((r) => r.json())
+          .then((data) => setCatalogoMonedas(Array.isArray(data) ? data : []))
+          .catch(() => {});
+      }
+    }
+  }, [open, catalogoMonedas.length]);
 
   useEffect(() => {
     if (open) {
@@ -71,6 +87,21 @@ export function CreditoLimiteModal({
   const limiteActual = moneda?.limite ?? 0;
   const nuevoLimite = operacion === "add" ? limiteActual + valor : Math.max(0, limiteActual - valor);
   const disponibleActual = limiteActual - (moneda?.deuda ?? 0);
+
+  const handleMonedaChange = (nuevaMonedaId: string) => {
+    if (nuevaMonedaId === monedaId) return;
+    const num = parseFloat(monto.replace(",", "."));
+    if (Number.isFinite(num) && num > 0) {
+      const actualMon = catalogoMonedas.find((m) => String(m.id) === String(monedaId));
+      const nuevaMon = catalogoMonedas.find((m) => String(m.id) === String(nuevaMonedaId));
+      if (actualMon && nuevaMon) {
+        const dec = Number(nuevaMon.decimales ?? 2);
+        const conv = convertirProducto(num, actualMon, nuevaMon, "venta", dec);
+        setMonto(String(conv));
+      }
+    }
+    setMonedaId(nuevaMonedaId);
+  };
 
   const submit = async () => {
     if (!moneda || valor <= 0) return;
@@ -141,7 +172,7 @@ export function CreditoLimiteModal({
       </div>
 
       <Field label="Moneda">
-        <Select value={monedaId} onChange={(e) => setMonedaId(e.target.value)}>
+        <Select value={monedaId} onChange={(e) => handleMonedaChange(e.target.value)}>
           {monedas.map((m) => (
             <option key={m.moneda_id} value={m.moneda_id}>
               {m.codigo}

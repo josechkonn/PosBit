@@ -19,21 +19,21 @@ export async function GET(request: Request) {
       stockPorCategoria,
     ] = await Promise.all([
       query(`SELECT * FROM monedas WHERE activo = true ORDER BY es_base DESC, codigo ASC, id ASC`),
-      query(`SELECT COUNT(*) as count FROM productos WHERE activo = true`),
+      query(`SELECT COUNT(*) as count FROM productos WHERE activo = true AND (eliminado IS NULL OR eliminado = false)`),
       query(`SELECT COUNT(*) as count FROM proveedores WHERE activo = true`),
       query(
         `SELECT p.*, c.nombre as categoria_nombre, m.nombre as marca_nombre
          FROM productos p
          LEFT JOIN categorias c ON p.categoria_id = c.id
          LEFT JOIN marcas m ON p.marca_id = m.id
-         WHERE p.activo = true AND p.stock <= p.stock_minimo
+         WHERE p.activo = true AND (p.eliminado IS NULL OR p.eliminado = false) AND p.stock <= p.stock_minimo
          ORDER BY p.stock ASC, p.id ASC LIMIT 10`
       ),
       query(
         `SELECT c.nombre, SUM(p.stock) as value
          FROM productos p
          JOIN categorias c ON p.categoria_id = c.id
-         WHERE p.activo = true
+         WHERE p.activo = true AND (p.eliminado IS NULL OR p.eliminado = false)
          GROUP BY c.nombre ORDER BY value DESC`
       ),
     ]);

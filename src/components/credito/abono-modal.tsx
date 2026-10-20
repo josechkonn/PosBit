@@ -7,7 +7,7 @@ import { Input } from "@/components/ui/input";
 import { Field } from "@/components/ui/label";
 import { MetodoPagoSelect } from "@/components/ui/metodo-pago-select";
 import { fmt, fechaLocalISO } from "@/lib/format";
-import { convertir } from "@/lib/money";
+import { useReglasConversion } from "@/lib/use-reglas-conversion";
 
 interface Credito {
   id: string;
@@ -63,6 +63,8 @@ export function AbonoModal({ open, credito, onClose, onSuccess }: AbonoModalProp
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
 
+  const { convertirProducto } = useReglasConversion(monedas);
+
   useEffect(() => {
     if (open && credito) {
       setMonto(String(credito.saldo));
@@ -98,26 +100,32 @@ export function AbonoModal({ open, credito, onClose, onSuccess }: AbonoModalProp
     if (monedaAbono.id === monedaCredito.id) return null;
 
     // saldo (moneda del crédito) → moneda del abono, con la cadena de conversiones
-    return convertir(saldo, monedaCredito, monedaAbono, monedas, Number(monedaAbono.decimales ?? 2));
+    return convertirProducto(saldo, monedaCredito, monedaAbono, "venta", Number(monedaAbono.decimales ?? 2));
   };
 
   const handleMetodoChange = (id: string) => {
-    setMetodoPagoId(id);
-    const metodo = metodosPago.find((m) => m.id === id);
-    setCajaId(metodo?.caja_id ? String(metodo.caja_id) : "");
+    const metodoAnterior = metodosPago.find((m) => m.id === metodoPagoId);
+    const metodoNuevo = metodosPago.find((m) => m.id === id);
+    const mAnterior = metodoAnterior
+      ? monedas.find((m) => m.id === metodoAnterior.moneda_id || m.codigo === metodoAnterior.moneda_codigo)
+      : monedas.find((m) => m.id === credito?.moneda_id);
+    const mNuevo = metodoNuevo
+      ? monedas.find((m) => m.id === metodoNuevo.moneda_id || m.codigo === metodoNuevo.moneda_codigo)
+      : monedas.find((m) => m.id === credito?.moneda_id);
 
-    // Automatically update monto input to full debt in selected currency
-    if (metodo && credito && monedas.length > 0) {
-      const mAbono = monedas.find(m => m.id === metodo.moneda_id || m.codigo === metodo.moneda_codigo);
-      const mCredito = monedas.find(m => m.id === credito.moneda_id);
-      if (mAbono && mCredito) {
-        if (mAbono.id === mCredito.id) {
-          setMonto(String(credito.saldo));
-        } else {
-          // saldo (moneda del crédito) → moneda del abono
-          setMonto(
-            String(convertir(saldo, mCredito, mAbono, monedas, Number(mAbono.decimales ?? 2)))
-          );
+    setMetodoPagoId(id);
+    setCajaId(metodoNuevo?.caja_id ? String(metodoNuevo.caja_id) : "");
+
+    const val = parseFloat(monto.replace(",", "."));
+    if (metodoNuevo && credito && monedas.length > 0) {
+      if (Number.isFinite(val) && val > 0 && mAnterior && mNuevo && mAnterior.id !== mNuevo.id) {
+        const dec = Number(mNuevo.decimales ?? 2);
+        setMonto(String(convertirProducto(val, mAnterior, mNuevo, "venta", dec)));
+      } else if (!val || val <= 0) {
+        const mCredito = monedas.find((m) => m.id === credito.moneda_id);
+        if (mNuevo && mCredito) {
+          const dec = Number(mNuevo.decimales ?? 2);
+          setMonto(String(convertirProducto(saldo, mCredito, mNuevo, "venta", dec)));
         }
       }
     }
@@ -137,7 +145,7 @@ export function AbonoModal({ open, credito, onClose, onSuccess }: AbonoModalProp
     if (monedaAbono.id === monedaCredito.id) return null; // Misma moneda
 
     // monto del abono → moneda del crédito (misma cadena que en el backend)
-    return convertir(val, monedaAbono, monedaCredito, monedas, Number(monedaCredito.decimales ?? 2));
+    return convertirProducto(val, monedaAbono, monedaCredito, "venta", Number(monedaCredito.decimales ?? 2));
   };
 
   const equivalente = getEquivalente();

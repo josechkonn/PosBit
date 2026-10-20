@@ -8,6 +8,8 @@ import { aplicarReglasRedondeo } from "@/lib/costing";
 import { getConfiguracionGlobal } from "@/lib/global-config";
 import { leerFiltros, SIN_FILTROS, construirWhere, calcularFacetas } from "@/lib/filtros-productos";
 import { triggerBackgroundSync } from "@/lib/sync-engine";
+import { unlink } from "fs/promises";
+import { join } from "path";
 
 /** Error de validación de datos enviados por el cliente → HTTP 400. */
 class ValidationError extends Error {}
@@ -211,10 +213,14 @@ export async function GET(request: Request) {
     const limitPh = `$${params.length + 1}`;
     const offsetPh = `$${params.length + 2}`;
 
+    const orderSql = filtros.basurero
+      ? "ORDER BY p.eliminado_en DESC NULLS LAST, p.id DESC"
+      : "ORDER BY p.codigo ASC, p.id ASC";
+
     const filas = await query(`
       SELECT
         p.id, p.codigo, p.nombre, p.descripcion, p.imagen,
-        p.stock, p.stock_minimo, p.activo, p.iva_incluido, p.moneda_base_id,
+        p.stock, p.stock_minimo, p.activo, p.iva_incluido, p.eliminado, p.eliminado_en, p.moneda_base_id,
         p.precio_base, p.costo_base, p.moneda_costo_id,
         p.margen_ganancia, p.costo_promedio, p.costo_promedio_base, p.precio_auto, p.precio_actualizado_en,
         p.categoria_id, p.marca_id, p.proveedor_id,
@@ -227,7 +233,7 @@ export async function GET(request: Request) {
       LEFT JOIN marcas m ON p.marca_id = m.id
       LEFT JOIN proveedores pr ON p.proveedor_id = pr.id
       ${where}
-      ORDER BY p.codigo ASC, p.id ASC
+      ${orderSql}
       LIMIT ${limitPh} OFFSET ${offsetPh}
     `, [...params, limit, offset]);
 
@@ -239,7 +245,7 @@ export async function GET(request: Request) {
     const hayFiltros = !SIN_FILTROS(filtros);
     const productoIds = (productos as any[]).map((p) => p.id);
 
-    const [facetas, catalogo, cfgGlobal, presentacionesRows, proveedoresRows] = await Promise.all([
+    const [facetas, catalogo, cfgGlobal, presentacionesRows, proveedoresRows, basureroCountRow] = await Promise.all([
       hayFiltros ? calcularFacetas(filtros, query) : Promise.resolve(null),
       query(
         `SELECT id, codigo, simbolo, tasa, tasa_ref_moneda_id, decimales, es_base, activo, usa_tasa_usd_directa, tasa_usd_directa FROM monedas ORDER BY es_base DESC, codigo ASC, id ASC`
@@ -277,6 +283,7 @@ export async function GET(request: Request) {
             return [] as any[];
           })
         : Promise.resolve([] as any[]),
+      queryOne<{ count: string }>(`SELECT COUNT(*) as count FROM productos WHERE eliminado = true`),
     ]);
 
     const reglas = reglasConversion(cfgGlobal, catalogo);
@@ -333,6 +340,7 @@ export async function GET(request: Request) {
       productos: productosConPrecios,
       monedas: (catalogo as any[]).filter((m) => m.activo),
       pagination: { page, limit, total, totalPages: Math.ceil(total / limit) },
+      basureroCount: Number(basureroCountRow?.count || 0),
       // Conteos por dimensión para los desplegables. `null` cuando no hay
       // filtros (ver `hayFiltros`).
       facetas,
@@ -826,17 +834,92 @@ export async function DELETE(request: Request) {
       return NextResponse.json({ error: "ID requerido" }, { status: 400 });
     }
 
-    const compraCount = await queryOne(`SELECT COUNT(*) FROM compra_items WHERE producto_id = $1`, [id]);
-    const ventaCount = await queryOne(`SELECT COUNT(*) FROM venta_items WHERE producto_id = $1`, [id]);
+    const producto = await queryOne<{ id: number; codigo: string; nombre: string; imagen: string | null }>(
+      `SELECT id, codigo, nombre, imagen FROM productos WHERE id = $1`,
+      [id]
+    );
 
-    if ((compraCount && parseInt(compraCount.count) > 0) || (ventaCount && parseInt(ventaCount.count) > 0)) {
-      return NextResponse.json({ error: "No se puede eliminar: tiene compras o ventas asociadas" }, { status: 400 });
+    if (!producto) {
+      return NextResponse.json({ error: "Producto no encontrado" }, { status: 404 });
     }
 
-    await execute(`DELETE FROM productos WHERE id = $1`, [id]);
+    // Comprobar si tiene compras, ventas, retornos o movimientos de ajuste en kardex
+    const stats = await queryOne<{
+      compras: string;
+      ventas: string;
+      retornos: string;
+      ajustes: string;
+    }>(
+      `SELECT
+         (SELECT COUNT(*) FROM compra_items WHERE producto_id = $1) AS compras,
+         (SELECT COUNT(*) FROM venta_items WHERE producto_id = $1) AS ventas,
+         (SELECT COUNT(*) FROM retorno_items WHERE producto_id = $1) AS retornos,
+         (SELECT COUNT(*) FROM kardex WHERE producto_id = $1 AND motivo <> 'Existencias iniciales') AS ajustes`,
+      [id]
+    );
+
+    const compras = parseInt(stats?.compras || "0", 10);
+    const ventas = parseInt(stats?.ventas || "0", 10);
+    const retornos = parseInt(stats?.retornos || "0", 10);
+    const ajustes = parseInt(stats?.ajustes || "0", 10);
+
+    const tieneTransacciones = compras > 0 || ventas > 0 || retornos > 0 || ajustes > 0;
+
+    if (tieneTransacciones) {
+      // Tiene historial comercial: se archiva en el Basurero (soft delete)
+      await execute(
+        `UPDATE productos SET eliminado = true, activo = false, eliminado_en = NOW() WHERE id = $1`,
+        [id]
+      );
+      triggerBackgroundSync();
+
+      const detalles: string[] = [];
+      if (compras > 0) detalles.push(`${compras} compra(s)`);
+      if (ventas > 0) detalles.push(`${ventas} venta(s)`);
+      if (retornos > 0) detalles.push(`${retornos} devolución(es)`);
+      if (ajustes > 0) detalles.push(`${ajustes} ajuste(s)`);
+
+      return NextResponse.json({
+        success: true,
+        action: "basurero",
+        message: `El producto "${producto.nombre}" fue movido al Basurero (${detalles.join(", ")} registradas) para no interferir en ventas, compras ni kardex.`,
+      });
+    }
+
+    // No tiene transacciones: eliminación definitiva limpia
+    await transaction(async (client) => {
+      // Limpiar registros del kardex que sean únicamente 'Existencias iniciales'
+      await client.query(`DELETE FROM kardex WHERE producto_id = $1`, [id]);
+      // Eliminar el producto (las tablas dependientes como precios y presentaciones tienen CASCADE)
+      await client.query(`DELETE FROM productos WHERE id = $1`, [id]);
+    });
+
+    if (producto.imagen) {
+      const filename = producto.imagen.split("/").pop();
+      if (filename) {
+        const uploadDir = process.env.USER_DATA_PATH
+          ? join(process.env.USER_DATA_PATH, "uploads", "images", "productos")
+          : join(process.cwd(), "public", "images", "productos");
+        const paths = [
+          join(uploadDir, filename),
+          join(process.cwd(), "public", "images", "productos", filename),
+        ];
+        for (const p of paths) {
+          try {
+            await unlink(p);
+          } catch {}
+        }
+      }
+    }
+
     triggerBackgroundSync();
-    return NextResponse.json({ success: true });
+    return NextResponse.json({
+      success: true,
+      action: "eliminado",
+      message: `El producto "${producto.nombre}" fue eliminado definitivamente del catálogo.`,
+    });
   } catch (error) {
+    console.error("Error al eliminar producto:", error);
     return NextResponse.json({ error: "Error al eliminar producto" }, { status: 500 });
   }
 }

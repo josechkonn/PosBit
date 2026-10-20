@@ -214,6 +214,8 @@ CREATE TABLE IF NOT EXISTS productos (
     moneda_base_id INTEGER REFERENCES monedas(id) ON DELETE SET NULL,
     activo BOOLEAN NOT NULL DEFAULT true,
     iva_incluido BOOLEAN NOT NULL DEFAULT true,
+    eliminado BOOLEAN NOT NULL DEFAULT false,
+    eliminado_en TIMESTAMP,
     creado_en TIMESTAMP NOT NULL DEFAULT NOW(),
     actualizado_en TIMESTAMP NOT NULL DEFAULT NOW()
 );
@@ -242,6 +244,9 @@ ALTER TABLE productos ADD COLUMN IF NOT EXISTS costo_promedio_base DECIMAL(18, 6
 ALTER TABLE productos ADD COLUMN IF NOT EXISTS margen_ganancia DECIMAL(5, 2) NOT NULL DEFAULT 0.00;
 ALTER TABLE productos ADD COLUMN IF NOT EXISTS precio_auto BOOLEAN NOT NULL DEFAULT false;
 ALTER TABLE productos ADD COLUMN IF NOT EXISTS precio_actualizado_en TIMESTAMP;
+ALTER TABLE productos ADD COLUMN IF NOT EXISTS eliminado BOOLEAN NOT NULL DEFAULT false;
+ALTER TABLE productos ADD COLUMN IF NOT EXISTS eliminado_en TIMESTAMP;
+CREATE INDEX IF NOT EXISTS idx_productos_eliminado ON productos(eliminado);
 
 -- ============================================================================
 -- 5.1 PRESENTACIONES DE PRODUCTO (Caja, Bolsa, Paquete...)

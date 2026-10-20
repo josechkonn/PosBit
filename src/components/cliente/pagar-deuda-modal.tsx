@@ -8,7 +8,7 @@ import { Input } from "@/components/ui/input";
 import { Field } from "@/components/ui/label";
 import { MetodoPagoSelect } from "@/components/ui/metodo-pago-select";
 import { fmt, fechaLocalISO } from "@/lib/format";
-import { convertir } from "@/lib/money";
+import { useReglasConversion } from "@/lib/use-reglas-conversion";
 import { cn } from "@/lib/utils";
 
 export interface DeudaMoneda {
@@ -91,6 +91,8 @@ export function PagarDeudaModal({
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
 
+  const { convertirProducto } = useReglasConversion(monedas);
+
   useEffect(() => {
     if (open) {
       setMonto("");
@@ -152,11 +154,11 @@ export function PagarDeudaModal({
         restoBase: 0,
       };
     }
-    let pool = convertir(valor, monedaPago, baseMoneda, monedas, 6);
+    let pool = convertirProducto(valor, monedaPago, baseMoneda, "venta", 6);
     for (const c of pendientesFifo) {
       const mCredito = monedas.find((m) => m.id === c.moneda_id) ?? baseMoneda;
       const saldo = Number(c.saldo);
-      const saldoBase = convertir(saldo, mCredito, baseMoneda, monedas, 6);
+      const saldoBase = convertirProducto(saldo, mCredito, baseMoneda, "venta", 6);
       if (pool <= 0.0005) {
         lineas.push({ credito: c, estado: "pendiente", monto: 0 });
         continue;
@@ -172,21 +174,34 @@ export function PagarDeudaModal({
       });
     }
     return { lineas, restoBase: pool > 0 ? pool : 0 };
-  }, [monedaPago, baseMoneda, valor, pendientesFifo, monedas]);
+  }, [monedaPago, baseMoneda, valor, pendientesFifo, monedas, convertirProducto]);
 
   const deudaTotalBase = useMemo(
     () =>
       pendientesFifo.reduce((s, c) => {
         const mCredito = monedas.find((m) => m.id === c.moneda_id) ?? baseMoneda;
-        return s + (monedas.length > 0 ? convertir(Number(c.saldo), mCredito, baseMoneda, monedas, 6) : Number(c.saldo));
+        return s + (monedas.length > 0 ? convertirProducto(Number(c.saldo), mCredito, baseMoneda, "venta", 6) : Number(c.saldo));
       }, 0),
-    [pendientesFifo, monedas, baseMoneda]
+    [pendientesFifo, monedas, baseMoneda, convertirProducto]
   );
 
   const comoBase =
     monedaPago && baseMoneda && valor > 0 && String(monedaPago.id) !== String(baseMoneda.id)
-      ? convertir(valor, monedaPago, baseMoneda, monedas, 2)
+      ? convertirProducto(valor, monedaPago, baseMoneda, "venta", 2)
       : null;
+
+  const handleCambioMoneda = (nuevaMonedaId: string) => {
+    if (nuevaMonedaId === monedaId) return;
+    const nuevaMoneda = monedas.find((m) => m.id === nuevaMonedaId);
+    const actualMoneda = monedas.find((m) => m.id === monedaId);
+    const num = parseFloat(monto.replace(",", "."));
+    if (Number.isFinite(num) && num > 0 && actualMoneda && nuevaMoneda) {
+      const dec = Number(nuevaMoneda.decimales ?? 2);
+      const convertido = convertirProducto(num, actualMoneda, nuevaMoneda, "venta", dec);
+      setMonto(String(convertido));
+    }
+    setMonedaId(nuevaMonedaId);
+  };
 
   const handleMetodoChange = (id: string) => {
     setMetodoPagoId(id);
@@ -198,7 +213,7 @@ export function PagarDeudaModal({
   const rellenarTotal = () => {
     if (!monedaPago || !baseMoneda || deudaTotalBase <= 0) return;
     const dec = Number(monedaPago.decimales ?? 2);
-    const totalEnMoneda = convertir(deudaTotalBase, baseMoneda, monedaPago, monedas, dec);
+    const totalEnMoneda = convertirProducto(deudaTotalBase, baseMoneda, monedaPago, "venta", dec);
     setMonto(String(totalEnMoneda));
   };
 
@@ -337,7 +352,7 @@ export function PagarDeudaModal({
               <button
                 key={m.id}
                 type="button"
-                onClick={() => setMonedaId(m.id)}
+                onClick={() => handleCambioMoneda(m.id)}
                 aria-pressed={activa}
                 className={cn(
                   "inline-flex h-9 items-center gap-1.5 rounded-full border px-4 text-sm font-semibold transition-all active:scale-95",

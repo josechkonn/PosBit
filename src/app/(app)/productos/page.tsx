@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect, useCallback, useMemo, useRef } from "react";
-import { Download, Filter, Plus, X, Barcode } from "lucide-react";
+import { Download, Filter, Plus, X, Barcode, Trash2, RotateCcw, Package, Loader2 } from "lucide-react";
 import { ActionButtons } from "@/components/ui/action-buttons";
 import { StatusBadge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -30,6 +30,8 @@ interface Producto {
   stock_minimo: number;
   activo: boolean;
   iva_incluido: boolean;
+  eliminado?: boolean;
+  eliminado_en?: string | null;
   precio_base: number;
   costo_base: number;
   categoria_nombre: string | null;
@@ -170,6 +172,10 @@ export default function ProductosPage() {
   const [modalMode, setModalMode] = useState<ModalMode>("create");
   const [selectedProducto, setSelectedProducto] = useState<Producto | null>(null);
 
+  const [tab, setTab] = useState<"catalogo" | "basurero">("catalogo");
+  const [basureroCount, setBasureroCount] = useState(0);
+  const [restoringId, setRestoringId] = useState<number | null>(null);
+
   // Sorting state
   const [sortKey, setSortKey] = useState<string>("codigo");
   const [sortOrder, setSortOrder] = useState<"asc" | "desc">("asc");
@@ -186,26 +192,64 @@ export default function ProductosPage() {
   const lastKeyTime = useRef(0);
   const { toast } = useToast();
 
-  const fetchData = useCallback(async (page: number, queryStr?: string) => {
+  const fetchData = useCallback(async (page: number, queryStr?: string, targetTab?: "catalogo" | "basurero") => {
     setLoading(true);
     try {
       const q = (queryStr !== undefined ? queryStr : search).trim();
-      const url = q
-        ? `/api/productos?page=1&limit=1000&search=${encodeURIComponent(q)}`
-        : `/api/productos?page=${page}&limit=${PAGE_SIZE}`;
-      const res = await fetch(url);
+      const currentTab = targetTab !== undefined ? targetTab : tab;
+      const params = new URLSearchParams();
+      if (q) {
+        params.append("page", "1");
+        params.append("limit", "1000");
+        params.append("search", q);
+      } else {
+        params.append("page", page.toString());
+        params.append("limit", PAGE_SIZE.toString());
+      }
+      if (currentTab === "basurero") {
+        params.append("basurero", "true");
+      }
+      const res = await fetch(`/api/productos?${params.toString()}`);
       if (res.ok) {
         const data = await res.json();
         setProductos(data.productos || []);
         setMonedas(data.monedas || []);
         setPagination(data.pagination || { page: 1, limit: PAGE_SIZE, total: 0, totalPages: 0 });
+        if (typeof data.basureroCount === "number") {
+          setBasureroCount(data.basureroCount);
+        }
       }
     } catch (error) {
       console.error("Error al obtener productos:", error);
     } finally {
       setLoading(false);
     }
-  }, [search]);
+  }, [search, tab]);
+
+  const handleTabChange = (newTab: "catalogo" | "basurero") => {
+    setTab(newTab);
+    setCurrentPage(1);
+    fetchData(1, search, newTab);
+  };
+
+  const handleRestaurar = async (producto: Producto) => {
+    try {
+      setRestoringId(producto.id);
+      const res = await fetch("/api/productos/restaurar", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id: producto.id }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Error al restaurar producto");
+      toast(data.message || `Producto "${producto.nombre}" restaurado`, "success");
+      fetchData(currentPage, search, "basurero");
+    } catch (err) {
+      toast(err instanceof Error ? err.message : "Error al restaurar", "error");
+    } finally {
+      setRestoringId(null);
+    }
+  };
 
   useEffect(() => {
     fetchData(currentPage);
@@ -337,6 +381,9 @@ export default function ProductosPage() {
         } else if (sortKey === "margen") {
           aVal = margenRealDeProducto(a) ?? -Infinity;
           bVal = margenRealDeProducto(b) ?? -Infinity;
+        } else if (sortKey === "eliminado_en") {
+          aVal = a.eliminado_en ? new Date(a.eliminado_en).getTime() : 0;
+          bVal = b.eliminado_en ? new Date(b.eliminado_en).getTime() : 0;
         }
 
         if (aVal === null || aVal === undefined) aVal = "";
@@ -375,6 +422,20 @@ export default function ProductosPage() {
     { label: "Estado" },
     { label: "Acciones" },
   ], [monedas]);
+
+  const basureroHeaders: HeaderConfig[] = useMemo(() => [
+    { label: "" },
+    { key: "codigo", label: "Código", sortable: true },
+    { key: "nombre", label: "Nombre", sortable: true },
+    { key: "stock", label: "Existencias al archivar", sortable: true },
+    { key: "categoria_nombre", label: "Categoría", sortable: true },
+    { key: "marca_nombre", label: "Marca", sortable: true },
+    { key: "proveedor_nombre", label: "Proveedor", sortable: true },
+    { key: "eliminado_en", label: "Fecha archivado", sortable: true },
+    { label: "Acciones" },
+  ], []);
+
+  const tableHeaders = tab === "basurero" ? basureroHeaders : headers;
 
   const handleExport = () => {
     if (filteredProductos.length === 0) return;
@@ -443,7 +504,7 @@ export default function ProductosPage() {
   };
 
   const handleSuccess = (message: string) => {
-    fetchData(currentPage);
+    fetchData(currentPage, search, tab);
     toast(message, "success");
   };
 
@@ -458,13 +519,55 @@ export default function ProductosPage() {
     <div>
       <PageHeader
         title="Productos"
-        subtitle="Gestión del catálogo de productos"
+        subtitle={tab === "catalogo" ? "Gestión del catálogo de productos" : "Productos archivados con transacciones registradas"}
         action={
-          <Button onClick={() => openModal("create")}>
-            <Plus size={14} /> Nuevo Producto
-          </Button>
+          tab === "catalogo" ? (
+            <Button onClick={() => openModal("create")}>
+              <Plus size={14} /> Nuevo Producto
+            </Button>
+          ) : undefined
         }
       />
+
+      {/* Selector de pestañas: Catálogo vs Basurero */}
+      <div className="mb-4 flex items-center gap-2 border-b border-border pb-2">
+        <button
+          onClick={() => handleTabChange("catalogo")}
+          className={cn(
+            "flex items-center gap-2 px-3 py-1.5 text-xs sm:text-sm font-medium rounded-md transition-colors",
+            tab === "catalogo"
+              ? "bg-primary text-primary-foreground shadow-sm"
+              : "text-muted-foreground hover:text-foreground hover:bg-muted"
+          )}
+        >
+          <Package size={15} />
+          Catálogo activo
+        </button>
+        <button
+          onClick={() => handleTabChange("basurero")}
+          className={cn(
+            "flex items-center gap-2 px-3 py-1.5 text-xs sm:text-sm font-medium rounded-md transition-colors",
+            tab === "basurero"
+              ? "bg-destructive text-destructive-foreground shadow-sm"
+              : "text-muted-foreground hover:text-foreground hover:bg-muted"
+          )}
+        >
+          <Trash2 size={15} />
+          Basurero
+          {basureroCount > 0 && (
+            <span
+              className={cn(
+                "ml-1 inline-flex items-center justify-center rounded-full px-1.5 py-0.2 text-[10px] font-bold",
+                tab === "basurero"
+                  ? "bg-destructive-foreground/20 text-destructive-foreground"
+                  : "bg-muted-foreground/20 text-muted-foreground"
+              )}
+            >
+              {basureroCount}
+            </span>
+          )}
+        </button>
+      </div>
 
       <div className="mb-4 flex flex-wrap items-center gap-3">
         <SearchBar

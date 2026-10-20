@@ -11,7 +11,7 @@ export async function GET() {
         SELECT p.id, p.nombre, p.codigo, p.stock, p.stock_minimo,
           CASE WHEN p.stock = 0 THEN 'sin_stock' ELSE 'bajo_stock' END as severidad
         FROM productos p
-        WHERE p.activo = true AND p.stock <= p.stock_minimo
+        WHERE p.activo = true AND (p.eliminado IS NULL OR p.eliminado = false) AND p.stock <= p.stock_minimo
         ORDER BY p.stock ASC, p.id ASC
         LIMIT 10
       `),

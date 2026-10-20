@@ -45,10 +45,12 @@ export async function GET(request: Request) {
     // producto (típico con códigos internos que alguien también escribió de
     // memoria como texto a buscar).
     const presRes = await query(
-      `SELECT id, producto_id, nombre, unidades, activo, codigo,
-              modo_venta, precio_override, margen_override
-         FROM producto_presentaciones
-        WHERE lower(codigo) = lower($1)
+      `SELECT pp.id, pp.producto_id, pp.nombre, pp.unidades, pp.activo, pp.codigo,
+              pp.modo_venta, pp.precio_override, pp.margen_override
+         FROM producto_presentaciones pp
+         JOIN productos p ON p.id = pp.producto_id
+        WHERE lower(pp.codigo) = lower($1)
+          AND (p.eliminado IS NULL OR p.eliminado = false)
         LIMIT 1`,
       [codigo]
     );
@@ -62,6 +64,7 @@ export async function GET(request: Request) {
          LEFT JOIN marcas m ON p.marca_id = m.id
          LEFT JOIN proveedores pr ON p.proveedor_id = pr.id
         WHERE lower(p.codigo) = lower($1)
+          AND (p.eliminado IS NULL OR p.eliminado = false)
         LIMIT 1`,
       [codigo]
     );
@@ -78,6 +81,7 @@ export async function GET(request: Request) {
            LEFT JOIN marcas m ON p.marca_id = m.id
            LEFT JOIN proveedores pr ON p.proveedor_id = pr.id
           WHERE p.activo = true
+            AND (p.eliminado IS NULL OR p.eliminado = false)
             AND (p.nombre ILIKE $1 OR p.codigo ILIKE $1 OR p.descripcion ILIKE $1
                  OR EXISTS (
                    SELECT 1 FROM producto_presentaciones pp
@@ -106,7 +110,8 @@ export async function GET(request: Request) {
            LEFT JOIN categorias c ON p.categoria_id = c.id
            LEFT JOIN marcas m ON p.marca_id = m.id
            LEFT JOIN proveedores pr ON p.proveedor_id = pr.id
-          WHERE p.id = $1`,
+          WHERE p.id = $1
+            AND (p.eliminado IS NULL OR p.eliminado = false)`,
         [pres.producto_id]
       );
       if (producto.length === 0) {

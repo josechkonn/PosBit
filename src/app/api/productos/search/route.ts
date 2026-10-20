@@ -33,6 +33,7 @@ export async function GET(request: Request) {
       FROM productos p
       LEFT JOIN categorias c ON p.categoria_id = c.id
       WHERE p.activo = true
+        AND (p.eliminado IS NULL OR p.eliminado = false)
         AND (
           p.nombre ILIKE $1
           OR p.codigo ILIKE $1

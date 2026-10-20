@@ -1447,6 +1447,9 @@ const agregarPresentacionDesdePicker = () => {
         });
         const data = await res.json();
         if (!res.ok) throw new Error(data.error || "Error al eliminar producto");
+        onSuccess(data.message || `Producto "${producto.nombre}" procesado exitosamente`);
+        onClose();
+        return;
       }
 
       const successMessages: Record<string, string> = {
@@ -2725,8 +2728,8 @@ const agregarPresentacionDesdePicker = () => {
               ¿Estás seguro de que deseas eliminar el producto{" "}
               <span className="font-semibold text-foreground">{producto.nombre}</span> ({producto.codigo})?
             </p>
-            <div className="rounded-lg border border-amber-500/20 bg-amber-500/5 px-3 py-2 text-sm text-amber-600">
-              Esta acción no se puede deshacer. Si el producto tiene compras o ventas asociadas, no podrá eliminarse.
+            <div className="rounded-lg border border-amber-500/20 bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-400">
+              Si el producto no tiene compras ni ventas registradas, se eliminará definitivamente del sistema. Si ya tiene transacciones asociadas, se moverá de forma segura al <strong>Basurero</strong> para no interferir en ventas, compras ni kardex.
             </div>
           </motion.div>
         )}

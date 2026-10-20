@@ -17,6 +17,7 @@ export interface FiltrosProductos {
   estadoProd: "todos" | "activo" | "inactivo";
   existencia: "todos" | "con_stock" | "bajo_minimo" | "sin_stock";
   iva: "todos" | "incluido" | "excluido";
+  basurero?: boolean;
 }
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -51,12 +52,14 @@ export function leerFiltros(sp: URLSearchParams): FiltrosProductos {
       "todos"
     ),
     iva: unoDe(sp.get("iva"), ["incluido", "excluido"] as const, "todos"),
+    basurero: sp.get("basurero") === "true" || sp.get("tab") === "basurero",
   };
 }
 
 /** ¿El usuario pidió algo? Determina si hay que calcular facetas. */
 export function SIN_FILTROS(f: FiltrosProductos): boolean {
   return (
+    !f.basurero &&
     f.busqueda === "" &&
     f.categorias.length === 0 &&
     f.marcas.length === 0 &&
@@ -90,6 +93,12 @@ export function construirWhere(f: FiltrosProductos, omitir?: DimFiltro) {
     params.push(valor);
     return `$${params.length}`;
   };
+
+  if (f.basurero) {
+    conds.push("p.eliminado = true");
+  } else {
+    conds.push("(p.eliminado IS NULL OR p.eliminado = false)");
+  }
 
   if (f.busqueda) {
     // Un solo parámetro reutilizado (ILIKE no acepta listas).

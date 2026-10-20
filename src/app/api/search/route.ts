@@ -18,7 +18,8 @@ export async function GET(request: Request) {
       query(
         `SELECT p.id, p.nombre, p.codigo, 'producto' as tipo, p.stock, p.activo
          FROM productos p
-         WHERE p.nombre ILIKE $1 OR p.codigo ILIKE $1
+         WHERE (p.eliminado IS NULL OR p.eliminado = false)
+           AND (p.nombre ILIKE $1 OR p.codigo ILIKE $1)
          ORDER BY p.nombre ASC
          LIMIT 8`,
         [like]

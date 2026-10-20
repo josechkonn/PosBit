@@ -32,7 +32,7 @@ export async function GET(request: Request) {
     const tipo = (searchParams.get("tipo") || "todos").trim();
 
     // Filtros
-    const where: string[] = [];
+    const where: string[] = ["(p.eliminado IS NULL OR p.eliminado = false)"];
     const params: any[] = [];
     if (tipo === "Entrada" || tipo === "Salida" || tipo === "Ajuste") {
       params.push(tipo);
@@ -59,13 +59,15 @@ export async function GET(request: Request) {
     );
     const total = Number(totalRow?.count || 0);
 
-    // Totales globales del kardex (independientes del filtro/página)
+    // Totales globales del kardex (independientes del filtro/página, excluyendo productos en basurero)
     const statsRow = await queryOne<{ entradas: string; salidas: string; ajustes: string }>(`
       SELECT
-        COALESCE(SUM(CASE WHEN tipo = 'Entrada' THEN ABS(cantidad) ELSE 0 END), 0) AS entradas,
-        COALESCE(SUM(CASE WHEN tipo = 'Salida' THEN ABS(cantidad) ELSE 0 END), 0) AS salidas,
-        COUNT(*) FILTER (WHERE tipo = 'Ajuste') AS ajustes
-      FROM kardex
+        COALESCE(SUM(CASE WHEN k.tipo = 'Entrada' THEN ABS(k.cantidad) ELSE 0 END), 0) AS entradas,
+        COALESCE(SUM(CASE WHEN k.tipo = 'Salida' THEN ABS(k.cantidad) ELSE 0 END), 0) AS salidas,
+        COUNT(*) FILTER (WHERE k.tipo = 'Ajuste') AS ajustes
+      FROM kardex k
+      JOIN productos p ON k.producto_id = p.id
+      WHERE (p.eliminado IS NULL OR p.eliminado = false)
     `);
 
     const movimientos = await query(
