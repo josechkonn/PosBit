@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from "react";
+import React, { useState, useEffect, useCallback, useRef } from "react";
 import {
   SafeAreaView,
   View,
@@ -10,6 +10,7 @@ import {
   ActivityIndicator,
   Alert,
   StatusBar,
+  AppState,
 } from "react-native";
 import NetInfo from "@react-native-community/netinfo";
 import {
@@ -56,6 +57,9 @@ export default function App() {
 
   const [cart, setCart] = useState<CartItem[]>([]);
   const [clienteNombre, setClienteNombre] = useState("Consumidor Final");
+  const syncingRef = useRef(false);
+  const searchRef = useRef("");
+  searchRef.current = search;
 
   const loadLocalData = useCallback(async (searchQuery = "") => {
     const [prods, mons, vtas] = await Promise.all([
@@ -68,6 +72,33 @@ export default function App() {
     setVentasLocales(vtas);
   }, []);
 
+  const handleSync = useCallback(
+    async (silent = true) => {
+      if (syncingRef.current) return;
+      syncingRef.current = true;
+      setSyncing(true);
+      try {
+        const res = await syncMobileWithCloud();
+        await loadLocalData(searchRef.current);
+        if (!silent) {
+          Alert.alert(
+            "Sincronización exitosa",
+            `Ventas subidas: ${res.ventasSubidas}\nProductos actualizados: ${res.productosActualizados}`
+          );
+        }
+      } catch (err: any) {
+        if (!silent) {
+          Alert.alert("Modo Offline", err?.message || "Trabajando con datos locales.");
+        }
+      } finally {
+        syncingRef.current = false;
+        setSyncing(false);
+      }
+    },
+    [loadLocalData]
+  );
+
+  // 1. Al abrir la app: cargar base local al instante y lanzar sync automático en segundo plano
   useEffect(() => {
     (async () => {
       try {
@@ -76,6 +107,7 @@ export default function App() {
         if (session.user && session.token) {
           setUser(session.user);
           await loadLocalData();
+          handleSync(true);
         }
       } catch (e) {
         console.warn("Error cargando sesión móvil:", e);
@@ -83,9 +115,9 @@ export default function App() {
         setInitializing(false);
       }
     })();
-  }, [loadLocalData]);
+  }, [loadLocalData, handleSync]);
 
-  // Escuchar cambios de conectividad y sincronizar automáticamente al recuperar internet
+  // 2. Escuchar cambios de conectividad: al recuperar internet se sincroniza sola sin tocar nada
   useEffect(() => {
     const unsubscribe = NetInfo.addEventListener((state) => {
       const connected = Boolean(state.isConnected);
@@ -95,7 +127,27 @@ export default function App() {
       }
     });
     return () => unsubscribe();
-  }, [user]);
+  }, [user, handleSync]);
+
+  // 3. Auto-sync periódico cada 12 segundos en segundo plano mientras haya sesión e internet
+  useEffect(() => {
+    if (!user || !isOnline) return;
+    const interval = setInterval(() => {
+      handleSync(true);
+    }, 12000);
+    return () => clearInterval(interval);
+  }, [user, isOnline, handleSync]);
+
+  // 4. Sincronizar automáticamente cuando la app vuelve a primer plano (desbloquear celular / cambiar de app)
+  useEffect(() => {
+    if (!user) return;
+    const sub = AppState.addEventListener("change", (nextState) => {
+      if (nextState === "active") {
+        handleSync(true);
+      }
+    });
+    return () => sub.remove();
+  }, [user, handleSync]);
 
   useEffect(() => {
     if (user) {
@@ -118,27 +170,6 @@ export default function App() {
       Alert.alert("Error de acceso", err?.message || "No se pudo conectar al servidor");
     } finally {
       setAuthLoading(false);
-    }
-  };
-
-  const handleSync = async (silent = false) => {
-    if (syncing) return;
-    setSyncing(true);
-    try {
-      const res = await syncMobileWithCloud();
-      await loadLocalData(search);
-      if (!silent) {
-        Alert.alert(
-          "Sincronización exitosa",
-          `Ventas subidas: ${res.ventasSubidas}\nProductos actualizados: ${res.productosActualizados}`
-        );
-      }
-    } catch (err: any) {
-      if (!silent) {
-        Alert.alert("Modo Offline", err?.message || "Trabajando con datos locales.");
-      }
-    } finally {
-      setSyncing(false);
     }
   };
 
