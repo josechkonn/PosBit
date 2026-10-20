@@ -39,9 +39,10 @@ export async function ensureDatabase(sharedPool?: Pool): Promise<void> {
       const fastCheck = await sharedPool.query(`
         SELECT 
           EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'sync_config') AS has_sync,
-          EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'compra_abonos') AS has_abonos
+          EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'compra_abonos') AS has_abonos,
+          EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'productos' AND column_name = 'eliminado') AS has_eliminado
       `);
-      if (fastCheck.rows[0]?.has_sync && fastCheck.rows[0]?.has_abonos) {
+      if (fastCheck.rows[0]?.has_sync && fastCheck.rows[0]?.has_abonos && fastCheck.rows[0]?.has_eliminado) {
         return;
       }
     } catch {

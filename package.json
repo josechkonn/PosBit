@@ -1,6 +1,6 @@
 {
   "name": "posbit",
-  "version": "0.1.22-nube.2",
+  "version": "0.1.22-nube.3",
   "private": true,
   "main": "electron/main.cjs",
   "scripts": {
@@ -10,6 +10,7 @@
     "test:money": "node tests/money.ts",
     "test:cobros": "node tests/cobros.ts",
     "test:costing": "node --import ./tests/paths-loader.mjs tests/costing.ts",
+    "db:migrate": "node scripts/actualizar-instalacion-existente.cjs",
     "electron:dev": "electron .",
     "electron:build": "next build && electron-builder --win",
     "dist": "next build && electron-builder --win --publish always"
