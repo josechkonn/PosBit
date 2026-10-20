@@ -243,6 +243,7 @@ export default function App() {
 
   // POS Checkout Modal State
   const [showCheckoutModal, setShowCheckoutModal] = useState(false);
+  const [showMetodoPickerModal, setShowMetodoPickerModal] = useState(false);
   const [modoMixto, setModoMixto] = useState(false);
   const [lineasPago, setLineasPago] = useState<LineaPago[]>([]);
   const [cobrosExtra, setCobrosExtra] = useState<CobroExtra[]>([]);
@@ -897,6 +898,9 @@ export default function App() {
     const mpDefaultId = metodoPagoSeleccionado || (metodosPago[0] ? String(metodosPago[0].id) : "");
     const mpObj = metodosPago.find((x) => String(x.id) === String(mpDefaultId));
     const codMetodo = mpObj?.moneda_codigo || monedaSeleccionada;
+    if (codMetodo && codMetodo !== monedaSeleccionada) {
+      setMonedaSeleccionada(codMetodo);
+    }
     const totalEnMonedaMetodo = calcularTotalEnMoneda(codMetodo);
     const dec = decMoneda(codMetodo);
 
@@ -922,6 +926,30 @@ export default function App() {
     infoCreditoCliente,
     showToast,
   ]);
+
+  const handleSelectMetodoCheckout = useCallback(
+    (mpId: string) => {
+      setMetodoPagoSeleccionado(mpId);
+      const mp = metodosPago.find((m) => String(m.id) === String(mpId));
+      if (mp) {
+        if (mp.caja_id) setCajaSeleccionada(String(mp.caja_id));
+        const codNuevo = mp.moneda_codigo || monedaSeleccionada;
+        if (codNuevo) {
+          setMonedaSeleccionada(codNuevo);
+        }
+        const totalEnMoneda = calcularTotalEnMoneda(codNuevo);
+        const dec = decMoneda(codNuevo);
+        setLineasPago([
+          {
+            key: 1,
+            metodoId: mpId,
+            montoStr: totalEnMoneda.toFixed(dec),
+          },
+        ]);
+      }
+    },
+    [metodosPago, monedaSeleccionada, calcularTotalEnMoneda, decMoneda]
+  );
 
   // Otorgar o ajustar límite de crédito directamente desde el Checkout
   const handleAjustarLimiteCheckout = useCallback(
@@ -2314,34 +2342,6 @@ export default function App() {
                   </TouchableOpacity>
                 )}
               </View>
-
-              {/* Moneda activa selector pill */}
-              <ScrollView
-                horizontal
-                showsHorizontalScrollIndicator={false}
-                style={{ flexGrow: 0 }}
-                contentContainerStyle={{ gap: 4 }}
-              >
-                {monedas.map((m) => {
-                  const active = m.codigo === monedaSeleccionada;
-                  return (
-                    <TouchableOpacity
-                      key={m.id}
-                      style={[styles.currencyPill, active && styles.currencyPillActive]}
-                      onPress={() => setMonedaSeleccionada(m.codigo)}
-                    >
-                      <Text
-                        style={[
-                          styles.currencyPillText,
-                          active && styles.currencyPillTextActive,
-                        ]}
-                      >
-                        {m.codigo}
-                      </Text>
-                    </TouchableOpacity>
-                  );
-                })}
-              </ScrollView>
             </View>
 
             {/* Métodos de Pago horizontales (idénticos al selector del POS web: cambian la moneda automáticamente) */}
@@ -4800,130 +4800,223 @@ export default function App() {
               </TouchableOpacity>
             </View>
 
-            <ScrollView
-              style={{ maxHeight: 540 }}
-              contentContainerStyle={{ gap: 12, paddingBottom: 16 }}
-              keyboardShouldPersistTaps="handled"
-            >
-              {/* Resumen Cliente y Total a Pagar */}
-              <View style={styles.checkoutTopSummary}>
-                <View style={{ flex: 1 }}>
-                  <Text style={styles.fieldLabelSmall}>CLIENTE</Text>
-                  <Text style={styles.checkoutClientText}>
-                    {clienteSeleccionadoObj
-                      ? clienteSeleccionadoObj.nombre
-                      : "Consumidor Final"}
-                  </Text>
-                </View>
-                <View style={{ alignItems: "flex-end" }}>
-                  <Text style={styles.fieldLabelSmall}>TOTAL A COBRAR</Text>
-                  <Text style={styles.checkoutBigTotal}>
-                    {fmt(total, monedaSeleccionada)}
-                  </Text>
-                </View>
-              </View>
+            {(() => {
+              const mpActualSimple =
+                metodosPago.find(
+                  (m) => String(m.id) === String(lineasPago[0]?.metodoId || metodoPagoSeleccionado)
+                ) || metodosPago[0];
+              const codMetodoActual = mpActualSimple?.moneda_codigo || monedaSeleccionada;
+              const totalCobrarMetodo = calcularTotalEnMoneda(codMetodoActual);
+              const dec = decMoneda(codMetodoActual);
+              const mRecibido = parseFloat((lineasPago[0]?.montoStr || "0").replace(",", ".")) || 0;
+              const vueltoSimple = Math.max(0, Math.round((mRecibido - totalCobrarMetodo) * 100) / 100);
+              const faltaSimple = Math.max(0, Math.round((totalCobrarMetodo - mRecibido) * 100) / 100);
 
-              {/* Cabecera Forma de Pago + Switch Pago Mixto */}
-              <View style={styles.checkoutSectionHeader}>
-                <Text style={styles.fieldLabelSmall}>
-                  {modoMixto ? "LÍNEAS DE PAGO MIXTO" : "FORMA DE PAGO"}
-                </Text>
-                <TouchableOpacity
-                  style={[styles.mixtoToggleBtn, modoMixto && styles.mixtoToggleBtnActive]}
-                  onPress={() => {
-                    const next = !modoMixto;
-                    setModoMixto(next);
-                    if (!next && lineasPago.length > 1) {
-                      setLineasPago([lineasPago[0]]);
-                    }
-                  }}
+              return (
+                <ScrollView
+                  style={{ maxHeight: 540 }}
+                  contentContainerStyle={{ gap: 12, paddingBottom: 16 }}
+                  keyboardShouldPersistTaps="handled"
                 >
-                  <Text
-                    style={[
-                      styles.mixtoToggleBtnText,
-                      modoMixto && { color: "#fff" },
-                    ]}
-                  >
-                    {modoMixto ? "Modo simple" : "🔀 Pago Mixto"}
-                  </Text>
-                </TouchableOpacity>
-              </View>
+                  {/* Selector de Cliente dentro del Checkout */}
+                  <View style={styles.clienteSelectorBox}>
+                    <View style={styles.clienteSelectorHeader}>
+                      <Text style={styles.fieldLabelSmall}>CLIENTE DE LA VENTA</Text>
+                      <TouchableOpacity
+                        style={styles.newClientInlineBtn}
+                        onPress={() => openCreateClienteModal(null)}
+                      >
+                        <Feather name="user-plus" size={12} color={THEME.primary} />
+                        <Text style={styles.newClientInlineBtnText}>+ Nuevo</Text>
+                      </TouchableOpacity>
+                    </View>
 
-              {!modoMixto ? (
-                /* Modo Simple: Lista de Métodos de Pago + Monto Ingresado */
-                <View style={{ gap: 8 }}>
-                  <View style={styles.simpleMethodsList}>
-                    {metodosPago.map((mp) => {
-                      const active = String(lineasPago[0]?.metodoId || metodoPagoSeleccionado) === String(mp.id);
-                      return (
+                    <TouchableOpacity
+                      style={styles.clienteDropdownBtn}
+                      onPress={() => {
+                        setClientePickerSearch("");
+                        setShowClientePickerModal(true);
+                      }}
+                    >
+                      <Feather name="user" size={15} color={THEME.mutedForeground} />
+                      <Text style={styles.clienteDropdownText} numberOfLines={1}>
+                        {clienteSeleccionadoObj
+                          ? `${clienteSeleccionadoObj.nombre}${
+                              clienteSeleccionadoObj.documento
+                                ? ` (${clienteSeleccionadoObj.documento})`
+                                : ""
+                            }`
+                          : "Consumidor Final (Sin registrar)"}
+                      </Text>
+                      {clienteId ? (
                         <TouchableOpacity
-                          key={mp.id}
-                          style={[
-                            styles.simpleMethodRow,
-                            active && styles.simpleMethodRowActive,
-                          ]}
-                          onPress={() => {
-                            setMetodoPagoSeleccionado(String(mp.id));
-                            if (mp.caja_id) setCajaSeleccionada(String(mp.caja_id));
-                            const codMetodo = mp.moneda_codigo || monedaSeleccionada;
-                            const totalEnMonedaMetodo = calcularTotalEnMoneda(codMetodo);
-                            const dec = decMoneda(codMetodo);
-                            setLineasPago([
-                              {
-                                key: 1,
-                                metodoId: String(mp.id),
-                                montoStr: totalEnMonedaMetodo.toFixed(dec),
-                              },
-                            ]);
-                          }}
+                          onPress={() => setClienteId(null)}
+                          hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
                         >
-                          <Text style={{ fontSize: 15 }}>{getMetodoEmoji(mp.tipo, mp.nombre)}</Text>
-                          <Text
-                            style={[
-                              styles.simpleMethodName,
-                              active && { color: THEME.primary600, fontWeight: "700" },
-                            ]}
-                          >
-                            {mp.nombre}
-                          </Text>
-                          {mp.moneda_codigo && (
-                            <View style={styles.metodoChipBadge}>
-                              <Text style={styles.metodoChipBadgeText}>{mp.moneda_codigo}</Text>
-                            </View>
-                          )}
+                          <Feather name="x" size={16} color={THEME.mutedForeground} />
                         </TouchableOpacity>
-                      );
-                    })}
+                      ) : (
+                        <Feather name="chevron-down" size={16} color={THEME.mutedForeground} />
+                      )}
+                    </TouchableOpacity>
+
+                    {/* Alerta de Deuda Pendiente del Cliente si tiene */}
+                    {clienteSeleccionadoObj &&
+                      clienteSeleccionadoObj.deuda_total &&
+                      clienteSeleccionadoObj.deuda_total.some((d) => Number(d.monto) > 0) && (
+                        <View style={styles.deudaAlertBox}>
+                          <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
+                            <Feather name="alert-triangle" size={14} color={THEME.warningStrong} />
+                            <Text style={styles.deudaAlertTitle}>
+                              Deuda pendiente de {clienteSeleccionadoObj.nombre}:
+                            </Text>
+                          </View>
+                          <View style={styles.deudaAlertAmountsRow}>
+                            {clienteSeleccionadoObj.deuda_total
+                              .filter((d) => Number(d.monto) > 0)
+                              .map((d) => (
+                                <View key={d.codigo} style={styles.deudaChip}>
+                                  <Text style={styles.deudaChipText}>
+                                    {fmt(d.monto, d.codigo)}
+                                  </Text>
+                                </View>
+                              ))}
+                          </View>
+                        </View>
+                      )}
                   </View>
 
-                  {(() => {
-                    const mpActualSimple =
-                      metodosPago.find(
-                        (m) => String(m.id) === String(lineasPago[0]?.metodoId || metodoPagoSeleccionado)
-                      ) || metodosPago[0];
-                    const codLineaSimple = mpActualSimple?.moneda_codigo || monedaSeleccionada;
-                    const mActual = parseFloat((lineasPago[0]?.montoStr || "0").replace(",", ".")) || 0;
-                    const equivVenta = convertirMonto(mActual, codLineaSimple, monedaSeleccionada, "ventas");
-                    const monOrigen = monedas.find((m) => m.codigo === monedaSeleccionada);
-                    const monDestino = monedas.find((m) => m.codigo === codLineaSimple);
-                    const tPar = tasaPar(monOrigen, monDestino, monedas);
+                  {/* Resumen Total a Cobrar + Botón Fiar / Todo a Crédito */}
+                  <View style={styles.checkoutTopSummary}>
+                    <View style={{ flex: 1 }}>
+                      <Text style={styles.fieldLabelSmall}>TOTAL A COBRAR ({codMetodoActual})</Text>
+                      <Text style={styles.checkoutBigTotal}>
+                        {fmt(totalCobrarMetodo, codMetodoActual)}
+                      </Text>
+                    </View>
+                    <TouchableOpacity
+                      style={[
+                        styles.primarySmallBtn,
+                        {
+                          backgroundColor: THEME.rose,
+                          borderColor: THEME.rose,
+                          paddingHorizontal: 10,
+                          paddingVertical: 7,
+                        },
+                      ]}
+                      onPress={() => {
+                        if (!clienteSeleccionadoObj) {
+                          showToast("Selecciona un cliente para registrar la venta a crédito", "error");
+                          setClientePickerSearch("");
+                          setShowClientePickerModal(true);
+                          return;
+                        }
+                        handleConfirmSale("credito");
+                      }}
+                    >
+                      <Feather name="clock" size={13} color="#fff" />
+                      <Text style={[styles.primarySmallBtnText, { color: "#fff", fontWeight: "800" }]}>
+                        Fiar / A Crédito
+                      </Text>
+                    </TouchableOpacity>
+                  </View>
 
-                    return (
-                      <View>
-                        <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
-                          <Text style={styles.fieldLabelSmall}>
-                            MONTO RECIBIDO ({codLineaSimple})
+                  {/* Cabecera Forma de Pago + Switch Pago Mixto */}
+                  <View style={styles.checkoutSectionHeader}>
+                    <Text style={styles.fieldLabelSmall}>
+                      {modoMixto ? "LÍNEAS DE PAGO MIXTO" : "FORMA DE PAGO"}
+                    </Text>
+                    <TouchableOpacity
+                      style={[styles.mixtoToggleBtn, modoMixto && styles.mixtoToggleBtnActive]}
+                      onPress={() => {
+                        const next = !modoMixto;
+                        setModoMixto(next);
+                        if (!next && lineasPago.length > 1) {
+                          setLineasPago([lineasPago[0]]);
+                        }
+                      }}
+                    >
+                      <Text
+                        style={[
+                          styles.mixtoToggleBtnText,
+                          modoMixto && { color: "#fff" },
+                        ]}
+                      >
+                        {modoMixto ? "Modo simple" : "🔀 Pago Mixto"}
+                      </Text>
+                    </TouchableOpacity>
+                  </View>
+
+                  {!modoMixto ? (
+                    /* Modo Simple: Selector compacto de Método de Pago + Monto Recibido */
+                    <View style={{ gap: 10 }}>
+                      <TouchableOpacity
+                        style={styles.metodoSelectTrigger}
+                        onPress={() => setShowMetodoPickerModal(true)}
+                      >
+                        <View style={styles.metodoSelectIconWrap}>
+                          <Text style={{ fontSize: 16 }}>
+                            {getMetodoEmoji(mpActualSimple?.tipo, mpActualSimple?.nombre)}
                           </Text>
-                          {codLineaSimple !== monedaSeleccionada && (
-                            <Text style={{ fontSize: 11, color: THEME.mutedForeground }}>
-                              Total venta: {fmt(total, monedaSeleccionada)}
+                        </View>
+                        <View style={{ flex: 1, minWidth: 0 }}>
+                          <Text style={styles.metodoSelectName} numberOfLines={1}>
+                            {mpActualSimple?.nombre || "Seleccionar método de pago"}
+                          </Text>
+                          <Text style={styles.metodoSelectSub}>
+                            Moneda de cobro: {codMetodoActual}
+                          </Text>
+                        </View>
+                        <View style={styles.metodoChipBadge}>
+                          <Text style={styles.metodoChipBadgeText}>{codMetodoActual}</Text>
+                        </View>
+                        <Feather
+                          name="chevron-down"
+                          size={18}
+                          color={THEME.mutedForeground}
+                          style={{ marginLeft: 4 }}
+                        />
+                      </TouchableOpacity>
+
+                      {/* Monto Recibido */}
+                      <View>
+                        <View
+                          style={{
+                            flexDirection: "row",
+                            justifyContent: "space-between",
+                            alignItems: "center",
+                            marginBottom: 4,
+                          }}
+                        >
+                          <Text style={styles.fieldLabelSmall}>
+                            MONTO RECIBIDO ({codMetodoActual})
+                          </Text>
+                          <TouchableOpacity
+                            onPress={() => {
+                              setLineasPago([
+                                {
+                                  key: 1,
+                                  metodoId: lineasPago[0]?.metodoId || metodoPagoSeleccionado,
+                                  montoStr: totalCobrarMetodo.toFixed(dec),
+                                },
+                              ]);
+                            }}
+                          >
+                            <Text
+                              style={{
+                                fontSize: 12,
+                                fontWeight: "800",
+                                color: THEME.primary600,
+                              }}
+                            >
+                              Pagar exacto
                             </Text>
-                          )}
+                          </TouchableOpacity>
                         </View>
                         <TextInput
                           style={styles.input}
                           keyboardType="decimal-pad"
-                          placeholder={`0.00 en ${codLineaSimple}`}
+                          placeholder={`0.00 en ${codMetodoActual}`}
                           value={lineasPago[0]?.montoStr ?? ""}
                           onChangeText={(v) =>
                             setLineasPago([
@@ -4935,23 +5028,9 @@ export default function App() {
                             ])
                           }
                         />
-                        {codLineaSimple !== monedaSeleccionada && (
-                          <View style={{ flexDirection: "row", justifyContent: "space-between", marginTop: 4 }}>
-                            <Text style={{ fontSize: 11, color: THEME.mutedForeground }}>
-                              Equiv. a pagar: {fmt(equivVenta, monedaSeleccionada)}
-                            </Text>
-                            {tPar > 0 && (
-                              <Text style={{ fontSize: 11, color: THEME.primary600, fontWeight: "600" }}>
-                                1 {monedaSeleccionada} = {tPar.toLocaleString("es-VE", { maximumFractionDigits: 4 })} {codLineaSimple}
-                              </Text>
-                            )}
-                          </View>
-                        )}
                       </View>
-                    );
-                  })()}
-                </View>
-              ) : (
+                    </View>
+                  ) : (
                 /* Modo Mixto: Múltiples Líneas de Pago en distintas monedas */
                 <View style={{ gap: 8 }}>
                   {lineasPago.map((lp, idx) => {
@@ -5051,28 +5130,37 @@ export default function App() {
               {/* Resumen de Entra / Falta (Crédito) / Vuelto */}
               <View style={styles.checkoutBalanceBanner}>
                 <View style={styles.summaryRow}>
-                  <Text style={styles.summaryLabel}>Total Recibido (equiv.):</Text>
+                  <Text style={styles.summaryLabel}>Total Recibido:</Text>
                   <Text style={[styles.summaryVal, { color: THEME.successStrong }]}>
-                    {fmt(totalPagadoEnMonedaVenta, monedaSeleccionada)}
+                    {fmt(
+                      !modoMixto ? mRecibido : totalPagadoEnMonedaVenta,
+                      !modoMixto ? codMetodoActual : monedaSeleccionada
+                    )}
                   </Text>
                 </View>
-                {faltaPorPagar > 0.009 && (
+                {(!modoMixto ? faltaSimple > 0.009 : faltaPorPagar > 0.009) && (
                   <View style={styles.summaryRow}>
                     <Text style={[styles.summaryLabel, { color: THEME.dangerStrong }]}>
                       Saldo pendiente (a Crédito):
                     </Text>
                     <Text style={[styles.summaryVal, { color: THEME.dangerStrong }]}>
-                      {fmt(faltaPorPagar, monedaSeleccionada)}
+                      {fmt(
+                        !modoMixto ? faltaSimple : faltaPorPagar,
+                        !modoMixto ? codMetodoActual : monedaSeleccionada
+                      )}
                     </Text>
                   </View>
                 )}
-                {vueltoEnMonedaVenta > 0.009 && (
+                {(!modoMixto ? vueltoSimple > 0.009 : vueltoEnMonedaVenta > 0.009) && (
                   <View style={styles.summaryRow}>
                     <Text style={[styles.summaryLabel, { color: THEME.infoStrong }]}>
                       Vuelto a entregar:
                     </Text>
                     <Text style={[styles.summaryVal, { color: THEME.infoStrong }]}>
-                      {fmt(vueltoEnMonedaVenta, monedaSeleccionada)}
+                      {fmt(
+                        !modoMixto ? vueltoSimple : vueltoEnMonedaVenta,
+                        !modoMixto ? codMetodoActual : monedaSeleccionada
+                      )}
                     </Text>
                   </View>
                 )}
@@ -5238,11 +5326,18 @@ export default function App() {
                       {
                         backgroundColor: THEME.rose,
                         flex: 1,
-                        opacity: clienteSeleccionadoObj ? 1 : 0.45,
                       },
                     ]}
                     disabled={submittingSale}
-                    onPress={() => handleConfirmSale("credito")}
+                    onPress={() => {
+                      if (!clienteSeleccionadoObj) {
+                        showToast("Selecciona un cliente para registrar la venta a crédito", "error");
+                        setClientePickerSearch("");
+                        setShowClientePickerModal(true);
+                        return;
+                      }
+                      handleConfirmSale("credito");
+                    }}
                   >
                     <Feather name="clock" size={16} color="#fff" />
                     <Text style={styles.checkoutActionBtnText}>Todo a Crédito</Text>
@@ -5260,8 +5355,8 @@ export default function App() {
                     <>
                       <Feather name="sliders" size={16} color="#fff" />
                       <Text style={styles.checkoutActionBtnText}>
-                        {faltaPorPagar > 0.009
-                          ? `Registrar Pago Parcial (${fmt(faltaPorPagar)} a crédito)`
+                        {(!modoMixto ? faltaSimple > 0.009 : faltaPorPagar > 0.009)
+                          ? `Registrar Pago Parcial (${fmt(!modoMixto ? faltaSimple : faltaPorPagar, !modoMixto ? codMetodoActual : monedaSeleccionada)} a crédito)`
                           : "Confirmar con Monto Ingresado"}
                       </Text>
                     </>
@@ -5269,8 +5364,86 @@ export default function App() {
                 </TouchableOpacity>
               </View>
             </ScrollView>
+            );
+          })()}
           </View>
         </View>
+      </Modal>
+
+      {/* ==================== MODAL SELECTOR DE FORMA DE PAGO EN POS ==================== */}
+      <Modal
+        visible={showMetodoPickerModal}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setShowMetodoPickerModal(false)}
+      >
+        <TouchableOpacity
+          style={styles.modalBackdrop}
+          activeOpacity={1}
+          onPress={() => setShowMetodoPickerModal(false)}
+        >
+          <View style={[styles.modalSheet, { maxHeight: 460 }]}>
+            <View style={styles.modalHeader}>
+              <Text style={styles.modalTitle}>Forma de Pago</Text>
+              <TouchableOpacity onPress={() => setShowMetodoPickerModal(false)}>
+                <Feather name="x" size={20} color={THEME.mutedForeground} />
+              </TouchableOpacity>
+            </View>
+
+            <ScrollView
+              contentContainerStyle={{ gap: 8, paddingBottom: 16 }}
+              keyboardShouldPersistTaps="handled"
+            >
+              {metodosPago.map((mp) => {
+                const active =
+                  String(lineasPago[0]?.metodoId || metodoPagoSeleccionado) === String(mp.id);
+                return (
+                  <TouchableOpacity
+                    key={mp.id}
+                    style={[
+                      styles.simpleMethodRow,
+                      active && styles.simpleMethodRowActive,
+                    ]}
+                    onPress={() => {
+                      handleSelectMetodoCheckout(String(mp.id));
+                      setShowMetodoPickerModal(false);
+                    }}
+                  >
+                    <Text style={{ fontSize: 18 }}>{getMetodoEmoji(mp.tipo, mp.nombre)}</Text>
+                    <View style={{ flex: 1, minWidth: 0 }}>
+                      <Text
+                        style={[
+                          styles.simpleMethodName,
+                          active && { color: THEME.primary600, fontWeight: "700" },
+                        ]}
+                      >
+                        {mp.nombre}
+                      </Text>
+                      {mp.moneda_codigo && (
+                        <Text style={styles.clientCardMeta}>
+                          Moneda: {mp.moneda_codigo}
+                        </Text>
+                      )}
+                    </View>
+                    {mp.moneda_codigo && (
+                      <View style={styles.metodoChipBadge}>
+                        <Text style={styles.metodoChipBadgeText}>{mp.moneda_codigo}</Text>
+                      </View>
+                    )}
+                    {active && (
+                      <Feather
+                        name="check"
+                        size={18}
+                        color={THEME.primary}
+                        style={{ marginLeft: 6 }}
+                      />
+                    )}
+                  </TouchableOpacity>
+                );
+              })}
+            </ScrollView>
+          </View>
+        </TouchableOpacity>
       </Modal>
 
       {/* ==================== MODAL SELECTOR DE CLIENTE EN POS ==================== */}
@@ -7666,6 +7839,35 @@ const styles = StyleSheet.create({
     fontSize: 11,
     fontWeight: "700",
     color: THEME.primary600,
+  },
+  metodoSelectTrigger: {
+    flexDirection: "row",
+    alignItems: "center",
+    backgroundColor: THEME.inputBg,
+    borderWidth: 1,
+    borderColor: THEME.border,
+    borderRadius: 8,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    gap: 10,
+  },
+  metodoSelectIconWrap: {
+    width: 34,
+    height: 34,
+    borderRadius: 8,
+    backgroundColor: THEME.secondary,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  metodoSelectName: {
+    fontSize: 14,
+    fontWeight: "700",
+    color: THEME.foreground,
+  },
+  metodoSelectSub: {
+    fontSize: 11,
+    color: THEME.mutedForeground,
+    marginTop: 1,
   },
   simpleMethodsList: {
     gap: 6,
