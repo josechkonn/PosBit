@@ -34,6 +34,7 @@ interface SyncConfigState {
   ultima_sincronizacion_pull: string | null;
   ultimo_estado: string;
   ultimo_error: string | null;
+  es_nube_central?: boolean;
 }
 
 interface HistorialItem {
@@ -92,6 +93,7 @@ export function CloudSyncCard() {
             ultima_sincronizacion_pull: data.config.ultima_sincronizacion_pull,
             ultimo_estado: data.config.ultimo_estado || "sin_configurar",
             ultimo_error: data.config.ultimo_error || null,
+            es_nube_central: Boolean(data.config.es_nube_central),
           });
         }
         setPendingCount(data.pending?.totalPendientes ?? 0);
@@ -221,23 +223,43 @@ export function CloudSyncCard() {
           <span
             className={cn(
               "rounded-full px-2.5 py-0.5 text-[11px] font-medium",
-              cfg.modo_conexion === "desactivado"
-                ? "bg-muted text-muted-foreground"
-                : cfg.ultimo_estado === "error"
-                  ? "bg-danger/10 text-danger"
-                  : "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400"
+              cfg.es_nube_central
+                ? "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400"
+                : cfg.modo_conexion === "desactivado"
+                  ? "bg-muted text-muted-foreground"
+                  : cfg.ultimo_estado === "error"
+                    ? "bg-danger/10 text-danger"
+                    : "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400"
             )}
           >
-            {cfg.modo_conexion === "desactivado"
-              ? "Solo Local"
-              : cfg.ultimo_estado === "error"
-                ? "Error de conexión"
-                : "Activo"}
+            {cfg.es_nube_central
+              ? "Servidor Nube Central"
+              : cfg.modo_conexion === "desactivado"
+                ? "Solo Local"
+                : cfg.ultimo_estado === "error"
+                  ? "Error de conexión"
+                  : "Activo"}
           </span>
         </CardTitle>
       </CardHeader>
 
       <CardContent className="space-y-4">
+        {cfg.es_nube_central && (
+          <div className="rounded-lg border border-emerald-500/30 bg-emerald-500/10 p-3.5 text-xs text-foreground">
+            <div className="flex items-center gap-2 font-semibold text-emerald-600 dark:text-emerald-400">
+              <Check size={14} />
+              Estás directamente en el Servidor PosBit Cloud (Base de Datos Central en Tiempo Real)
+            </div>
+            <p className="mt-1 text-muted-foreground">
+              En esta página web todos tus productos, ventas y precios ya están guardados directamente en la nube (Supabase).
+              Para conectar tus <strong>PCs de Escritorio</strong> o la <strong>App Móvil</strong> a esta nube, usa en esos equipos el modo{" "}
+              <strong>Servidor PosBit Cloud (API HTTPS)</strong> con la URL:{" "}
+              <code className="rounded bg-background px-1.5 py-0.5 font-mono text-foreground">
+                {typeof window !== "undefined" ? window.location.origin : "https://pos-bit-pi.vercel.app"}
+              </code>
+            </p>
+          </div>
+        )}
         <p className="text-xs text-muted-foreground">
           Este equipo trabaja siempre sobre su base de datos local (nunca se detiene si se corta el
           internet). Al activar la nube, sincroniza automáticamente ventas, inventario, precios y

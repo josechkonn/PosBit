@@ -27,6 +27,10 @@ if (!globalForPool.dbInit) {
 
 const dbInit = globalForPool.dbInit;
 
+export function waitForDB(): Promise<void> {
+  return dbInit;
+}
+
 export async function query<T = any>(text: string, params?: any[]): Promise<T[]> {
   await dbInit;
   const result = await pool.query(text, params);

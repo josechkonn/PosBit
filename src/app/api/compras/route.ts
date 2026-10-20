@@ -22,6 +22,7 @@ import {
   procesarItemCompra,
   recomputarCppDesdeKardex,
 } from "@/lib/costing";
+import { triggerBackgroundSync } from "@/lib/sync-engine";
 
 /** Error de validación de datos enviados por el cliente → HTTP 400. */
 class ValidationError extends Error {}
@@ -35,29 +36,30 @@ function generarNumero() {
 export async function GET() {
   try {
     await requireSession();
-    const compras = await query(`
-      SELECT 
-        c.*,
-        p.nombre as proveedor_nombre,
-        mo.codigo as moneda_codigo,
-        mo.simbolo as moneda_simbolo,
-        mp.nombre as metodo_pago_nombre,
-        ca.nombre as caja_nombre,
-        (SELECT COUNT(*) FROM compra_items WHERE compra_id = c.id) as items_count
-      FROM compras c
-      JOIN proveedores p ON c.proveedor_id = p.id
-      JOIN monedas mo ON c.moneda_id = mo.id
-      LEFT JOIN metodos_pago mp ON c.metodo_pago_id = mp.id
-      LEFT JOIN cajas ca ON c.caja_id = ca.id
-      ORDER BY c.fecha DESC, c.creado_en DESC, c.id DESC
-    `);
-
-    const items = await query(`
-      SELECT ci.*, pr.nombre as producto_nombre, pr.codigo as producto_codigo
-      FROM compra_items ci
-      JOIN productos pr ON ci.producto_id = pr.id
-      ORDER BY ci.compra_id, ci.id
-    `);
+    const [compras, items] = await Promise.all([
+      query(`
+        SELECT 
+          c.*,
+          p.nombre as proveedor_nombre,
+          mo.codigo as moneda_codigo,
+          mo.simbolo as moneda_simbolo,
+          mp.nombre as metodo_pago_nombre,
+          ca.nombre as caja_nombre,
+          (SELECT COUNT(*) FROM compra_items WHERE compra_id = c.id) as items_count
+        FROM compras c
+        JOIN proveedores p ON c.proveedor_id = p.id
+        JOIN monedas mo ON c.moneda_id = mo.id
+        LEFT JOIN metodos_pago mp ON c.metodo_pago_id = mp.id
+        LEFT JOIN cajas ca ON c.caja_id = ca.id
+        ORDER BY c.fecha DESC, c.creado_en DESC, c.id DESC
+      `),
+      query(`
+        SELECT ci.*, pr.nombre as producto_nombre, pr.codigo as producto_codigo
+        FROM compra_items ci
+        JOIN productos pr ON ci.producto_id = pr.id
+        ORDER BY ci.compra_id, ci.id
+      `),
+    ]);
 
     return NextResponse.json({ compras, items });
   } catch (error) {
@@ -413,6 +415,7 @@ export async function POST(request: Request) {
       return compra;
     });
 
+    triggerBackgroundSync();
     return NextResponse.json(result, { status: 201 });
   } catch (error) {
     if (error instanceof ValidationError) {
@@ -446,6 +449,7 @@ export async function PUT(request: Request) {
       return NextResponse.json({ error: "Compra no encontrada" }, { status: 404 });
     }
 
+    triggerBackgroundSync();
     return NextResponse.json(result);
   } catch (error) {
     return NextResponse.json({ error: "Error al actualizar compra" }, { status: 500 });
@@ -510,6 +514,7 @@ export async function DELETE(request: Request) {
       await client.query(`DELETE FROM compras WHERE id = $1`, [id]);
     });
 
+    triggerBackgroundSync();
     return NextResponse.json({ success: true });
   } catch (error) {
     return NextResponse.json({ error: "Error al eliminar compra" }, { status: 500 });

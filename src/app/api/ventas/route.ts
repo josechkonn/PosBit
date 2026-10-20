@@ -5,6 +5,7 @@ import { requireSession } from "@/lib/auth-server";
 import { query, queryOne, execute, transaction } from "@/lib/db";
 import { fechaLocalISO } from "@/lib/format";
 import { aBase, convertir, redondear, tasaUsd, tasaUsdDocumento, monedaDeProducto, monedaCostoDeProducto, tasaMostrada, tasaPar, desdeBase } from "@/lib/money";
+import { triggerBackgroundSync } from "@/lib/sync-engine";
 
 function generarNumero() {
   const year = new Date().getFullYear();
@@ -36,49 +37,72 @@ export async function GET(request: Request) {
       ? "WHERE venta_id IN (SELECT id FROM ventas WHERE cliente_id = $1)"
       : "";
 
-    const ventas = await query(`
-      SELECT 
-        v.*,
-        cl.nombre as cliente_nombre,
-        mo.codigo as moneda_codigo,
-        mo.simbolo as moneda_simbolo,
-        mp.nombre as metodo_pago_nombre,
-        ca.nombre as caja_nombre,
-        (SELECT COUNT(*) FROM venta_items WHERE venta_id = v.id) as items_count,
-        cr.id as credito_id,
-        cr.numero as credito_numero,
-        cr.monto_total as credito_monto_total,
-        cr.saldo as credito_saldo,
-        cr.estado as credito_estado
-      FROM ventas v
-      LEFT JOIN clientes cl ON v.cliente_id = cl.id
-      JOIN monedas mo ON v.moneda_id = mo.id
-      LEFT JOIN metodos_pago mp ON v.metodo_pago_id = mp.id
-      LEFT JOIN cajas ca ON v.caja_id = ca.id
-      LEFT JOIN creditos cr ON cr.venta_id = v.id
-      ${where}
-      -- fecha es solo el dia; creado_en guarda la hora real para que las
-      -- ventas del mismo dia queden de la mas reciente a la mas antigua.
-      ORDER BY v.fecha DESC, v.creado_en DESC, v.id DESC
-    `, params);
+    const [ventas, items, pagos, cobros] = await Promise.all([
+      query(
+        `
+        SELECT 
+          v.*,
+          cl.nombre as cliente_nombre,
+          mo.codigo as moneda_codigo,
+          mo.simbolo as moneda_simbolo,
+          mp.nombre as metodo_pago_nombre,
+          ca.nombre as caja_nombre,
+          (SELECT COUNT(*) FROM venta_items WHERE venta_id = v.id) as items_count,
+          cr.id as credito_id,
+          cr.numero as credito_numero,
+          cr.monto_total as credito_monto_total,
+          cr.saldo as credito_saldo,
+          cr.estado as credito_estado
+        FROM ventas v
+        LEFT JOIN clientes cl ON v.cliente_id = cl.id
+        JOIN monedas mo ON v.moneda_id = mo.id
+        LEFT JOIN metodos_pago mp ON v.metodo_pago_id = mp.id
+        LEFT JOIN cajas ca ON v.caja_id = ca.id
+        LEFT JOIN creditos cr ON cr.venta_id = v.id
+        ${where}
+        -- fecha es solo el dia; creado_en guarda la hora real para que las
+        -- ventas del mismo dia queden de la mas reciente a la mas antigua.
+        ORDER BY v.fecha DESC, v.creado_en DESC, v.id DESC
+      `,
+        params
+      ),
+      query(
+        `
+        SELECT vi.*, pr.nombre as producto_nombre, pr.codigo as producto_codigo
+        FROM venta_items vi
+        JOIN productos pr ON vi.producto_id = pr.id
+        ${whereItems}
+        ORDER BY vi.venta_id, vi.id
+      `,
+        params
+      ),
+      query(
+        `
+        SELECT vp.*, mp.nombre as metodo_pago_nombre, mo.codigo as moneda_codigo, mo.simbolo as moneda_simbolo, mo.decimales as moneda_decimales
+        FROM venta_pagos vp
+        LEFT JOIN metodos_pago mp ON vp.metodo_pago_id = mp.id
+        JOIN monedas mo ON vp.moneda_id = mo.id
+        ${wherePagos}
+        ORDER BY vp.venta_id, vp.id
+      `,
+        params
+      ),
+      query(
+        `
+        SELECT * FROM venta_cobros_extra
+        ${whereCobros}
+        ORDER BY venta_id, id
+      `,
+        params
+      ).catch((e: any) => {
+        console.warn(
+          "Aviso al consultar venta_cobros_extra (se omiten cobros extra):",
+          e?.message || e
+        );
+        return [] as any[];
+      }),
+    ]);
 
-    const items = await query(`
-      SELECT vi.*, pr.nombre as producto_nombre, pr.codigo as producto_codigo
-      FROM venta_items vi
-      JOIN productos pr ON vi.producto_id = pr.id
-      ${whereItems}
-      ORDER BY vi.venta_id, vi.id
-    `, params);
-
-    // Líneas de pago por venta (pago mixto en varias monedas)
-    const pagos = await query(`
-      SELECT vp.*, mp.nombre as metodo_pago_nombre, mo.codigo as moneda_codigo, mo.simbolo as moneda_simbolo, mo.decimales as moneda_decimales
-      FROM venta_pagos vp
-      LEFT JOIN metodos_pago mp ON vp.metodo_pago_id = mp.id
-      JOIN monedas mo ON vp.moneda_id = mo.id
-      ${wherePagos}
-      ORDER BY vp.venta_id, vp.id
-    `, params);
     const pagosPorVenta = new Map<number, typeof pagos>();
     for (const p of pagos) {
       const lista = pagosPorVenta.get(p.venta_id) || [];
@@ -87,17 +111,6 @@ export async function GET(request: Request) {
     }
     const ventasConPagos = ventas.map((v) => ({ ...v, pagos: pagosPorVenta.get(v.id) || [] }));
 
-    // Cobros extra por venta (delivery, bolsa, propina, servicio...)
-    let cobros: any[] = [];
-    try {
-      cobros = await query(`
-        SELECT * FROM venta_cobros_extra
-        ${whereCobros}
-        ORDER BY venta_id, id
-      `, params);
-    } catch (e: any) {
-      console.warn("Aviso al consultar venta_cobros_extra (se omiten cobros extra):", e?.message || e);
-    }
     const cobrosPorVenta = new Map<number, typeof cobros>();
     for (const c of cobros) {
       const lista = cobrosPorVenta.get(c.venta_id) || [];
@@ -136,16 +149,32 @@ export async function POST(request: Request) {
     // crédito = nada pagado y contado = total pagado.
     const lineasPagoReq = Array.isArray(pagos) && pagos.length > 0 ? pagos : null;
     const esCreditoSolicitado = tipo_pago === "Credito" || tipo_pago === "Crédito";
+    const esOrigenOffline = Boolean(body.origen_offline);
+
+    // Idempotencia para ventas subidas desde la App Móvil en modo offline:
+    // si un reintento de red vuelve a enviar la misma venta móvil, devolver la existente sin duplicarla.
+    if (esOrigenOffline && observaciones) {
+      const existingOffline = await queryOne(
+        `SELECT * FROM ventas WHERE observaciones = $1 LIMIT 1`,
+        [String(observaciones)]
+      );
+      if (existingOffline) {
+        return NextResponse.json(existingOffline, { status: 200 });
+      }
+    }
 
     const result = await transaction(async (client) => {
-      const moneda = await client.query(`SELECT * FROM monedas WHERE id = $1`, [moneda_id]);
-      if (moneda.rows.length === 0) {
-        throw new Error("Moneda no encontrada");
-      }
       // Catálogo completo (incluso monedas inactivas): la cadena de conversiones
       // debe resolverse aunque una moneda del histórico esté desactivada
-      const monedasCatalogo = (await client.query(`SELECT * FROM monedas`)).rows;
-      const monedaVenta = moneda.rows[0];
+      const monedasCatalogo = (await client.query(`SELECT * FROM monedas ORDER BY es_base DESC, codigo ASC`)).rows;
+      let monedaVenta = monedasCatalogo.find((m: any) => String(m.id) === String(moneda_id));
+      if (!monedaVenta && esOrigenOffline) {
+        monedaVenta = monedasCatalogo.find((m: any) => m.es_base) || monedasCatalogo[0];
+      }
+      if (!monedaVenta) {
+        throw new Error("Moneda no encontrada");
+      }
+      const effectiveMonedaId = monedaVenta.id;
       // Tasa efectiva para el pase a base (USD): la personalizada si vino, si no la de la moneda
       const tasaUsdVenta = tasaUsdDocumento(monedaVenta, tasaCustom, monedasCatalogo);
       // Tasa "de cara al usuario": la personalizada si vino; si no, la directa a
@@ -197,7 +226,7 @@ export async function POST(request: Request) {
         }
         // `cantidad` SIEMPRE llega en unidades (el POS ya multiplica cajas ×
         // unidades), así que la validación de stock y el kardex no cambian.
-        if (producto.rows[0].stock < item.cantidad) {
+        if (!esOrigenOffline && producto.rows[0].stock < item.cantidad) {
           throw new Error(`Existencias insuficientes para ${producto.rows[0].nombre}`);
         }
 
@@ -394,9 +423,26 @@ export async function POST(request: Request) {
       // Con pago mixto la venta hereda método/caja de la primera línea con
       // efectivo (si el cliente no envió uno explícito)
       const primeraConEfectivo = lineasPago.find((l) => efectivoLinea(l) > 0.009);
-      const metodoVentaId = metodo_pago_id || primeraConEfectivo?.metodoId || null;
-      const cajaVentaId =
+      let metodoVentaId = metodo_pago_id || primeraConEfectivo?.metodoId || null;
+      let cajaVentaId =
         pagado > 0.009 ? (caja_id || primeraConEfectivo?.cajaId || null) : null;
+
+      // Si es una venta offline desde móvil sin caja/método explícito, asignar la caja/método por defecto de la moneda
+      if (esOrigenOffline && pagado > 0.009 && (!cajaVentaId || !metodoVentaId)) {
+        const defaultCaja = await client.query(
+          `SELECT ca.id AS caja_id, mp.id AS metodo_id
+             FROM cajas ca
+             LEFT JOIN metodos_pago mp ON mp.caja_id = ca.id AND mp.activo = true
+            WHERE ca.moneda_id = $1
+            ORDER BY ca.id ASC, mp.id ASC
+            LIMIT 1`,
+          [effectiveMonedaId]
+        );
+        if (defaultCaja.rows.length > 0) {
+          if (!cajaVentaId) cajaVentaId = defaultCaja.rows[0].caja_id;
+          if (!metodoVentaId) metodoVentaId = defaultCaja.rows[0].metodo_id;
+        }
+      }
 
       if (esCredito) {
         if (!clienteRow) {
@@ -419,10 +465,10 @@ export async function POST(request: Request) {
 
         // Límite de crédito por moneda: 0 = sin crédito en esa moneda.
         // Se valida contra la deuda que queda (total − pago inicial).
-        const codigoMoneda = String(moneda.rows[0].codigo || "").toUpperCase();
+        const codigoMoneda = String(monedaVenta.codigo || "").toUpperCase();
         const limiteRes = await client.query(
           `SELECT limite FROM cliente_limites_credito WHERE cliente_id = $1 AND moneda_id = $2`,
-          [cliente_id, moneda_id]
+          [cliente_id, effectiveMonedaId]
         );
         const limiteMoneda = parseFloat(limiteRes.rows[0]?.limite || "0");
         if (limiteMoneda <= 0) {
@@ -432,7 +478,7 @@ export async function POST(request: Request) {
         const deudaRes = await client.query(
           `SELECT COALESCE(SUM(saldo), 0) as deuda FROM creditos
            WHERE cliente_id = $1 AND moneda_id = $2 AND estado <> 'Pagado'`,
-          [cliente_id, moneda_id]
+          [cliente_id, effectiveMonedaId]
         );
         const deudaMoneda = parseFloat(deudaRes.rows[0]?.deuda || "0");
         if (deudaMoneda + deuda > limiteMoneda) {
@@ -448,7 +494,7 @@ export async function POST(request: Request) {
         `INSERT INTO ventas (numero, cliente, cliente_id, tipo_pago, fecha, moneda_id, metodo_pago_id, caja_id, subtotal, descuento, impuesto, cobros_extra, total, total_base, descuento_base, cobros_extra_base, tasa, estado, observaciones) 
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19) 
          RETURNING *`,
-         [generarNumero(), clienteNombre, cliente_id || null, esCredito ? "Credito" : "Contado", fechaVenta, moneda_id, metodoVentaId, cajaVentaId, subtotalTotal, descuentoVenta, impuestoTotal, cobrosExtraVenta, total, totalBase, descuentoBase, cobrosExtraBase, tasaAplicada, estadoVenta, observaciones || null]
+         [generarNumero(), clienteNombre, cliente_id || null, esCredito ? "Credito" : "Contado", fechaVenta, effectiveMonedaId, metodoVentaId, cajaVentaId, subtotalTotal, descuentoVenta, impuestoTotal, cobrosExtraVenta, total, totalBase, descuentoBase, cobrosExtraBase, tasaAplicada, estadoVenta, observaciones || null]
       );
 
       const venta = ventaRes.rows[0];
@@ -504,16 +550,22 @@ export async function POST(request: Request) {
           ]
         );
 
-        // Stock atómico: decrementa solo si hay suficiente.
-        // Evita overselling con peticiones concurrentes en el mismo servidor.
-        // Devuelve el stock anterior para el kardex.
-        const stockRes = await client.query(
-          `UPDATE productos 
-           SET stock = stock - $1 
-           WHERE id = $2 AND stock >= $1 
-           RETURNING stock + $1 AS anterior, stock AS actual`,
-          [item.cantidad, item.producto_id]
-        );
+        // Stock atómico: decrementa solo si hay suficiente (en ventas offline móviles permite GREATEST(0, stock - $1)).
+        const stockRes = esOrigenOffline
+          ? await client.query(
+              `UPDATE productos
+               SET stock = GREATEST(0, stock - $1)
+               WHERE id = $2
+               RETURNING stock + $1 AS anterior, stock AS actual`,
+              [item.cantidad, item.producto_id]
+            )
+          : await client.query(
+              `UPDATE productos 
+               SET stock = stock - $1 
+               WHERE id = $2 AND stock >= $1 
+               RETURNING stock + $1 AS anterior, stock AS actual`,
+              [item.cantidad, item.producto_id]
+            );
 
         if (stockRes.rows.length === 0) {
           throw new Error(`Stock insuficiente para producto ${item.producto_id}`);
@@ -588,8 +640,8 @@ export async function POST(request: Request) {
             tasa: tasaMostrada(monedasCatalogo.find((m: any) => String(m.id) === String(l.monedaId))),
           });
         }
-      } else if (caja_id && metodo_pago_id && pagado > 0.009) {
-        entradasCaja.push({ cajaId: String(caja_id), monto: pagado, monedaId: String(moneda_id), montoBase: pagadoBase, tasa: tasaAplicada });
+      } else if (cajaVentaId && metodoVentaId && pagado > 0.009) {
+        entradasCaja.push({ cajaId: String(cajaVentaId), monto: pagado, monedaId: String(effectiveMonedaId), montoBase: pagadoBase, tasa: tasaAplicada });
       }
 
       for (const e of entradasCaja) {
@@ -608,6 +660,7 @@ export async function POST(request: Request) {
       return venta;
     });
 
+    triggerBackgroundSync();
     return NextResponse.json(result, { status: 201 });
   } catch (error) {
     return NextResponse.json({ error: error instanceof Error ? error.message : "Error al crear venta" }, { status: 500 });
@@ -637,6 +690,7 @@ export async function PUT(request: Request) {
       return NextResponse.json({ error: "Venta no encontrada" }, { status: 404 });
     }
 
+    triggerBackgroundSync();
     return NextResponse.json(result);
   } catch (error) {
     return NextResponse.json({ error: "Error al actualizar venta" }, { status: 500 });
@@ -713,6 +767,7 @@ export async function DELETE(request: Request) {
       await client.query(`DELETE FROM ventas WHERE id = $1`, [id]);
     });
 
+    triggerBackgroundSync();
     return NextResponse.json({ success: true });
   } catch (error) {
     // Se devuelve el mensaje real: antes todo terminaba en un

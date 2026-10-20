@@ -18,6 +18,9 @@ END;
 $$ LANGUAGE plpgsql;
 
 -- 2. Asegurar columna actualizado_en en todas las tablas sincronizables que no la tenían
+ALTER TABLE configuracion ADD COLUMN IF NOT EXISTS actualizado_en TIMESTAMP NOT NULL DEFAULT NOW();
+ALTER TABLE configuracion_global ADD COLUMN IF NOT EXISTS actualizado_en TIMESTAMP NOT NULL DEFAULT NOW();
+ALTER TABLE producto_presentaciones ADD COLUMN IF NOT EXISTS actualizado_en TIMESTAMP NOT NULL DEFAULT NOW();
 ALTER TABLE producto_precios ADD COLUMN IF NOT EXISTS actualizado_en TIMESTAMP NOT NULL DEFAULT NOW();
 ALTER TABLE producto_proveedores ADD COLUMN IF NOT EXISTS actualizado_en TIMESTAMP NOT NULL DEFAULT NOW();
 ALTER TABLE producto_costos_historicos ADD COLUMN IF NOT EXISTS actualizado_en TIMESTAMP NOT NULL DEFAULT NOW();
@@ -31,7 +34,19 @@ ALTER TABLE kardex ADD COLUMN IF NOT EXISTS actualizado_en TIMESTAMP NOT NULL DE
 ALTER TABLE transacciones ADD COLUMN IF NOT EXISTS actualizado_en TIMESTAMP NOT NULL DEFAULT NOW();
 ALTER TABLE cierres_caja ADD COLUMN IF NOT EXISTS actualizado_en TIMESTAMP NOT NULL DEFAULT NOW();
 
--- 3. Asegurar triggers BEFORE UPDATE en las tablas recién dotadas de actualizado_en
+-- 3. Asegurar triggers BEFORE UPDATE en las tablas sincronizables
+DROP TRIGGER IF EXISTS trg_configuracion_actualizado ON configuracion;
+CREATE TRIGGER trg_configuracion_actualizado BEFORE UPDATE ON configuracion
+    FOR EACH ROW EXECUTE FUNCTION actualizar_actualizado_en();
+
+DROP TRIGGER IF EXISTS trg_configuracion_global_actualizado ON configuracion_global;
+CREATE TRIGGER trg_configuracion_global_actualizado BEFORE UPDATE ON configuracion_global
+    FOR EACH ROW EXECUTE FUNCTION actualizar_actualizado_en();
+
+DROP TRIGGER IF EXISTS trg_producto_presentaciones_actualizado ON producto_presentaciones;
+CREATE TRIGGER trg_producto_presentaciones_actualizado BEFORE UPDATE ON producto_presentaciones
+    FOR EACH ROW EXECUTE FUNCTION actualizar_actualizado_en();
+
 DROP TRIGGER IF EXISTS trg_producto_precios_actualizado ON producto_precios;
 CREATE TRIGGER trg_producto_precios_actualizado BEFORE UPDATE ON producto_precios
     FOR EACH ROW EXECUTE FUNCTION actualizar_actualizado_en();
@@ -88,13 +103,28 @@ DROP TRIGGER IF EXISTS trg_compra_abonos_actualizado ON compra_abonos;
 CREATE TRIGGER trg_compra_abonos_actualizado BEFORE UPDATE ON compra_abonos
     FOR EACH ROW EXECUTE FUNCTION actualizar_actualizado_en();
 
--- 4. Índices sobre actualizado_en para consultas delta rápidas (WHERE actualizado_en > $1)
+-- 4. Índices de alto rendimiento para consultas delta y dashboard
+CREATE INDEX IF NOT EXISTS idx_monedas_actualizado_en ON monedas(actualizado_en);
+CREATE INDEX IF NOT EXISTS idx_cajas_actualizado_en ON cajas(actualizado_en);
+CREATE INDEX IF NOT EXISTS idx_metodos_pago_actualizado_en ON metodos_pago(actualizado_en);
+CREATE INDEX IF NOT EXISTS idx_categorias_actualizado_en ON categorias(actualizado_en);
+CREATE INDEX IF NOT EXISTS idx_marcas_actualizado_en ON marcas(actualizado_en);
+CREATE INDEX IF NOT EXISTS idx_proveedores_actualizado_en ON proveedores(actualizado_en);
 CREATE INDEX IF NOT EXISTS idx_productos_actualizado_en ON productos(actualizado_en);
+CREATE INDEX IF NOT EXISTS idx_producto_precios_actualizado_en ON producto_precios(actualizado_en);
 CREATE INDEX IF NOT EXISTS idx_ventas_actualizado_en ON ventas(actualizado_en);
+CREATE INDEX IF NOT EXISTS idx_venta_items_actualizado_en ON venta_items(actualizado_en);
 CREATE INDEX IF NOT EXISTS idx_compras_actualizado_en ON compras(actualizado_en);
+CREATE INDEX IF NOT EXISTS idx_compra_items_actualizado_en ON compra_items(actualizado_en);
 CREATE INDEX IF NOT EXISTS idx_clientes_actualizado_en ON clientes(actualizado_en);
+CREATE INDEX IF NOT EXISTS idx_creditos_actualizado_en ON creditos(actualizado_en);
+CREATE INDEX IF NOT EXISTS idx_abonos_actualizado_en ON abonos(actualizado_en);
+CREATE INDEX IF NOT EXISTS idx_retornos_actualizado_en ON retornos(actualizado_en);
 CREATE INDEX IF NOT EXISTS idx_kardex_actualizado_en ON kardex(actualizado_en);
 CREATE INDEX IF NOT EXISTS idx_transacciones_actualizado_en ON transacciones(actualizado_en);
+CREATE INDEX IF NOT EXISTS idx_ventas_estado_moneda_fecha ON ventas(estado, moneda_id, fecha DESC);
+CREATE INDEX IF NOT EXISTS idx_compras_estado_moneda_fecha ON compras(estado, moneda_id, fecha DESC);
+CREATE INDEX IF NOT EXISTS idx_productos_activo_stock ON productos(activo, stock, stock_minimo);
 
 -- 5. Tabla de configuración de sincronización del dispositivo (fila única id = 1)
 CREATE TABLE IF NOT EXISTS sync_config (

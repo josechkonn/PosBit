@@ -3,6 +3,43 @@ import { redirect } from "next/navigation";
 import { auth, type Session } from "@/lib/auth";
 import { queryOne } from "@/lib/db";
 
+interface CachedSessionEntry {
+  session: Session;
+  expiresAtMs: number;
+}
+
+const SESSION_CACHE_TTL_MS = 20_000;
+const globalForAuthCache = globalThis as unknown as {
+  sessionCache?: Map<string, CachedSessionEntry>;
+};
+
+const sessionCache =
+  globalForAuthCache.sessionCache ?? new Map<string, CachedSessionEntry>();
+globalForAuthCache.sessionCache = sessionCache;
+
+function getCachedSession(key: string): Session | null {
+  const entry = sessionCache.get(key);
+  if (!entry) return null;
+  if (Date.now() > entry.expiresAtMs) {
+    sessionCache.delete(key);
+    return null;
+  }
+  return entry.session;
+}
+
+function setCachedSession(key: string, session: Session): void {
+  if (sessionCache.size > 500) {
+    const now = Date.now();
+    for (const [k, v] of sessionCache.entries()) {
+      if (now > v.expiresAtMs) sessionCache.delete(k);
+    }
+  }
+  sessionCache.set(key, {
+    session,
+    expiresAtMs: Date.now() + SESSION_CACHE_TTL_MS,
+  });
+}
+
 /**
  * Obtiene la sesión activa soportando:
  *   1. Cookies de Better-Auth (Web / Electron local)
@@ -12,26 +49,48 @@ import { queryOne } from "@/lib/db";
 export async function getSessionOrBearer(): Promise<Session | null> {
   const reqHeaders = await headers();
 
-  // 1. Intentar sesión estándar por cookies de Better-Auth
-  const cookieSession = await auth.api.getSession({
-    headers: reqHeaders,
-  });
-
-  if (cookieSession) {
-    const userDb = await queryOne<{ role: string }>('SELECT role FROM "user" WHERE id = $1', [
-      cookieSession.user.id,
-    ]);
-    (cookieSession.user as { role?: string }).role = userDb?.role ?? "usuario";
-    return cookieSession;
-  }
-
-  // 2. Intentar token Bearer (App Móvil Expo o cliente remoto)
   const authHeader = reqHeaders.get("authorization") || reqHeaders.get("Authorization");
   const bearerToken = authHeader?.startsWith("Bearer ")
     ? authHeader.slice(7).trim()
     : null;
   const syncKeyHeader = reqHeaders.get("x-sync-api-key") || reqHeaders.get("X-Sync-Api-Key");
+  const cookieHeader = reqHeaders.get("cookie") || "";
 
+  // Clave rápida de caché en memoria para evitar consultar Supabase múltiples veces por página
+  const cacheKey = syncKeyHeader
+    ? `sync:${syncKeyHeader}`
+    : bearerToken
+      ? `bearer:${bearerToken}`
+      : cookieHeader
+        ? `cookie:${cookieHeader}`
+        : null;
+
+  if (cacheKey) {
+    const cached = getCachedSession(cacheKey);
+    if (cached) return cached;
+  }
+
+  // 1. Intentar sesión estándar por cookies de Better-Auth (solo si hay cookies)
+  if (cookieHeader) {
+    const cookieSession = await auth.api.getSession({
+      headers: reqHeaders,
+    });
+
+    if (cookieSession) {
+      const existingRole = (cookieSession.user as { role?: string }).role;
+      if (!existingRole) {
+        const userDb = await queryOne<{ role: string }>(
+          'SELECT role FROM "user" WHERE id = $1',
+          [cookieSession.user.id]
+        );
+        (cookieSession.user as { role?: string }).role = userDb?.role ?? "usuario";
+      }
+      if (cacheKey) setCachedSession(cacheKey, cookieSession);
+      return cookieSession;
+    }
+  }
+
+  // 2. Intentar token Bearer (App Móvil Expo o cliente remoto)
   if (bearerToken) {
     const sessionRow = await queryOne<{
       session_id: string;
@@ -64,7 +123,7 @@ export async function getSessionOrBearer(): Promise<Session | null> {
     );
 
     if (sessionRow) {
-      return {
+      const resolved = {
         session: {
           id: sessionRow.session_id,
           token: sessionRow.token,
@@ -86,6 +145,8 @@ export async function getSessionOrBearer(): Promise<Session | null> {
           role: sessionRow.user_role ?? "usuario",
         },
       } as unknown as Session;
+      if (cacheKey) setCachedSession(cacheKey, resolved);
+      return resolved;
     }
   }
 
@@ -117,7 +178,7 @@ export async function getSessionOrBearer(): Promise<Session | null> {
       }>(`SELECT id, name, email, role FROM "user" ORDER BY (role = 'admin') DESC LIMIT 1`);
 
       if (adminUser) {
-        return {
+        const resolved = {
           session: {
             id: "sync-session",
             token: candidateSyncKey,
@@ -136,6 +197,8 @@ export async function getSessionOrBearer(): Promise<Session | null> {
             role: adminUser.role ?? "admin",
           },
         } as unknown as Session;
+        if (cacheKey) setCachedSession(cacheKey, resolved);
+        return resolved;
       }
     }
   }

@@ -12,7 +12,7 @@ export async function OPTIONS() {
  * POST /api/mobile/login
  * Endpoint de inicio de sesión diseñado para la App Móvil Expo (React Native)
  * y nodos de sincronización remotos. Devuelve un Bearer Token de sesión válido
- * para usar en `Authorization: Bearer <token>` en cualquier ruta `/api/*`.
+ * y el catálogo inicial completo en una sola petición.
  */
 export async function POST(request: Request) {
   try {
@@ -27,7 +27,6 @@ export async function POST(request: Request) {
       );
     }
 
-    // Asegurar que ensureDatabase() haya terminado antes de que Better Auth consulte "user"
     await queryOne("SELECT 1");
 
     let signInResult: any;
@@ -52,24 +51,29 @@ export async function POST(request: Request) {
     const userId = signInResult.user.id;
     let token: string | null = signInResult.token ?? null;
 
-    if (!token) {
-      const latestSession = await queryOne<{ token: string }>(
-        `SELECT token FROM "session" WHERE "userId" = $1 AND "expiresAt" > NOW() ORDER BY "createdAt" DESC LIMIT 1`,
-        [userId]
-      );
-      token = latestSession?.token ?? null;
+    const [latestSession, userRow, monedas, cajas, metodosPago, productos] =
+      await Promise.all([
+        !token
+          ? queryOne<{ token: string }>(
+              `SELECT token FROM "session" WHERE "userId" = $1 AND "expiresAt" > NOW() ORDER BY "createdAt" DESC LIMIT 1`,
+              [userId]
+            )
+          : Promise.resolve(null),
+        queryOne<{
+          id: string;
+          name: string;
+          email: string;
+          role: string;
+        }>(`SELECT id, name, email, role FROM "user" WHERE id = $1`, [userId]),
+        query(`SELECT * FROM monedas WHERE activo = true ORDER BY es_base DESC, codigo ASC`),
+        query(`SELECT * FROM cajas ORDER BY nombre ASC`),
+        query(`SELECT * FROM metodos_pago WHERE activo = true ORDER BY nombre ASC`),
+        query(`SELECT id, codigo, nombre, stock, precio_base, moneda_base_id, activo, actualizado_en FROM productos ORDER BY nombre ASC`),
+      ]);
+
+    if (!token && latestSession?.token) {
+      token = latestSession.token;
     }
-
-    const userRow = await queryOne<{
-      id: string;
-      name: string;
-      email: string;
-      role: string;
-    }>(`SELECT id, name, email, role FROM "user" WHERE id = $1`, [userId]);
-
-    const monedas = await query(`SELECT * FROM monedas WHERE activo = true ORDER BY es_base DESC, codigo ASC`);
-    const cajas = await query(`SELECT * FROM cajas ORDER BY nombre ASC`);
-    const metodosPago = await query(`SELECT * FROM metodos_pago WHERE activo = true ORDER BY nombre ASC`);
 
     return NextResponse.json({
       ok: true,
@@ -83,6 +87,7 @@ export async function POST(request: Request) {
       monedas,
       cajas,
       metodosPago,
+      productos,
       serverTime: new Date().toISOString(),
     });
   } catch (error: any) {

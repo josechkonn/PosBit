@@ -16,12 +16,23 @@ export interface SyncConfig {
   ultimo_estado: string;
   ultimo_error: string | null;
   actualizado_en: string;
+  es_nube_central?: boolean;
 }
 
 export interface SyncTombstone {
   tabla: string;
   registro_id: string;
   eliminado_en: string;
+}
+
+export interface SyncNaturalRefs {
+  monedas?: Array<{ id: any; codigo: string }>;
+  cajas?: Array<{ id: any; nombre: string }>;
+  categorias?: Array<{ id: any; nombre: string }>;
+  marcas?: Array<{ id: any; nombre: string }>;
+  proveedores?: Array<{ id: any; nombre: string }>;
+  productos?: Array<{ id: any; codigo: string }>;
+  metodos_pago?: Array<{ id: any; nombre: string; caja_id: any }>;
 }
 
 export interface SyncDeltaPayload {
@@ -32,6 +43,7 @@ export interface SyncDeltaPayload {
   es_completa?: boolean;
   tables: Record<string, any[]>;
   eliminados: SyncTombstone[];
+  refs?: SyncNaturalRefs;
 }
 
 export interface SyncResult {
@@ -81,15 +93,45 @@ export const SYNC_TABLES_ORDER = [
   "kardex",
 ] as const;
 
+export const MOBILE_SYNC_TABLES = [
+  "monedas",
+  "cajas",
+  "metodos_pago",
+  "productos",
+] as const;
+
 export type SyncTableName = (typeof SYNC_TABLES_ORDER)[number];
 
 /**
- * Asegura que las tablas de sincronización existan incluso si la BD ya estaba corriendo
- * antes de agregar `sql/cloud-sync.sql`.
+ * Detecta si esta instancia de PosBit es el Servidor Central en la Nube (Vercel / Supabase directo)
+ * o una instalación local de Escritorio (Electron / PostgreSQL local en localhost).
  */
-let syncTablesVerified = false;
+export function isCloudServerEnvironment(): boolean {
+  if (process.env.VERCEL === "1" || process.env.VERCEL_ENV) {
+    return true;
+  }
+  try {
+    const dbUrl = process.env.DATABASE_URL;
+    if (!dbUrl) return false;
+    const host = new URL(dbUrl).hostname.toLowerCase();
+    return host !== "localhost" && host !== "127.0.0.1" && host !== "::1";
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Asegura que las tablas e índices de sincronización existan.
+ * Se ejecuta una sola vez por proceso en caliente.
+ */
+const globalForSync = globalThis as unknown as {
+  syncTablesVerified?: boolean;
+  syncRunning?: boolean;
+  bgSyncTimeout?: ReturnType<typeof setTimeout> | null;
+};
+
 export async function ensureSyncTables(customClient?: Pool | PoolClient): Promise<void> {
-  if (syncTablesVerified && !customClient) return;
+  if (globalForSync.syncTablesVerified && !customClient) return;
   const db = customClient ?? pool;
   await db.query(`
     CREATE TABLE IF NOT EXISTS sync_config (
@@ -130,8 +172,18 @@ export async function ensureSyncTables(customClient?: Pool | PoolClient): Promis
       detalle TEXT,
       duracion_ms INTEGER NOT NULL DEFAULT 0
     );
+
+    CREATE INDEX IF NOT EXISTS idx_sync_eliminados_fecha ON sync_eliminados(eliminado_en);
+    CREATE INDEX IF NOT EXISTS idx_sync_historial_fecha ON sync_historial(fecha DESC);
+    CREATE INDEX IF NOT EXISTS idx_productos_actualizado_en ON productos(actualizado_en);
+    CREATE INDEX IF NOT EXISTS idx_ventas_actualizado_en ON ventas(actualizado_en);
+    CREATE INDEX IF NOT EXISTS idx_compras_actualizado_en ON compras(actualizado_en);
+    CREATE INDEX IF NOT EXISTS idx_clientes_actualizado_en ON clientes(actualizado_en);
+    CREATE INDEX IF NOT EXISTS idx_ventas_estado_moneda_fecha ON ventas(estado, moneda_id, fecha DESC);
+    CREATE INDEX IF NOT EXISTS idx_compras_estado_moneda_fecha ON compras(estado, moneda_id, fecha DESC);
+    CREATE INDEX IF NOT EXISTS idx_productos_activo_stock ON productos(activo, stock, stock_minimo);
   `);
-  if (!customClient) syncTablesVerified = true;
+  if (!customClient) globalForSync.syncTablesVerified = true;
 }
 
 /**
@@ -143,12 +195,13 @@ export async function getSyncConfig(): Promise<SyncConfig> {
   const envCloudUrl = process.env.CLOUD_API_URL || process.env.NEXT_PUBLIC_CLOUD_API_URL || null;
   const envCloudDbUrl = process.env.CLOUD_DATABASE_URL || null;
   const envCloudKey = process.env.CLOUD_SYNC_SECRET || process.env.CLOUD_API_KEY || null;
+  const esNubeCentral = isCloudServerEnvironment();
 
   if (!row) {
     return {
       id: 1,
       dispositivo_id: "00000000-0000-0000-0000-000000000001",
-      nombre_dispositivo: "Caja Principal",
+      nombre_dispositivo: esNubeCentral ? "Servidor PosBit Cloud" : "Caja Principal",
       modo_conexion: envCloudDbUrl ? "db_directa" : envCloudUrl ? "api_nube" : "desactivado",
       cloud_url: envCloudUrl,
       cloud_api_key: envCloudKey,
@@ -157,9 +210,10 @@ export async function getSyncConfig(): Promise<SyncConfig> {
       intervalo_segundos: 30,
       ultima_sincronizacion_push: null,
       ultima_sincronizacion_pull: null,
-      ultimo_estado: "sin_configurar",
+      ultimo_estado: esNubeCentral ? "ok" : "sin_configurar",
       ultimo_error: null,
       actualizado_en: new Date().toISOString(),
+      es_nube_central: esNubeCentral,
     };
   }
 
@@ -168,21 +222,26 @@ export async function getSyncConfig(): Promise<SyncConfig> {
     cloud_url: row.cloud_url || envCloudUrl,
     cloud_api_key: row.cloud_api_key || envCloudKey,
     cloud_database_url: row.cloud_database_url || envCloudDbUrl,
+    es_nube_central: esNubeCentral,
   };
 }
 
 /**
- * Cuenta cuántos cambios locales están pendientes de subir a la nube desde la última sincronización.
+ * Cuenta cuántos cambios locales están pendientes de subir a la nube en UNA SOLA consulta SQL.
+ * En el Servidor Nube Central (con modo_conexion = desactivado), los datos ya están en la nube (0 pendientes).
  */
-export async function countPendingLocalChanges(sinceIso: string | null): Promise<{
+export async function countPendingLocalChanges(
+  sinceIso: string | null,
+  modoConexion?: string
+): Promise<{
   totalPendientes: number;
   porTabla: Record<string, number>;
 }> {
-  await ensureSyncTables();
-  const porTabla: Record<string, number> = {};
-  let totalPendientes = 0;
+  if (isCloudServerEnvironment() && (!modoConexion || modoConexion === "desactivado")) {
+    return { totalPendientes: 0, porTabla: {} };
+  }
 
-  // Tablas principales que el usuario modifica frecuentemente en operación offline
+  await ensureSyncTables();
   const tablasPrincipales: SyncTableName[] = [
     "ventas",
     "compras",
@@ -195,96 +254,164 @@ export async function countPendingLocalChanges(sinceIso: string | null): Promise
     "transacciones",
   ];
 
-  for (const tabla of tablasPrincipales) {
-    try {
-      const res = sinceIso
-        ? await queryOne<{ total: string }>(
-            `SELECT COUNT(*) AS total FROM "${tabla}" WHERE actualizado_en > $1`,
-            [sinceIso]
-          )
-        : await queryOne<{ total: string }>(`SELECT COUNT(*) AS total FROM "${tabla}"`);
-      const count = Number(res?.total ?? 0);
-      if (count > 0) {
-        porTabla[tabla] = count;
-        totalPendientes += count;
-      }
-    } catch {
-      // Si alguna tabla aún no tiene actualizado_en, se ignora silenciosamente
-    }
-  }
+  const porTabla: Record<string, number> = {};
+  let totalPendientes = 0;
 
   try {
-    const delRes = sinceIso
-      ? await queryOne<{ total: string }>(
-          `SELECT COUNT(*) AS total FROM sync_eliminados WHERE eliminado_en > $1`,
-          [sinceIso]
-        )
-      : await queryOne<{ total: string }>(`SELECT COUNT(*) AS total FROM sync_eliminados`);
-    const delCount = Number(delRes?.total ?? 0);
-    if (delCount > 0) {
-      porTabla["eliminados"] = delCount;
-      totalPendientes += delCount;
+    if (sinceIso) {
+      const subqueries = tablasPrincipales.map(
+        (t) => `(SELECT COUNT(*)::int FROM "${t}" WHERE actualizado_en > $1) AS "${t}"`
+      );
+      subqueries.push(
+        `(SELECT COUNT(*)::int FROM sync_eliminados WHERE eliminado_en > $1) AS "eliminados"`
+      );
+      const row = await queryOne<Record<string, number>>(
+        `SELECT ${subqueries.join(", ")}`,
+        [sinceIso]
+      );
+      if (row) {
+        for (const [k, v] of Object.entries(row)) {
+          const n = Number(v || 0);
+          if (n > 0) {
+            porTabla[k] = n;
+            totalPendientes += n;
+          }
+        }
+      }
+    } else {
+      // Si aún no ha hecho el primer push y la sincronización está desactivada en local, devolver 0 rápido
+      if (modoConexion === "desactivado") {
+        return { totalPendientes: 0, porTabla: {} };
+      }
+      const subqueries = tablasPrincipales.map(
+        (t) => `(SELECT COUNT(*)::int FROM "${t}") AS "${t}"`
+      );
+      const row = await queryOne<Record<string, number>>(`SELECT ${subqueries.join(", ")}`);
+      if (row) {
+        for (const [k, v] of Object.entries(row)) {
+          const n = Number(v || 0);
+          if (n > 0) {
+            porTabla[k] = n;
+            totalPendientes += n;
+          }
+        }
+      }
     }
   } catch {
-    // ignore
+    // Fallback silencioso si alguna tabla aún no tiene actualizado_en
   }
 
   return { totalPendientes, porTabla };
 }
 
 /**
- * Extrae el delta de cambios desde `since` (o todos los registros si `since` es null)
- * de una instancia de base de datos (`targetPool`).
+ * Extrae el delta de cambios desde `since` (o todos los registros si `since` es null).
+ * Optimizado con detección rápida en 1 sola consulta cuando `since` está presente:
+ * si ninguna tabla cambió (95% de los polls periódicos), hace 1 consulta en ~2ms en vez de 30.
  */
 export async function collectDeltaFromDb(
   targetPool: Pool | PoolClient,
   since: string | null,
-  dispositivoId = "server"
+  dispositivoId = "server",
+  options?: { mode?: "full" | "mobile" }
 ): Promise<SyncDeltaPayload> {
   const hasta = new Date().toISOString();
   const tables: Record<string, any[]> = {};
+  const tableList: readonly string[] =
+    options?.mode === "mobile" ? MOBILE_SYNC_TABLES : SYNC_TABLES_ORDER;
 
-  for (const table of SYNC_TABLES_ORDER) {
+  let tablesToFetch: string[] = [...tableList];
+  let fetchDeletions = true;
+
+  // Fast-path para sincronizaciones incrementales: 1 sola consulta SQL descubre qué tablas tienen cambios
+  if (since) {
     try {
-      if (since) {
-        // Verificar si la tabla tiene columna actualizado_en
-        const res = await targetPool.query(
-          `SELECT * FROM "${table}" WHERE actualizado_en > $1`,
-          [since]
-        );
-        if (res.rows.length > 0) {
-          tables[table] = res.rows;
-        }
-      } else {
-        const res = await targetPool.query(`SELECT * FROM "${table}"`);
-        if (res.rows.length > 0) {
-          tables[table] = res.rows;
-        }
+      const checks = tableList.map(
+        (t) => `CASE WHEN EXISTS (SELECT 1 FROM "${t}" WHERE actualizado_en > $1) THEN '${t}' END`
+      );
+      const fastSql = `
+        SELECT
+          EXISTS (SELECT 1 FROM sync_eliminados WHERE eliminado_en > $1) AS has_del,
+          ARRAY_REMOVE(ARRAY[${checks.join(", ")}], NULL) AS changed
+      `;
+      const fastRes = await targetPool.query(fastSql, [since]);
+      const fastRow = fastRes.rows[0];
+      if (fastRow) {
+        tablesToFetch = Array.isArray(fastRow.changed) ? fastRow.changed : [];
+        fetchDeletions = Boolean(fastRow.has_del);
       }
     } catch {
-      // Fallback: si la tabla no tiene actualizado_en en un esquema antiguo, traer todo solo cuando since es null
-      if (!since) {
-        try {
-          const res = await targetPool.query(`SELECT * FROM "${table}"`);
-          if (res.rows.length > 0) tables[table] = res.rows;
-        } catch {
-          // Tabla no existe
+      // Si alguna tabla antigua no tuviera actualizado_en, caer al escaneo normal
+      tablesToFetch = [...tableList];
+      fetchDeletions = true;
+    }
+  }
+
+  // Consultar únicamente las tablas que realmente cambiaron
+  if (tablesToFetch.length > 0) {
+    for (const table of tablesToFetch) {
+      try {
+        const res = since
+          ? await targetPool.query(`SELECT * FROM "${table}" WHERE actualizado_en > $1`, [since])
+          : await targetPool.query(`SELECT * FROM "${table}"`);
+        if (res.rows.length > 0) {
+          tables[table] = res.rows;
+        }
+      } catch {
+        if (!since) {
+          try {
+            const res = await targetPool.query(`SELECT * FROM "${table}"`);
+            if (res.rows.length > 0) tables[table] = res.rows;
+          } catch {
+            // Tabla no existe
+          }
         }
       }
     }
   }
 
   let eliminados: SyncTombstone[] = [];
-  try {
-    const delRes = since
-      ? await targetPool.query(
-          `SELECT tabla, registro_id, eliminado_en FROM sync_eliminados WHERE eliminado_en > $1`,
-          [since]
-        )
-      : await targetPool.query(`SELECT tabla, registro_id, eliminado_en FROM sync_eliminados`);
-    eliminados = delRes.rows;
-  } catch {
-    eliminados = [];
+  if (fetchDeletions) {
+    try {
+      const delRes = since
+        ? await targetPool.query(
+            `SELECT tabla, registro_id, eliminado_en FROM sync_eliminados WHERE eliminado_en > $1`,
+            [since]
+          )
+        : await targetPool.query(`SELECT tabla, registro_id, eliminado_en FROM sync_eliminados`);
+      eliminados = delRes.rows;
+    } catch {
+      eliminados = [];
+    }
+  }
+
+  // Si hay tablas hijas en un delta incremental, adjuntar el diccionario ligero de llaves naturales
+  // (`refs`) para que el receptor siempre traduzca moneda_id, caja_id, metodo_pago_id, categoria_id, etc.
+  let refs: SyncNaturalRefs | undefined;
+  const hasAnyTableRows = Object.keys(tables).length > 0;
+  if (hasAnyTableRows && options?.mode !== "mobile") {
+    try {
+      const [mRes, cRes, mpRes, catRes, marRes, provRes, prodRes] = await Promise.all([
+        targetPool.query(`SELECT id, codigo FROM monedas`),
+        targetPool.query(`SELECT id, nombre FROM cajas`),
+        targetPool.query(`SELECT id, nombre, caja_id FROM metodos_pago`),
+        targetPool.query(`SELECT id, nombre FROM categorias`),
+        targetPool.query(`SELECT id, nombre FROM marcas`),
+        targetPool.query(`SELECT id, nombre FROM proveedores`),
+        targetPool.query(`SELECT id, codigo FROM productos`),
+      ]);
+      refs = {
+        monedas: mRes.rows,
+        cajas: cRes.rows,
+        metodos_pago: mpRes.rows,
+        categorias: catRes.rows,
+        marcas: marRes.rows,
+        proveedores: provRes.rows,
+        productos: prodRes.rows,
+      };
+    } catch {
+      // Ignorar si falla lectura de refs
+    }
   }
 
   return {
@@ -294,23 +421,32 @@ export async function collectDeltaFromDb(
     es_completa: !since,
     tables,
     eliminados,
+    refs,
   };
 }
 
 /**
  * Aplica un payload de sincronización (delta o completo) sobre la base de datos destino (`client`),
- * reconciliando llaves naturales (monedas por código, cajas por nombre, categorías, marcas, productos por código)
- * para evitar colisiones entre bases de datos inicializadas de forma independiente,
- * y usando resolución de conflictos Last-Write-Wins (`actualizado_en`).
+ * reconciliando llaves naturales tanto en sincronizaciones completas como incrementales (`refs`),
+ * resolviendo colisiones de numeración (`VTA-`, `OC-`, `CRE-`, `RET-`) y usando Last-Write-Wins (`actualizado_en`).
  */
 export async function applyDeltaToDb(
   client: PoolClient,
   payload: SyncDeltaPayload
 ): Promise<{ appliedRows: number; deletedRows: number }> {
+  const hasTableRows =
+    payload.tables &&
+    Object.values(payload.tables).some((arr) => Array.isArray(arr) && arr.length > 0);
+  const hasDeletions = Array.isArray(payload.eliminados) && payload.eliminados.length > 0;
+
+  // Fast-path: si el delta viene vacío, no ejecutar consultas de metadatos ni bloqueos
+  if (!hasTableRows && !hasDeletions) {
+    return { appliedRows: 0, deletedRows: 0 };
+  }
+
   let appliedRows = 0;
   let deletedRows = 0;
 
-  // Mapas de traducción de IDs cuando dos instancias crearon semillas con distinto UUID/ID para la misma entidad natural
   const monedaIdMap = new Map<string, any>();
   const cajaIdMap = new Map<string, any>();
   const metodoPagoIdMap = new Map<string, any>();
@@ -319,7 +455,6 @@ export async function applyDeltaToDb(
   const proveedorIdMap = new Map<string, any>();
   const productoIdMap = new Map<string, any>();
 
-  // Desactivar trigger de tombstones durante la aplicación de cambios entrantes
   await client.query("SET LOCAL posbit.skip_tombstone = 'true'");
 
   let replicaEnabled = false;
@@ -327,12 +462,10 @@ export async function applyDeltaToDb(
     await client.query("SET LOCAL session_replication_role = 'replica'");
     replicaEnabled = true;
   } catch {
-    // En servicios cloud administrados (Supabase / Neon) sin superuser no hay replica role;
-    // el orden topológico SYNC_TABLES_ORDER y el mapeo de IDs garantizan integridad referencial.
+    // En servicios cloud administrados (Supabase / Neon) sin superuser no hay replica role
   }
 
   try {
-    // 1. Pre-cargar esquemas de columnas y mapas de reconciliación en bloque (mínimas idas y vueltas de red)
     const allColsRes = await client.query(
       `SELECT table_name, column_name FROM information_schema.columns WHERE table_schema = 'public'`
     );
@@ -358,6 +491,10 @@ export async function applyDeltaToDb(
       existingPps,
       existingClcs,
       existingPres,
+      existingVentasNum,
+      existingComprasNum,
+      existingCreditosNum,
+      existingRetornosNum,
     ] = await Promise.all([
       client.query(`SELECT id, codigo FROM monedas`),
       client.query(`SELECT id, nombre FROM cajas`),
@@ -369,7 +506,19 @@ export async function applyDeltaToDb(
       client.query(`SELECT id, clave FROM configuracion`),
       client.query(`SELECT id, producto_id, moneda_id FROM producto_precios`),
       client.query(`SELECT id, cliente_id, moneda_id FROM cliente_limites_credito`),
-      client.query(`SELECT id, producto_id, nombre FROM producto_presentaciones`),
+      client.query(`SELECT id, producto_id, nombre, codigo FROM producto_presentaciones`),
+      payload.tables?.ventas?.length
+        ? client.query(`SELECT id, numero FROM ventas`)
+        : Promise.resolve({ rows: [] }),
+      payload.tables?.compras?.length
+        ? client.query(`SELECT id, numero FROM compras`)
+        : Promise.resolve({ rows: [] }),
+      payload.tables?.creditos?.length
+        ? client.query(`SELECT id, numero FROM creditos`)
+        : Promise.resolve({ rows: [] }),
+      payload.tables?.retornos?.length
+        ? client.query(`SELECT id, numero FROM retornos`)
+        : Promise.resolve({ rows: [] }),
     ]);
 
     const monedaByCodigo = new Map<string, any>(
@@ -411,6 +560,75 @@ export async function applyDeltaToDb(
         r.id,
       ])
     );
+    const presByCodigo = new Map<string, any>(
+      existingPres.rows
+        .filter((r: any) => r.codigo)
+        .map((r: any) => [String(r.codigo).toLowerCase().trim(), r.id])
+    );
+
+    const ventasByNum = new Map<string, any>(
+      existingVentasNum.rows.map((r: any) => [String(r.numero), String(r.id)])
+    );
+    const comprasByNum = new Map<string, any>(
+      existingComprasNum.rows.map((r: any) => [String(r.numero), String(r.id)])
+    );
+    const creditosByNum = new Map<string, any>(
+      existingCreditosNum.rows.map((r: any) => [String(r.numero), String(r.id)])
+    );
+    const retornosByNum = new Map<string, any>(
+      existingRetornosNum.rows.map((r: any) => [String(r.numero), String(r.id)])
+    );
+
+    // Pre-poblar mapas de traducción de FKs usando `payload.refs` (vital en deltas incrementales)
+    if (payload.refs) {
+      for (const m of payload.refs.monedas || []) {
+        const localId = monedaByCodigo.get(String(m.codigo).toUpperCase().trim());
+        if (localId !== undefined && String(localId) !== String(m.id)) {
+          monedaIdMap.set(String(m.id), localId);
+        }
+      }
+      for (const c of payload.refs.cajas || []) {
+        const localId = cajaByNombre.get(String(c.nombre).toLowerCase().trim());
+        if (localId !== undefined && String(localId) !== String(c.id)) {
+          cajaIdMap.set(String(c.id), localId);
+        }
+      }
+      for (const cat of payload.refs.categorias || []) {
+        const localId = catByNombre.get(String(cat.nombre).toLowerCase().trim());
+        if (localId !== undefined && String(localId) !== String(cat.id)) {
+          categoriaIdMap.set(String(cat.id), localId);
+        }
+      }
+      for (const mar of payload.refs.marcas || []) {
+        const localId = marcaByNombre.get(String(mar.nombre).toLowerCase().trim());
+        if (localId !== undefined && String(localId) !== String(mar.id)) {
+          marcaIdMap.set(String(mar.id), localId);
+        }
+      }
+      for (const prov of payload.refs.proveedores || []) {
+        const localId = provByNombre.get(String(prov.nombre).toLowerCase().trim());
+        if (localId !== undefined && String(localId) !== String(prov.id)) {
+          proveedorIdMap.set(String(prov.id), localId);
+        }
+      }
+      for (const prod of payload.refs.productos || []) {
+        const localId = prodByCodigo.get(String(prod.codigo).toLowerCase().trim());
+        if (localId !== undefined && String(localId) !== String(prod.id)) {
+          productoIdMap.set(String(prod.id), localId);
+        }
+      }
+      for (const mp of payload.refs.metodos_pago || []) {
+        const mappedCajaId =
+          mp.caja_id && cajaIdMap.has(String(mp.caja_id))
+            ? cajaIdMap.get(String(mp.caja_id))
+            : mp.caja_id;
+        const key = `${String(mp.nombre).toLowerCase().trim()}::${mappedCajaId ? String(mappedCajaId) : ""}`;
+        const localId = mpByKey.get(key);
+        if (localId !== undefined && String(localId) !== String(mp.id)) {
+          metodoPagoIdMap.set(String(mp.id), localId);
+        }
+      }
+    }
 
     const translateForeignKeys = (row: Record<string, any>): Record<string, any> => {
       const r = { ...row };
@@ -437,7 +655,22 @@ export async function applyDeltaToDb(
       return r;
     };
 
-    // 2. Iterar por cada tabla en orden topológico e insertar/actualizar en lotes (batches de 100 filas)
+    const resolveUniqueNumero = (
+      row: Record<string, any>,
+      numMap: Map<string, string>
+    ) => {
+      if (!row.numero) return;
+      const numStr = String(row.numero);
+      const existingId = numMap.get(numStr);
+      if (existingId && existingId !== String(row.id)) {
+        // Dos equipos distintos generaron aleatoriamente el mismo número (ej. VTA-2026-1234):
+        // sufijar con los primeros 4 caracteres del UUID para no perder la venta ni chocar con UNIQUE(numero)
+        const suffix = String(row.id).slice(0, 4).toUpperCase();
+        row.numero = `${numStr}-${suffix}`;
+      }
+      numMap.set(String(row.numero), String(row.id));
+    };
+
     for (const table of SYNC_TABLES_ORDER) {
       const rawRows = payload.tables?.[table];
       if (!Array.isArray(rawRows) || rawRows.length === 0) continue;
@@ -445,7 +678,6 @@ export async function applyDeltaToDb(
       const validCols = colsByTable.get(table);
       if (!validCols || validCols.size === 0) continue;
 
-      // Normalizar y reconciliar llaves naturales en memoria
       const normalizedRows: Record<string, any>[] = [];
       const seenKeysInBatch = new Map<string, number>();
 
@@ -531,9 +763,22 @@ export async function applyDeltaToDb(
           else clcByKey.set(key, row.id);
         } else if (table === "producto_presentaciones" && row.producto_id && row.nombre) {
           const key = `${row.producto_id}::${String(row.nombre).toLowerCase().trim()}`;
-          const localId = presByKey.get(key);
+          const codeKey = row.codigo ? String(row.codigo).toLowerCase().trim() : null;
+          const localId =
+            presByKey.get(key) ?? (codeKey ? presByCodigo.get(codeKey) : undefined);
           if (localId !== undefined) row.id = localId;
-          else presByKey.set(key, row.id);
+          else {
+            presByKey.set(key, row.id);
+            if (codeKey) presByCodigo.set(codeKey, row.id);
+          }
+        } else if (table === "ventas") {
+          resolveUniqueNumero(row, ventasByNum);
+        } else if (table === "compras") {
+          resolveUniqueNumero(row, comprasByNum);
+        } else if (table === "creditos") {
+          resolveUniqueNumero(row, creditosByNum);
+        } else if (table === "retornos") {
+          resolveUniqueNumero(row, retornosByNum);
         }
 
         const pkKey =
@@ -558,7 +803,9 @@ export async function applyDeltaToDb(
       const conflictTarget =
         table === "producto_proveedores" ? `("producto_id", "proveedor_id")` : `("id")`;
       const updateCols = cols.filter(
-        (c) => c !== "id" && !(table === "producto_proveedores" && (c === "producto_id" || c === "proveedor_id"))
+        (c) =>
+          c !== "id" &&
+          !(table === "producto_proveedores" && (c === "producto_id" || c === "proveedor_id"))
       );
       const updateSet = updateCols.map((c) => `"${c}" = EXCLUDED."${c}"`).join(", ");
       const lwwWhere =
@@ -598,13 +845,39 @@ export async function applyDeltaToDb(
           appliedRows += res.rowCount ?? 0;
         } catch (batchErr: any) {
           await client.query("ROLLBACK TO SAVEPOINT sp_sync_batch");
-          console.warn(`[Sync] Aviso en lote de ${table}:`, batchErr?.message);
+          // Fallback fila por fila para que 1 fila con conflicto jamás descarte las otras 99 del lote
+          for (const singleRow of batch) {
+            const singlePlaceholders: string[] = [];
+            const singleParams: any[] = [];
+            let sIdx = 1;
+            for (const c of cols) {
+              singlePlaceholders.push(`$${sIdx++}`);
+              let val = singleRow[c];
+              if (val !== null && typeof val === "object" && !(val instanceof Date)) {
+                val = JSON.stringify(val);
+              }
+              singleParams.push(val ?? null);
+            }
+            const singleSql =
+              updateCols.length === 0
+                ? `INSERT INTO "${table}" (${colNames}) VALUES (${singlePlaceholders.join(", ")}) ON CONFLICT ${conflictTarget} DO NOTHING`
+                : `INSERT INTO "${table}" (${colNames}) VALUES (${singlePlaceholders.join(", ")}) ON CONFLICT ${conflictTarget} DO UPDATE SET ${updateSet}${lwwWhere}`;
+            try {
+              await client.query("SAVEPOINT sp_sync_row");
+              const sRes = await client.query(singleSql, singleParams);
+              await client.query("RELEASE SAVEPOINT sp_sync_row");
+              appliedRows += sRes.rowCount ?? 0;
+            } catch (rowErr: any) {
+              await client.query("ROLLBACK TO SAVEPOINT sp_sync_row");
+              console.warn(`[Sync] Aviso en fila de ${table}:`, rowErr?.message);
+            }
+          }
         }
       }
     }
 
-    // 3. Aplicar eliminaciones (Tombstones) si existen
-    if (Array.isArray(payload.eliminados) && payload.eliminados.length > 0) {
+    // Aplicar eliminaciones (Tombstones) si existen
+    if (hasDeletions) {
       const allowedTables = new Set<string>(SYNC_TABLES_ORDER);
       for (const tomb of payload.eliminados) {
         if (!allowedTables.has(tomb.tabla)) continue;
@@ -628,13 +901,14 @@ export async function applyDeltaToDb(
       }
     }
 
-    // 4. Sincronizar secuencias seriales de PostgreSQL (productos, etc.)
+    // Sincronizar secuencias seriales de PostgreSQL solo cuando se modificaron tablas con secuencias
     const serialTables = [
       { table: "productos", col: "id" },
       { table: "producto_costos_historicos", col: "id" },
       { table: "configuracion_global", col: "id" },
     ];
     for (const { table, col } of serialTables) {
+      if (!payload.tables?.[table]?.length) continue;
       try {
         await client.query(`
           SELECT setval(
@@ -657,230 +931,338 @@ export async function applyDeltaToDb(
 }
 
 /**
- * Ejecuta una sincronización completa o incremental desde la instancia local hacia la Nube
- * (soporta tanto `api_nube` vía HTTP/REST como `db_directa` vía conexión PostgreSQL directa).
+ * Ejecuta una sincronización completa o incremental desde la instancia local hacia la Nube.
+ * Soporta un solo round-trip HTTP (`bidirectional_sync`) para máxima velocidad.
  */
 export async function executeCloudSync(options?: {
   direction?: "bidireccional" | "push" | "pull";
   forceFull?: boolean;
 }): Promise<SyncResult> {
-  const startTime = Date.now();
-  const direction = options?.direction ?? "bidireccional";
-  const forceFull = options?.forceFull ?? false;
-
-  await ensureSyncTables();
-  const cfg = await getSyncConfig();
-
-  if (cfg.modo_conexion === "desactivado") {
+  if (globalForSync.syncRunning) {
     return {
-      ok: false,
-      direccion: direction,
+      ok: true,
+      direccion: options?.direction ?? "bidireccional",
       registros_subidos: 0,
       registros_bajados: 0,
       eliminados_aplicados: 0,
       duracion_ms: 0,
       fecha: new Date().toISOString(),
-      mensaje: "La sincronización en la nube está desactivada.",
-      error: "Sincronización desactivada en configuración",
+      mensaje: "Sincronización ya en curso.",
     };
   }
 
-  await query(`UPDATE sync_config SET ultimo_estado = 'sincronizando', ultimo_error = NULL WHERE id = 1`);
-
-  let subidos = 0;
-  let bajados = 0;
-  let eliminadosAplicados = 0;
+  globalForSync.syncRunning = true;
+  const startTime = Date.now();
+  const direction = options?.direction ?? "bidireccional";
+  const forceFull = options?.forceFull ?? false;
 
   try {
-    const sincePush = forceFull ? null : cfg.ultima_sincronizacion_push;
-    const sincePull = forceFull ? null : cfg.ultima_sincronizacion_pull;
-    const syncTimestamp = new Date().toISOString();
+    await ensureSyncTables();
+    const cfg = await getSyncConfig();
 
-    if (cfg.modo_conexion === "db_directa") {
-      if (!cfg.cloud_database_url) {
-        throw new Error("Falta configurar la URL de Base de Datos en la Nube (PostgreSQL)");
+    if (cfg.modo_conexion === "desactivado") {
+      if (cfg.es_nube_central) {
+        return {
+          ok: true,
+          direccion: direction,
+          registros_subidos: 0,
+          registros_bajados: 0,
+          eliminados_aplicados: 0,
+          duracion_ms: Date.now() - startTime,
+          fecha: new Date().toISOString(),
+          mensaje: "Este servidor ya es la Nube Central (datos en tiempo real).",
+        };
       }
+      return {
+        ok: false,
+        direccion: direction,
+        registros_subidos: 0,
+        registros_bajados: 0,
+        eliminados_aplicados: 0,
+        duracion_ms: 0,
+        fecha: new Date().toISOString(),
+        mensaje: "La sincronización en la nube está desactivada.",
+        error: "Sincronización desactivada en configuración",
+      };
+    }
 
-      const cloudPool = new Pool({
-        connectionString: cfg.cloud_database_url,
-        max: 2,
-        connectionTimeoutMillis: 10000,
-      });
+    await query(
+      `UPDATE sync_config SET ultimo_estado = 'sincronizando', ultimo_error = NULL WHERE id = 1`
+    );
 
-      try {
-        // Asegurar esquema mínimo de sync en la base de datos en la nube
-        await ensureSyncTables(cloudPool);
+    let subidos = 0;
+    let bajados = 0;
+    let eliminadosAplicados = 0;
 
-        // 1. PULL (Nube -> Local)
-        if (direction === "bidireccional" || direction === "pull") {
-          const cloudDelta = await collectDeltaFromDb(cloudPool, sincePull, "cloud-db");
-          const pullRes = await transaction(async (localClient) => {
-            return await applyDeltaToDb(localClient, cloudDelta);
-          });
-          bajados = pullRes.appliedRows;
-          eliminadosAplicados += pullRes.deletedRows;
+    try {
+      const sincePush = forceFull ? null : cfg.ultima_sincronizacion_push;
+      const sincePull = forceFull ? null : cfg.ultima_sincronizacion_pull;
+      const syncTimestamp = new Date().toISOString();
 
-          await query(
-            `UPDATE sync_config SET ultima_sincronizacion_pull = $1, actualizado_en = NOW() WHERE id = 1`,
-            [syncTimestamp]
-          );
+      if (cfg.modo_conexion === "db_directa") {
+        if (!cfg.cloud_database_url) {
+          throw new Error("Falta configurar la URL de Base de Datos en la Nube (PostgreSQL)");
         }
 
-        // 2. PUSH (Local -> Nube)
-        if (direction === "bidireccional" || direction === "push") {
-          const localDelta = await collectDeltaFromDb(pool, sincePush, cfg.dispositivo_id);
-          const cloudClient = await cloudPool.connect();
-          try {
-            await cloudClient.query("BEGIN");
-            const pushRes = await applyDeltaToDb(cloudClient, localDelta);
-            await cloudClient.query("COMMIT");
-            subidos = pushRes.appliedRows;
-          } catch (err) {
-            await cloudClient.query("ROLLBACK");
-            throw err;
-          } finally {
-            cloudClient.release();
+        const cloudPool = new Pool({
+          connectionString: cfg.cloud_database_url,
+          max: 2,
+          connectionTimeoutMillis: 10000,
+        });
+
+        try {
+          await ensureSyncTables(cloudPool);
+
+          if (direction === "bidireccional" || direction === "pull") {
+            const cloudDelta = await collectDeltaFromDb(cloudPool, sincePull, "cloud-db");
+            const pullRes = await transaction(async (localClient) => {
+              return await applyDeltaToDb(localClient, cloudDelta);
+            });
+            bajados = pullRes.appliedRows;
+            eliminadosAplicados += pullRes.deletedRows;
+
+            await query(
+              `UPDATE sync_config SET ultima_sincronizacion_pull = $1, actualizado_en = NOW() WHERE id = 1`,
+              [cloudDelta.hasta || syncTimestamp]
+            );
           }
 
-          await query(
-            `UPDATE sync_config SET ultima_sincronizacion_push = $1, actualizado_en = NOW() WHERE id = 1`,
-            [syncTimestamp]
-          );
+          if (direction === "bidireccional" || direction === "push") {
+            const localDelta = await collectDeltaFromDb(pool, sincePush, cfg.dispositivo_id);
+            const cloudClient = await cloudPool.connect();
+            try {
+              await cloudClient.query("BEGIN");
+              const pushRes = await applyDeltaToDb(cloudClient, localDelta);
+              await cloudClient.query("COMMIT");
+              subidos = pushRes.appliedRows;
+            } catch (err) {
+              await cloudClient.query("ROLLBACK");
+              throw err;
+            } finally {
+              cloudClient.release();
+            }
+
+            await query(
+              `UPDATE sync_config SET ultima_sincronizacion_push = $1, actualizado_en = NOW() WHERE id = 1`,
+              [localDelta.hasta || syncTimestamp]
+            );
+          }
+        } finally {
+          await cloudPool.end().catch(() => {});
         }
-      } finally {
-        await cloudPool.end().catch(() => {});
-      }
-    } else if (cfg.modo_conexion === "api_nube") {
-      if (!cfg.cloud_url) {
-        throw new Error("Falta configurar la URL del Servidor PosBit en la Nube");
-      }
-
-      const baseUrl = cfg.cloud_url.replace(/\/+$/, "");
-      const headers: Record<string, string> = {
-        "Content-Type": "application/json",
-      };
-      if (cfg.cloud_api_key) {
-        headers["Authorization"] = `Bearer ${cfg.cloud_api_key}`;
-        headers["X-Sync-Api-Key"] = cfg.cloud_api_key;
-      }
-
-      // 1. PULL (Nube -> Local)
-      if (direction === "bidireccional" || direction === "pull") {
-        const pullUrl = new URL(`${baseUrl}/api/sync`);
-        if (sincePull) pullUrl.searchParams.set("since", sincePull);
-
-        const pullResponse = await fetch(pullUrl.toString(), {
-          method: "GET",
-          headers,
-          signal: AbortSignal.timeout(30000),
-        });
-
-        if (!pullResponse.ok) {
-          const errBody = await pullResponse.json().catch(() => ({}));
-          throw new Error(
-            errBody.error || `Error HTTP ${pullResponse.status} al descargar datos de la nube`
-          );
+      } else if (cfg.modo_conexion === "api_nube") {
+        if (!cfg.cloud_url) {
+          throw new Error("Falta configurar la URL del Servidor PosBit en la Nube");
         }
 
-        const cloudDelta: SyncDeltaPayload = await pullResponse.json();
-        const pullRes = await transaction(async (localClient) => {
-          return await applyDeltaToDb(localClient, cloudDelta);
-        });
-        bajados = pullRes.appliedRows;
-        eliminadosAplicados += pullRes.deletedRows;
+        const baseUrl = cfg.cloud_url.replace(/\/+$/, "");
+        const headers: Record<string, string> = {
+          "Content-Type": "application/json",
+        };
+        if (cfg.cloud_api_key) {
+          headers["Authorization"] = `Bearer ${cfg.cloud_api_key}`;
+          headers["X-Sync-Api-Key"] = cfg.cloud_api_key;
+        }
 
-        await query(
-          `UPDATE sync_config SET ultima_sincronizacion_pull = $1, actualizado_en = NOW() WHERE id = 1`,
-          [syncTimestamp]
-        );
-      }
+        // Optimización Single-Roundtrip cuando es bidireccional
+        if (direction === "bidireccional") {
+          const localDelta = await collectDeltaFromDb(pool, sincePush, cfg.dispositivo_id);
+          const totalRowsToPush = Object.values(localDelta.tables).reduce(
+            (acc, arr) => acc + arr.length,
+            0
+          );
 
-      // 2. PUSH (Local -> Nube)
-      if (direction === "bidireccional" || direction === "push") {
-        const localDelta = await collectDeltaFromDb(pool, sincePush, cfg.dispositivo_id);
-        const totalRowsToPush = Object.values(localDelta.tables).reduce(
-          (acc, arr) => acc + arr.length,
-          0
-        );
-
-        if (totalRowsToPush > 0 || localDelta.eliminados.length > 0 || forceFull) {
-          const pushResponse = await fetch(`${baseUrl}/api/sync`, {
+          const biRes = await fetch(`${baseUrl}/api/sync`, {
             method: "POST",
             headers,
             body: JSON.stringify({
-              action: "remote_push",
-              payload: localDelta,
+              action: "bidirectional_sync",
+              since: sincePull,
+              payload:
+                totalRowsToPush > 0 || localDelta.eliminados.length > 0 || forceFull
+                  ? localDelta
+                  : null,
             }),
             signal: AbortSignal.timeout(45000),
           });
 
-          if (!pushResponse.ok) {
-            const errBody = await pushResponse.json().catch(() => ({}));
+          if (!biRes.ok) {
+            const errBody = await biRes.json().catch(() => ({}));
             throw new Error(
-              errBody.error || `Error HTTP ${pushResponse.status} al subir datos a la nube`
+              errBody.error || `Error HTTP ${biRes.status} al sincronizar con la nube`
             );
           }
 
-          const pushData = await pushResponse.json();
-          subidos = pushData.appliedRows ?? totalRowsToPush;
-        }
+          const biData = await biRes.json();
+          subidos = biData.appliedRows ?? 0;
 
+          if (biData.delta) {
+            const pullRes = await transaction(async (localClient) => {
+              return await applyDeltaToDb(localClient, biData.delta);
+            });
+            bajados = pullRes.appliedRows;
+            eliminadosAplicados += pullRes.deletedRows;
+          }
+
+          const remoteTime = biData.delta?.hasta || biData.serverTime || syncTimestamp;
+          await query(
+            `UPDATE sync_config
+                SET ultima_sincronizacion_pull = $1,
+                    ultima_sincronizacion_push = $2,
+                    actualizado_en = NOW()
+              WHERE id = 1`,
+            [remoteTime, localDelta.hasta || syncTimestamp]
+          );
+        } else {
+          // 1. PULL (Nube -> Local)
+          if (direction === "pull") {
+            const pullUrl = new URL(`${baseUrl}/api/sync`);
+            if (sincePull) pullUrl.searchParams.set("since", sincePull);
+
+            const pullResponse = await fetch(pullUrl.toString(), {
+              method: "GET",
+              headers,
+              signal: AbortSignal.timeout(30000),
+            });
+
+            if (!pullResponse.ok) {
+              const errBody = await pullResponse.json().catch(() => ({}));
+              throw new Error(
+                errBody.error || `Error HTTP ${pullResponse.status} al descargar datos de la nube`
+              );
+            }
+
+            const cloudDelta: SyncDeltaPayload = await pullResponse.json();
+            const pullRes = await transaction(async (localClient) => {
+              return await applyDeltaToDb(localClient, cloudDelta);
+            });
+            bajados = pullRes.appliedRows;
+            eliminadosAplicados += pullRes.deletedRows;
+
+            await query(
+              `UPDATE sync_config SET ultima_sincronizacion_pull = $1, actualizado_en = NOW() WHERE id = 1`,
+              [cloudDelta.hasta || syncTimestamp]
+            );
+          }
+
+          // 2. PUSH (Local -> Nube)
+          if (direction === "push") {
+            const localDelta = await collectDeltaFromDb(pool, sincePush, cfg.dispositivo_id);
+            const totalRowsToPush = Object.values(localDelta.tables).reduce(
+              (acc, arr) => acc + arr.length,
+              0
+            );
+
+            if (totalRowsToPush > 0 || localDelta.eliminados.length > 0 || forceFull) {
+              const pushResponse = await fetch(`${baseUrl}/api/sync`, {
+                method: "POST",
+                headers,
+                body: JSON.stringify({
+                  action: "remote_push",
+                  payload: localDelta,
+                }),
+                signal: AbortSignal.timeout(45000),
+              });
+
+              if (!pushResponse.ok) {
+                const errBody = await pushResponse.json().catch(() => ({}));
+                throw new Error(
+                  errBody.error || `Error HTTP ${pushResponse.status} al subir datos a la nube`
+                );
+              }
+
+              const pushData = await pushResponse.json();
+              subidos = pushData.appliedRows ?? totalRowsToPush;
+            }
+
+            await query(
+              `UPDATE sync_config SET ultima_sincronizacion_push = $1, actualizado_en = NOW() WHERE id = 1`,
+              [localDelta.hasta || syncTimestamp]
+            );
+          }
+        }
+      }
+
+      const duracionMs = Date.now() - startTime;
+      await query(
+        `UPDATE sync_config SET ultimo_estado = 'ok', ultimo_error = NULL, actualizado_en = NOW() WHERE id = 1`
+      );
+
+      // Solo insertar en sync_historial cuando hubo cambios o fue forzado manualmente para no saturar la tabla
+      if (subidos > 0 || bajados > 0 || eliminadosAplicados > 0 || forceFull) {
         await query(
-          `UPDATE sync_config SET ultima_sincronizacion_push = $1, actualizado_en = NOW() WHERE id = 1`,
-          [syncTimestamp]
+          `INSERT INTO sync_historial (direccion, registros_subidos, registros_bajados, estado, detalle, duracion_ms)
+           VALUES ($1, $2, $3, 'ok', $4, $5)`,
+          [
+            direction,
+            subidos,
+            bajados,
+            `Sincronización exitosa (${subidos} subidos, ${bajados} recibidos)`,
+            duracionMs,
+          ]
         );
       }
+
+      return {
+        ok: true,
+        direccion: direction,
+        registros_subidos: subidos,
+        registros_bajados: bajados,
+        eliminados_aplicados: eliminadosAplicados,
+        duracion_ms: duracionMs,
+        fecha: new Date().toISOString(),
+        mensaje: `Sincronización completada: ${subidos} enviados, ${bajados} recibidos.`,
+      };
+    } catch (error: any) {
+      const duracionMs = Date.now() - startTime;
+      const msg = error?.message || String(error);
+      await query(
+        `UPDATE sync_config SET ultimo_estado = 'error', ultimo_error = $1, actualizado_en = NOW() WHERE id = 1`,
+        [msg]
+      );
+      await query(
+        `INSERT INTO sync_historial (direccion, registros_subidos, registros_bajados, estado, detalle, duracion_ms)
+         VALUES ($1, $2, $3, 'error', $4, $5)`,
+        [direction, subidos, bajados, msg, duracionMs]
+      );
+
+      return {
+        ok: false,
+        direccion: direction,
+        registros_subidos: subidos,
+        registros_bajados: bajados,
+        eliminados_aplicados: eliminadosAplicados,
+        duracion_ms: duracionMs,
+        fecha: new Date().toISOString(),
+        mensaje: `Error de sincronización: ${msg}`,
+        error: msg,
+      };
     }
-
-    const duracionMs = Date.now() - startTime;
-    await query(
-      `UPDATE sync_config SET ultimo_estado = 'ok', ultimo_error = NULL, actualizado_en = NOW() WHERE id = 1`
-    );
-    await query(
-      `INSERT INTO sync_historial (direccion, registros_subidos, registros_bajados, estado, detalle, duracion_ms)
-       VALUES ($1, $2, $3, 'ok', $4, $5)`,
-      [
-        direction,
-        subidos,
-        bajados,
-        `Sincronización exitosa (${subidos} subidos, ${bajados} recibidos)`,
-        duracionMs,
-      ]
-    );
-
-    return {
-      ok: true,
-      direccion: direction,
-      registros_subidos: subidos,
-      registros_bajados: bajados,
-      eliminados_aplicados: eliminadosAplicados,
-      duracion_ms: duracionMs,
-      fecha: new Date().toISOString(),
-      mensaje: `Sincronización completada: ${subidos} enviados, ${bajados} recibidos.`,
-    };
-  } catch (error: any) {
-    const duracionMs = Date.now() - startTime;
-    const msg = error?.message || String(error);
-    await query(
-      `UPDATE sync_config SET ultimo_estado = 'error', ultimo_error = $1, actualizado_en = NOW() WHERE id = 1`,
-      [msg]
-    );
-    await query(
-      `INSERT INTO sync_historial (direccion, registros_subidos, registros_bajados, estado, detalle, duracion_ms)
-       VALUES ($1, $2, $3, 'error', $4, $5)`,
-      [direction, subidos, bajados, msg, duracionMs]
-    );
-
-    return {
-      ok: false,
-      direccion: direction,
-      registros_subidos: subidos,
-      registros_bajados: bajados,
-      eliminados_aplicados: eliminadosAplicados,
-      duracion_ms: duracionMs,
-      fecha: new Date().toISOString(),
-      mensaje: `Error de sincronización: ${msg}`,
-      error: msg,
-    };
+  } finally {
+    globalForSync.syncRunning = false;
   }
+}
+
+/**
+ * Dispara una sincronización en segundo plano guiada por eventos (Event-Driven Push)
+ * inmediatamente después de guardar una venta, compra, producto o tasa en una PC local.
+ * No bloquea la respuesta HTTP al cajero (0ms de penalización).
+ */
+export function triggerBackgroundSync(): void {
+  if (isCloudServerEnvironment()) return;
+  if (globalForSync.bgSyncTimeout) {
+    clearTimeout(globalForSync.bgSyncTimeout);
+  }
+  globalForSync.bgSyncTimeout = setTimeout(() => {
+    globalForSync.bgSyncTimeout = null;
+    getSyncConfig()
+      .then((cfg) => {
+        if (cfg.modo_conexion !== "desactivado" && cfg.auto_sync) {
+          return executeCloudSync({ direction: "bidireccional", forceFull: false });
+        }
+      })
+      .catch(() => {
+        // Silencioso en modo offline
+      });
+  }, 600);
 }

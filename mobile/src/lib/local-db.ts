@@ -81,6 +81,9 @@ export async function getMobileDb(): Promise<SQLite.SQLiteDatabase> {
       actualizado_en TEXT
     );
 
+    CREATE INDEX IF NOT EXISTS idx_mobile_productos_nombre ON productos(activo, nombre);
+    CREATE INDEX IF NOT EXISTS idx_mobile_productos_codigo ON productos(codigo);
+
     CREATE TABLE IF NOT EXISTS ventas_locales (
       id TEXT PRIMARY KEY,
       numero TEXT NOT NULL,
@@ -122,80 +125,98 @@ export async function saveCatalogOffline(data: {
   cajas?: any[];
   metodos_pago?: any[];
   productos?: any[];
+  eliminados?: Array<{ tabla: string; registro_id: string }>;
 }): Promise<void> {
   const db = await getMobileDb();
 
-  if (Array.isArray(data.monedas)) {
-    for (const m of data.monedas) {
-      await db.runAsync(
-        `INSERT INTO monedas (id, codigo, nombre, simbolo, tasa, es_base)
-         VALUES (?, ?, ?, ?, ?, ?)
-         ON CONFLICT(id) DO UPDATE SET
-           codigo = excluded.codigo,
-           nombre = excluded.nombre,
-           simbolo = excluded.simbolo,
-           tasa = excluded.tasa,
-           es_base = excluded.es_base`,
-        [
-          String(m.id),
-          String(m.codigo),
-          String(m.nombre),
-          String(m.simbolo || "$"),
-          Number(m.tasa) || 1,
-          m.es_base ? 1 : 0,
-        ]
-      );
+  await db.withTransactionAsync(async () => {
+    if (Array.isArray(data.monedas)) {
+      for (const m of data.monedas) {
+        await db.runAsync(
+          `INSERT INTO monedas (id, codigo, nombre, simbolo, tasa, es_base)
+           VALUES (?, ?, ?, ?, ?, ?)
+           ON CONFLICT(id) DO UPDATE SET
+             codigo = excluded.codigo,
+             nombre = excluded.nombre,
+             simbolo = excluded.simbolo,
+             tasa = excluded.tasa,
+             es_base = excluded.es_base`,
+          [
+            String(m.id),
+            String(m.codigo),
+            String(m.nombre),
+            String(m.simbolo || "$"),
+            Number(m.tasa) || 1,
+            m.es_base ? 1 : 0,
+          ]
+        );
+      }
     }
-  }
 
-  if (Array.isArray(data.cajas)) {
-    for (const c of data.cajas) {
-      await db.runAsync(
-        `INSERT INTO cajas (id, nombre, moneda_id)
-         VALUES (?, ?, ?)
-         ON CONFLICT(id) DO UPDATE SET nombre = excluded.nombre, moneda_id = excluded.moneda_id`,
-        [String(c.id), String(c.nombre), String(c.moneda_id)]
-      );
+    if (Array.isArray(data.cajas)) {
+      for (const c of data.cajas) {
+        await db.runAsync(
+          `INSERT INTO cajas (id, nombre, moneda_id)
+           VALUES (?, ?, ?)
+           ON CONFLICT(id) DO UPDATE SET nombre = excluded.nombre, moneda_id = excluded.moneda_id`,
+          [String(c.id), String(c.nombre), String(c.moneda_id)]
+        );
+      }
     }
-  }
 
-  if (Array.isArray(data.metodos_pago)) {
-    for (const mp of data.metodos_pago) {
-      await db.runAsync(
-        `INSERT INTO metodos_pago (id, nombre, tipo, caja_id)
-         VALUES (?, ?, ?, ?)
-         ON CONFLICT(id) DO UPDATE SET nombre = excluded.nombre, tipo = excluded.tipo, caja_id = excluded.caja_id`,
-        [String(mp.id), String(mp.nombre), String(mp.tipo || "Efectivo"), mp.caja_id ? String(mp.caja_id) : null]
-      );
+    if (Array.isArray(data.metodos_pago)) {
+      for (const mp of data.metodos_pago) {
+        await db.runAsync(
+          `INSERT INTO metodos_pago (id, nombre, tipo, caja_id)
+           VALUES (?, ?, ?, ?)
+           ON CONFLICT(id) DO UPDATE SET nombre = excluded.nombre, tipo = excluded.tipo, caja_id = excluded.caja_id`,
+          [
+            String(mp.id),
+            String(mp.nombre),
+            String(mp.tipo || "Efectivo"),
+            mp.caja_id ? String(mp.caja_id) : null,
+          ]
+        );
+      }
     }
-  }
 
-  if (Array.isArray(data.productos)) {
-    for (const p of data.productos) {
-      await db.runAsync(
-        `INSERT INTO productos (id, codigo, nombre, stock, precio_base, moneda_base_id, activo, actualizado_en)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-         ON CONFLICT(id) DO UPDATE SET
-           codigo = excluded.codigo,
-           nombre = excluded.nombre,
-           stock = excluded.stock,
-           precio_base = excluded.precio_base,
-           moneda_base_id = excluded.moneda_base_id,
-           activo = excluded.activo,
-           actualizado_en = excluded.actualizado_en`,
-        [
-          Number(p.id),
-          String(p.codigo),
-          String(p.nombre),
-          Number(p.stock) || 0,
-          Number(p.precio_base) || 0,
-          p.moneda_base_id ? String(p.moneda_base_id) : null,
-          p.activo === false ? 0 : 1,
-          p.actualizado_en ? String(p.actualizado_en) : new Date().toISOString(),
-        ]
-      );
+    if (Array.isArray(data.productos)) {
+      for (const p of data.productos) {
+        await db.runAsync(
+          `INSERT INTO productos (id, codigo, nombre, stock, precio_base, moneda_base_id, activo, actualizado_en)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT(id) DO UPDATE SET
+             codigo = excluded.codigo,
+             nombre = excluded.nombre,
+             stock = excluded.stock,
+             precio_base = excluded.precio_base,
+             moneda_base_id = excluded.moneda_base_id,
+             activo = excluded.activo,
+             actualizado_en = excluded.actualizado_en`,
+          [
+            Number(p.id),
+            String(p.codigo),
+            String(p.nombre),
+            Number(p.stock) || 0,
+            Number(p.precio_base) || 0,
+            p.moneda_base_id ? String(p.moneda_base_id) : null,
+            p.activo === false ? 0 : 1,
+            p.actualizado_en ? String(p.actualizado_en) : new Date().toISOString(),
+          ]
+        );
+      }
     }
-  }
+
+    if (Array.isArray(data.eliminados)) {
+      for (const del of data.eliminados) {
+        if (del.tabla === "productos") {
+          await db.runAsync(`DELETE FROM productos WHERE id = ?`, [Number(del.registro_id)]);
+        } else if (del.tabla === "monedas") {
+          await db.runAsync(`DELETE FROM monedas WHERE id = ?`, [String(del.registro_id)]);
+        }
+      }
+    }
+  });
 }
 
 export async function getLocalProductos(search = ""): Promise<LocalProducto[]> {
@@ -215,7 +236,9 @@ export async function getLocalProductos(search = ""): Promise<LocalProducto[]> {
 
 export async function getLocalMonedas(): Promise<LocalMoneda[]> {
   const db = await getMobileDb();
-  return await db.getAllAsync<LocalMoneda>(`SELECT * FROM monedas ORDER BY es_base DESC, codigo ASC`);
+  return await db.getAllAsync<LocalMoneda>(
+    `SELECT * FROM monedas ORDER BY es_base DESC, codigo ASC`
+  );
 }
 
 export async function createOfflineSale(venta: {
@@ -224,7 +247,13 @@ export async function createOfflineSale(venta: {
   metodo_pago_id: string | null;
   caja_id: string | null;
   total: number;
-  items: Array<{ producto_id: number; nombre: string; cantidad: number; precio_unit: number; subtotal: number }>;
+  items: Array<{
+    producto_id: number;
+    nombre: string;
+    cantidad: number;
+    precio_unit: number;
+    subtotal: number;
+  }>;
 }): Promise<LocalVentaPendiente> {
   const db = await getMobileDb();
   const id = "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (c) => {
@@ -238,38 +267,59 @@ export async function createOfflineSale(venta: {
   const creado_en = now.toISOString();
   const items_json = JSON.stringify(venta.items);
 
-  await db.runAsync(
-    `INSERT INTO ventas_locales (id, numero, cliente_nombre, moneda_id, metodo_pago_id, caja_id, total, fecha, items_json, sincronizado, creado_en)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)`,
-    [
-      id,
-      numero,
-      venta.cliente_nombre || "Consumidor Final",
-      venta.moneda_id,
-      venta.metodo_pago_id,
-      venta.caja_id,
-      venta.total,
-      fecha,
-      items_json,
-      creado_en,
-    ]
-  );
+  let cajaId = venta.caja_id;
+  let metodoId = venta.metodo_pago_id;
 
-  // Descontar stock localmente de forma optimista
-  for (const item of venta.items) {
-    await db.runAsync(
-      `UPDATE productos SET stock = stock - ? WHERE id = ?`,
-      [item.cantidad, item.producto_id]
+  // Resolver automáticamente la caja y método de pago por defecto de la moneda si no se indicaron
+  if (!cajaId || !metodoId) {
+    const defaultCaja = await db.getFirstAsync<{ caja_id: string; metodo_id: string | null }>(
+      `SELECT c.id AS caja_id, mp.id AS metodo_id
+         FROM cajas c
+         LEFT JOIN metodos_pago mp ON mp.caja_id = c.id
+        WHERE c.moneda_id = ?
+        LIMIT 1`,
+      [venta.moneda_id]
     );
+    if (defaultCaja) {
+      if (!cajaId) cajaId = defaultCaja.caja_id;
+      if (!metodoId) metodoId = defaultCaja.metodo_id;
+    }
   }
+
+  await db.withTransactionAsync(async () => {
+    await db.runAsync(
+      `INSERT INTO ventas_locales (id, numero, cliente_nombre, moneda_id, metodo_pago_id, caja_id, total, fecha, items_json, sincronizado, creado_en)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)`,
+      [
+        id,
+        numero,
+        venta.cliente_nombre || "Consumidor Final",
+        venta.moneda_id,
+        metodoId,
+        cajaId,
+        venta.total,
+        fecha,
+        items_json,
+        creado_en,
+      ]
+    );
+
+    // Descontar stock localmente de forma optimista
+    for (const item of venta.items) {
+      await db.runAsync(
+        `UPDATE productos SET stock = MAX(0, stock - ?) WHERE id = ?`,
+        [item.cantidad, item.producto_id]
+      );
+    }
+  });
 
   return {
     id,
     numero,
     cliente_nombre: venta.cliente_nombre || "Consumidor Final",
     moneda_id: venta.moneda_id,
-    metodo_pago_id: venta.metodo_pago_id,
-    caja_id: venta.caja_id,
+    metodo_pago_id: metodoId,
+    caja_id: cajaId,
     total: venta.total,
     fecha,
     items_json,

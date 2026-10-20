@@ -7,6 +7,7 @@ import { redondear, monedaDeProducto, monedaCostoDeProducto, preciosDeProducto, 
 import { aplicarReglasRedondeo } from "@/lib/costing";
 import { getConfiguracionGlobal } from "@/lib/global-config";
 import { leerFiltros, SIN_FILTROS, construirWhere, calcularFacetas } from "@/lib/filtros-productos";
+import { triggerBackgroundSync } from "@/lib/sync-engine";
 
 /** Error de validación de datos enviados por el cliente → HTTP 400. */
 class ValidationError extends Error {}
@@ -235,46 +236,52 @@ export async function GET(request: Request) {
     const total = Number((filas[0] as any)?.total_filtrado ?? 0);
     const productos = (filas as any[]).map(({ total_filtrado, ...resto }) => resto);
 
-    // Las facetas solo se piden si hay filtros: el POS y los modales llaman a
-    // esta API sin parámetros y no tienen por qué pagar cuatro GROUP BY.
     const hayFiltros = !SIN_FILTROS(filtros);
-    const facetas = hayFiltros ? await calcularFacetas(filtros, query) : null;
+    const productoIds = (productos as any[]).map((p) => p.id);
 
-    // Catálogo completo (incluso monedas inactivas) para derivar los precios.
-    // Es el mismo criterio que usan POST/PUT y el resto del sistema.
-    const catalogo = await query(`SELECT id, codigo, simbolo, tasa, tasa_ref_moneda_id, decimales, es_base, activo, usa_tasa_usd_directa, tasa_usd_directa FROM monedas ORDER BY es_base DESC, codigo ASC, id ASC`);
+    const [facetas, catalogo, cfgGlobal, presentacionesRows, proveedoresRows] = await Promise.all([
+      hayFiltros ? calcularFacetas(filtros, query) : Promise.resolve(null),
+      query(
+        `SELECT id, codigo, simbolo, tasa, tasa_ref_moneda_id, decimales, es_base, activo, usa_tasa_usd_directa, tasa_usd_directa FROM monedas ORDER BY es_base DESC, codigo ASC, id ASC`
+      ),
+      getConfiguracionGlobal(),
+      productoIds.length
+        ? query(
+            `SELECT id, producto_id, nombre, unidades, activo, codigo,
+                    modo_venta, precio_override, margen_override
+             FROM producto_presentaciones
+             WHERE producto_id = ANY($1::int[])
+             ORDER BY nombre ASC, unidades ASC`,
+            [productoIds]
+          ).catch((e: any) => {
+            console.warn(
+              "Aviso al consultar producto_presentaciones (se continuará sin presentaciones):",
+              e?.message || e
+            );
+            return [] as any[];
+          })
+        : Promise.resolve([] as any[]),
+      productoIds.length
+        ? query(
+            `SELECT pp.producto_id, pr.id, pr.nombre
+             FROM producto_proveedores pp
+             JOIN proveedores pr ON pr.id = pp.proveedor_id
+             WHERE pp.producto_id = ANY($1::int[])
+             ORDER BY pr.nombre ASC, pr.id ASC`,
+            [productoIds]
+          ).catch((e: any) => {
+            console.warn(
+              "Aviso al consultar producto_proveedores (se continuará con proveedor principal):",
+              e?.message || e
+            );
+            return [] as any[];
+          })
+        : Promise.resolve([] as any[]),
+    ]);
 
-    // Reglas del motor: el COSTO se deriva con el método de compras y el PRECIO
-    // con el de ventas (directa o triangulación), igual que en el resto del
-    // sistema — así la lista no muestra valores que difieran de los que la
-    // compra/el modal calculan.
-    const cfgGlobal = await getConfiguracionGlobal();
     const reglas = reglasConversion(cfgGlobal, catalogo);
-
-    // Solo el precio en la moneda base del producto está guardado
-    // (`precio_base`/`costo_base`). Las monedas restantes se DERIVAN en
-    // lectura con las tasas actuales, así un cambio de conversión se refleja
-    // en todos los productos sin reescribir `producto_precios`.
     const baseSistema = catalogo.find((m: any) => m.es_base) || catalogo[0];
 
-    // Presentaciones de los productos de la página (una sola consulta).
-    // `presentacionesDeProducto` deriva precio/costo de presentación en lectura.
-    const productoIds = (productos as any[]).map((p) => p.id);
-    let presentacionesRows: any[] = [];
-    if (productoIds.length) {
-      try {
-        presentacionesRows = await query(
-          `SELECT id, producto_id, nombre, unidades, activo, codigo,
-                  modo_venta, precio_override, margen_override
-           FROM producto_presentaciones
-           WHERE producto_id = ANY($1::int[])
-           ORDER BY nombre ASC, unidades ASC`,
-          [productoIds]
-        );
-      } catch (e: any) {
-        console.warn("Aviso al consultar producto_presentaciones (se continuará sin presentaciones):", e?.message || e);
-      }
-    }
     const presPorProducto = new Map<number, any[]>();
     for (const pr of presentacionesRows as any[]) {
       const lista = presPorProducto.get(pr.producto_id) || [];
@@ -282,22 +289,6 @@ export async function GET(request: Request) {
       presPorProducto.set(pr.producto_id, lista);
     }
 
-    // Relación N:M proveedores del producto (lista completa, no solo el principal).
-    let proveedoresRows: any[] = [];
-    if (productoIds.length) {
-      try {
-        proveedoresRows = await query(
-          `SELECT pp.producto_id, pr.id, pr.nombre
-           FROM producto_proveedores pp
-           JOIN proveedores pr ON pr.id = pp.proveedor_id
-           WHERE pp.producto_id = ANY($1::int[])
-           ORDER BY pr.nombre ASC, pr.id ASC`,
-          [productoIds]
-        );
-      } catch (e: any) {
-        console.warn("Aviso al consultar producto_proveedores (se continuará con proveedor principal):", e?.message || e);
-      }
-    }
     const provPorProducto = new Map<number, any[]>();
     for (const pv of proveedoresRows as any[]) {
       const lista = provPorProducto.get(pv.producto_id) || [];
@@ -526,6 +517,7 @@ export async function POST(request: Request) {
       return producto;
     });
 
+    triggerBackgroundSync();
     return NextResponse.json(result, { status: 201 });
   } catch (error: unknown) {
     console.error("Error al crear producto:", error);
@@ -805,6 +797,7 @@ export async function PUT(request: Request) {
       return NextResponse.json({ error: "Producto no encontrado" }, { status: 404 });
     }
 
+    triggerBackgroundSync();
     return NextResponse.json(result);
   } catch (error) {
     if (error instanceof ValidationError) {
@@ -841,6 +834,7 @@ export async function DELETE(request: Request) {
     }
 
     await execute(`DELETE FROM productos WHERE id = $1`, [id]);
+    triggerBackgroundSync();
     return NextResponse.json({ success: true });
   } catch (error) {
     return NextResponse.json({ error: "Error al eliminar producto" }, { status: 500 });

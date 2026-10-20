@@ -18,10 +18,10 @@ export async function GET() {
 
     await ensureSyncTables();
     const config = await getSyncConfig();
-    const pending = await countPendingLocalChanges(config.ultima_sincronizacion_push);
-    const historial = await query(
-      `SELECT * FROM sync_historial ORDER BY fecha DESC LIMIT 10`
-    );
+    const [pending, historial] = await Promise.all([
+      countPendingLocalChanges(config.ultima_sincronizacion_push, config.modo_conexion),
+      query(`SELECT * FROM sync_historial ORDER BY fecha DESC LIMIT 10`),
+    ]);
 
     return NextResponse.json({
       config,

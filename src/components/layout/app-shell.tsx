@@ -6,6 +6,7 @@ import { usePathname, useRouter } from "next/navigation";
 import { LogOut } from "lucide-react";
 import { Sidebar } from "./sidebar";
 import { Topbar } from "./topbar";
+import { CloudSyncBadge } from "./cloud-sync-badge";
 import { ToastProvider } from "@/components/ui/toast";
 import { Avatar } from "@/components/ui/avatar";
 import { signOut } from "@/lib/auth-client";
@@ -56,6 +57,7 @@ export function AppShell({ children, user }: { children: React.ReactNode; user: 
               <div className="flex-1" />
 
               <div className="flex items-center gap-2.5">
+                <CloudSyncBadge />
                 <div className="hidden min-w-0 text-right sm:block">
                   <div className="truncate text-xs font-semibold text-foreground">{user.name}</div>
                   <div className="truncate text-[10px] capitalize text-muted-foreground">{user.role}</div>

@@ -3,6 +3,7 @@ export const dynamic = 'force-dynamic';
 import { NextResponse } from "next/server";
 import { requireSession, requireRole } from "@/lib/auth-server";
 import { query, queryOne, execute, transaction } from "@/lib/db";
+import { triggerBackgroundSync } from "@/lib/sync-engine";
 
 export async function GET() {
   try {
@@ -79,6 +80,7 @@ export async function POST(request: Request) {
       return moneda;
     });
 
+    triggerBackgroundSync();
     return NextResponse.json(result, { status: 201 });
   } catch (error) {
     return NextResponse.json({ error: "Error al crear moneda" }, { status: 500 });
@@ -148,6 +150,7 @@ export async function PUT(request: Request) {
       return NextResponse.json({ error: "Moneda no encontrada" }, { status: 404 });
     }
 
+    triggerBackgroundSync();
     return NextResponse.json(result);
   } catch (error) {
     return NextResponse.json({ error: "Error al actualizar moneda" }, { status: 500 });
@@ -174,6 +177,7 @@ export async function DELETE(request: Request) {
     }
 
     await execute(`DELETE FROM monedas WHERE id = $1`, [id]);
+    triggerBackgroundSync();
     return NextResponse.json({ success: true });
   } catch (error) {
     return NextResponse.json({ error: "Error al eliminar moneda" }, { status: 500 });

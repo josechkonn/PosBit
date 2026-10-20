@@ -20,8 +20,8 @@ export async function OPTIONS() {
 
 /**
  * GET /api/sync
- * - ?action=status → Devuelve estado local de sincronización, cambios pendientes e historial.
- * - ?since=ISO_DATE → Extrae y devuelve el delta de cambios desde esa fecha (usado por clientes remotos/móviles al hacer PULL).
+ * - ?action=status → Devuelve estado local de sincronización, cambios pendientes e historial opcional.
+ * - ?since=ISO_DATE&mode=mobile|full → Extrae y devuelve el delta de cambios desde esa fecha.
  */
 export async function GET(request: Request) {
   try {
@@ -36,15 +36,17 @@ export async function GET(request: Request) {
 
     if (action === "status") {
       const config = await getSyncConfig();
-      const pending = await countPendingLocalChanges(config.ultima_sincronizacion_push);
-      const historial = await query(
-        `SELECT * FROM sync_historial ORDER BY fecha DESC LIMIT 10`
-      );
+      const includeHistory = searchParams.get("history") === "1";
+      const [pending, historial] = await Promise.all([
+        countPendingLocalChanges(config.ultima_sincronizacion_push, config.modo_conexion),
+        includeHistory
+          ? query(`SELECT * FROM sync_historial ORDER BY fecha DESC LIMIT 10`)
+          : Promise.resolve([]),
+      ]);
 
       return NextResponse.json({
         config: {
           ...config,
-          // Enmascarar credenciales sensibles si se pide solo status rápido
           has_api_key: Boolean(config.cloud_api_key),
           has_db_url: Boolean(config.cloud_database_url),
         },
@@ -54,8 +56,9 @@ export async function GET(request: Request) {
     }
 
     const since = searchParams.get("since") || null;
+    const mode = searchParams.get("mode") === "mobile" ? "mobile" : "full";
     const cfg = await getSyncConfig();
-    const delta = await collectDeltaFromDb(pool, since, cfg.dispositivo_id);
+    const delta = await collectDeltaFromDb(pool, since, cfg.dispositivo_id, { mode });
 
     return NextResponse.json(delta);
   } catch (error: any) {
@@ -70,6 +73,7 @@ export async function GET(request: Request) {
 /**
  * POST /api/sync
  * Acciones soportadas:
+ *   - "bidirectional_sync": En 1 sola petición HTTP aplica el delta del cliente y devuelve el delta del servidor.
  *   - "remote_push": Un cliente remoto (otra PC o App Móvil Expo) sube su delta a este servidor.
  *   - "sync_now": Ejecuta sincronización bidireccional incremental Local ↔ Nube.
  *   - "push_all": Fuerza subida completa Local → Nube (inicializar nube).
@@ -87,7 +91,55 @@ export async function POST(request: Request) {
     const body = await request.json();
     const action = body?.action || "sync_now";
 
-    // 1. Recibir push desde otro equipo o desde la App Móvil
+    // 1. Sincronización bidireccional en 1 solo viaje de red (Push + Pull combinados)
+    if (action === "bidirectional_sync") {
+      const startTime = Date.now();
+      const since: string | null = body.since || null;
+      const mode = body.mode === "mobile" ? "mobile" : "full";
+      const incomingPayload: SyncDeltaPayload | null = body.payload || null;
+
+      // Primero recolectamos el delta del servidor desde `since` (antes de aplicar los propios cambios del cliente)
+      const cfg = await getSyncConfig();
+      const serverDelta = await collectDeltaFromDb(pool, since, cfg.dispositivo_id, { mode });
+
+      let appliedRows = 0;
+      let deletedRows = 0;
+
+      if (
+        incomingPayload &&
+        incomingPayload.tables &&
+        typeof incomingPayload.tables === "object"
+      ) {
+        const res = await transaction(async (client) => {
+          return await applyDeltaToDb(client, incomingPayload);
+        });
+        appliedRows = res.appliedRows;
+        deletedRows = res.deletedRows;
+
+        if (appliedRows > 0 || deletedRows > 0) {
+          const duracionMs = Date.now() - startTime;
+          await query(
+            `INSERT INTO sync_historial (direccion, registros_subidos, registros_bajados, estado, detalle, duracion_ms)
+             VALUES ('entrante', 0, $1, 'ok', $2, $3)`,
+            [
+              appliedRows,
+              `Sincronización bidireccional desde dispositivo ${incomingPayload.dispositivo_id || "remoto"}`,
+              duracionMs,
+            ]
+          );
+        }
+      }
+
+      return NextResponse.json({
+        ok: true,
+        appliedRows,
+        deletedRows,
+        delta: serverDelta,
+        serverTime: new Date().toISOString(),
+      });
+    }
+
+    // 2. Recibir push desde otro equipo o desde la App Móvil
     if (action === "remote_push") {
       const startTime = Date.now();
       const payload: SyncDeltaPayload = body.payload;
@@ -104,15 +156,17 @@ export async function POST(request: Request) {
       });
 
       const duracionMs = Date.now() - startTime;
-      await query(
-        `INSERT INTO sync_historial (direccion, registros_subidos, registros_bajados, estado, detalle, duracion_ms)
-         VALUES ('entrante', 0, $1, 'ok', $2, $3)`,
-        [
-          result.appliedRows,
-          `Recibidos ${result.appliedRows} cambios desde dispositivo ${payload.dispositivo_id || "remoto"}`,
-          duracionMs,
-        ]
-      );
+      if (result.appliedRows > 0 || result.deletedRows > 0) {
+        await query(
+          `INSERT INTO sync_historial (direccion, registros_subidos, registros_bajados, estado, detalle, duracion_ms)
+           VALUES ('entrante', 0, $1, 'ok', $2, $3)`,
+          [
+            result.appliedRows,
+            `Recibidos ${result.appliedRows} cambios desde dispositivo ${payload.dispositivo_id || "remoto"}`,
+            duracionMs,
+          ]
+        );
+      }
 
       return NextResponse.json({
         ok: true,
@@ -122,7 +176,7 @@ export async function POST(request: Request) {
       });
     }
 
-    // 2. Probar conexión con la nube antes de guardar o sincronizar
+    // 3. Probar conexión con la nube antes de guardar o sincronizar
     if (action === "test_connection") {
       const startTime = Date.now();
       const modo = body.modo_conexion;
@@ -141,7 +195,9 @@ export async function POST(request: Request) {
           connectionTimeoutMillis: 8000,
         });
         try {
-          const res = await testPool.query("SELECT current_database() AS db, NOW() AS server_time");
+          const res = await testPool.query(
+            "SELECT current_database() AS db, NOW() AS server_time"
+          );
           const latency = Date.now() - startTime;
           return NextResponse.json({
             ok: true,
@@ -196,10 +252,13 @@ export async function POST(request: Request) {
         });
       }
 
-      return NextResponse.json({ ok: false, error: "Modo de conexión no válido" }, { status: 400 });
+      return NextResponse.json(
+        { ok: false, error: "Modo de conexión no válido" },
+        { status: 400 }
+      );
     }
 
-    // 3. Ejecutar sincronización desde esta máquina hacia la nube
+    // 4. Ejecutar sincronización desde esta máquina hacia la nube
     if (action === "sync_now") {
       const res = await executeCloudSync({ direction: "bidireccional", forceFull: false });
       return NextResponse.json(res, { status: res.ok ? 200 : 500 });

@@ -23,6 +23,7 @@ function setupUpdater(mainWindow) {
   autoUpdater.autoDownload = false;           // No descargar sin permiso
   autoUpdater.autoInstallOnAppQuit = true;    // Instalar al cerrar si hay update
   autoUpdater.allowDowngrade = false;
+  autoUpdater.allowPrerelease = app.getVersion().includes('-nube'); // Aislar canal nube de main
 
   // Logs (filtrando el stacktrace 404 cuando no hay releases)
   const log = require('electron-log');

@@ -32,7 +32,7 @@ export async function clearStoredSession(): Promise<void> {
 }
 
 /**
- * Inicia sesión contra el servidor PosBit Cloud (o IP local) y guarda el catálogo inicial para uso offline.
+ * Inicia sesión contra el servidor PosBit Cloud (o IP local) y guarda el catálogo inicial completo en una sola petición.
  */
 export async function loginMobile(
   rawServerUrl: string,
@@ -41,7 +41,9 @@ export async function loginMobile(
 ) {
   const serverUrl = rawServerUrl.trim().replace(/\/+$/, "");
   if (!serverUrl || serverUrl === "https://" || serverUrl === "http://") {
-    throw new Error("Por favor ingresa la URL completa de tu servidor (ej. https://tu-posbit.vercel.app)");
+    throw new Error(
+      "Por favor ingresa la URL completa de tu servidor (ej. https://tu-posbit.vercel.app)"
+    );
   }
 
   let res: Response;
@@ -52,7 +54,9 @@ export async function loginMobile(
       body: JSON.stringify({ email, password }),
     });
   } catch (netErr: any) {
-    throw new Error(`No se pudo conectar a "${serverUrl}". Verifica tu conexión y la URL (${netErr?.message || netErr}).`);
+    throw new Error(
+      `No se pudo conectar a "${serverUrl}". Verifica tu conexión y la URL (${netErr?.message || netErr}).`
+    );
   }
 
   const rawText = await res.text();
@@ -81,15 +85,20 @@ export async function loginMobile(
     monedas: data.monedas,
     cajas: data.cajas,
     metodos_pago: data.metodosPago,
+    productos: data.productos,
   });
+
+  if (data.serverTime && Array.isArray(data.productos) && data.productos.length > 0) {
+    await setMeta("last_pull_iso", data.serverTime);
+  }
 
   return data;
 }
 
 /**
  * Sincroniza bidireccionalmente la App Móvil con el Servidor PosBit en la Nube:
- *   1. Sube todas las ventas creadas en modo offline (`sincronizado = 0`) a `/api/ventas`
- *   2. Descarga los cambios del catálogo (productos, precios, tasas de moneda) desde `/api/sync`
+ *   1. Sube todas las ventas creadas en modo offline (`sincronizado = 0`) a `/api/ventas` (con idempotencia)
+ *   2. Descarga únicamente el delta móvil (`mode=mobile`: monedas, cajas, métodos de pago y productos)
  */
 export async function syncMobileWithCloud(): Promise<{
   ventasSubidas: number;
@@ -117,13 +126,14 @@ export async function syncMobileWithCloud(): Promise<{
       method: "POST",
       headers,
       body: JSON.stringify({
+        origen_offline: true,
         cliente: venta.cliente_nombre,
         tipo_pago: "Contado",
         fecha: venta.fecha,
         moneda_id: venta.moneda_id,
         metodo_pago_id: venta.metodo_pago_id,
         caja_id: venta.caja_id,
-        estado: "Completada",
+        estado: "Pagada",
         observaciones: `Venta desde App Móvil (${venta.numero})`,
         items: items.map((it: any) => ({
           producto_id: it.producto_id,
@@ -140,11 +150,11 @@ export async function syncMobileWithCloud(): Promise<{
     }
   }
 
-  // 2. Descargar catálogo e inventario desde `/api/sync`
+  // 2. Descargar catálogo e inventario optimizado (`mode=mobile`) desde `/api/sync`
   const lastSync = await getMeta("last_pull_iso");
   const syncUrl = lastSync
-    ? `${serverUrl}/api/sync?since=${encodeURIComponent(lastSync)}`
-    : `${serverUrl}/api/sync`;
+    ? `${serverUrl}/api/sync?mode=mobile&since=${encodeURIComponent(lastSync)}`
+    : `${serverUrl}/api/sync?mode=mobile`;
 
   const pullRes = await fetch(syncUrl, { method: "GET", headers });
   const pullText = await pullRes.text();
@@ -158,12 +168,14 @@ export async function syncMobileWithCloud(): Promise<{
   if (!pullRes.ok) {
     throw new Error(delta?.error || `Error al descargar catálogo (HTTP ${pullRes.status})`);
   }
+
   const prods = delta.tables?.productos || [];
   await saveCatalogOffline({
     monedas: delta.tables?.monedas,
     cajas: delta.tables?.cajas,
     metodos_pago: delta.tables?.metodos_pago,
     productos: prods,
+    eliminados: delta.eliminados,
   });
 
   const nowIso = delta.hasta || new Date().toISOString();

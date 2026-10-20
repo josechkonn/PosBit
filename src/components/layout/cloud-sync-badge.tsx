@@ -27,6 +27,7 @@ interface SyncStatusData {
     ultima_sincronizacion_pull: string | null;
     ultimo_estado: string;
     ultimo_error: string | null;
+    es_nube_central?: boolean;
   };
   pending: {
     totalPendientes: number;
@@ -44,6 +45,9 @@ export function CloudSyncBadge() {
   const syncingRef = useRef(false);
 
   const fetchStatus = useCallback(async () => {
+    if (typeof document !== "undefined" && document.visibilityState === "hidden") {
+      return;
+    }
     try {
       const res = await fetch("/api/sync?action=status");
       if (res.ok) {
@@ -92,7 +96,7 @@ export function CloudSyncBadge() {
     [fetchStatus]
   );
 
-  // Detectar estado de red del sistema operativo / navegador
+  // Detectar estado de red y eventos de sincronización instantánea
   useEffect(() => {
     setIsOnline(typeof navigator !== "undefined" ? navigator.onLine : true);
 
@@ -107,28 +111,38 @@ export function CloudSyncBadge() {
       setLastMessage("Sin internet: trabajando en base de datos local.");
     };
 
+    const handleInstantSync = () => {
+      if (navigator.onLine) {
+        triggerSync(false);
+      }
+    };
+
     window.addEventListener("online", handleOnline);
     window.addEventListener("offline", handleOffline);
+    window.addEventListener("posbit:sync-now", handleInstantSync);
     return () => {
       window.removeEventListener("online", handleOnline);
       window.removeEventListener("offline", handleOffline);
+      window.removeEventListener("posbit:sync-now", handleInstantSync);
     };
   }, [triggerSync]);
 
-  // Cargar estado inicial
+  // Cargar estado inicial y refrescar de forma eficiente (60s en Nube Central, 20s en PC local)
   useEffect(() => {
     fetchStatus();
-    const statusTimer = setInterval(fetchStatus, 15000);
+    const pollMs = status?.config?.es_nube_central ? 60000 : 20000;
+    const statusTimer = setInterval(fetchStatus, pollMs);
     return () => clearInterval(statusTimer);
-  }, [fetchStatus]);
+  }, [fetchStatus, status?.config?.es_nube_central]);
 
-  // Auto-sync periódico cuando está activado y hay internet
+  // Auto-sync periódico cuando está activado en PC local y hay internet
   useEffect(() => {
     if (!status?.config) return;
-    const { modo_conexion, auto_sync, intervalo_segundos } = status.config;
+    const { modo_conexion, auto_sync, intervalo_segundos, es_nube_central } = status.config;
+    if (es_nube_central && modo_conexion === "desactivado") return;
     if (modo_conexion === "desactivado" || !auto_sync || !isOnline) return;
 
-    const ms = Math.max(10, intervalo_segundos || 30) * 1000;
+    const ms = Math.max(8, intervalo_segundos || 20) * 1000;
     const timer = setInterval(() => {
       if (navigator.onLine) {
         triggerSync(false);
@@ -150,12 +164,15 @@ export function CloudSyncBadge() {
   }, []);
 
   const cfg = status?.config;
+  const esNubeCentral = Boolean(cfg?.es_nube_central);
   const pendientes = status?.pending?.totalPendientes ?? 0;
-  const isConfigured = cfg && cfg.modo_conexion !== "desactivado";
-  const hasError = isConfigured && cfg?.ultimo_estado === "error";
+  const isConfigured = Boolean(
+    esNubeCentral || (cfg && cfg.modo_conexion !== "desactivado")
+  );
+  const hasError = !esNubeCentral && isConfigured && cfg?.ultimo_estado === "error";
 
   const fmtTime = (iso: string | null | undefined) => {
-    if (!iso) return "Nunca";
+    if (!iso) return esNubeCentral ? "Tiempo real" : "Nunca";
     const d = new Date(iso);
     const diffSec = Math.floor((Date.now() - d.getTime()) / 1000);
     if (diffSec < 60) return "Hace instantes";
@@ -204,11 +221,13 @@ export function CloudSyncBadge() {
               ? "Sincronizando..."
               : hasError
                 ? "Error Nube"
-                : isConfigured
-                  ? pendientes > 0
-                    ? `Nube (${pendientes})`
-                    : "Sincronizado"
-                  : "Modo Local"}
+                : esNubeCentral
+                  ? "Nube Central"
+                  : isConfigured
+                    ? pendientes > 0
+                      ? `Nube (${pendientes})`
+                      : "Sincronizado"
+                    : "Modo Local"}
         </span>
       </button>
 
@@ -236,16 +255,20 @@ export function CloudSyncBadge() {
                 </div>
                 <div>
                   <h4 className="text-xs font-semibold text-foreground">
-                    {cfg?.nombre_dispositivo || "Caja Principal"}
+                    {esNubeCentral
+                      ? "Servidor PosBit Cloud"
+                      : cfg?.nombre_dispositivo || "Caja Principal"}
                   </h4>
                   <p className="text-[11px] text-muted-foreground">
                     {!isOnline
                       ? "Sin internet · Operando localmente"
-                      : isConfigured
-                        ? cfg?.modo_conexion === "db_directa"
-                          ? "Conectado a PostgreSQL Cloud"
-                          : "Conectado a PosBit Cloud API"
-                        : "Operando solo en base local"}
+                      : esNubeCentral
+                        ? "Base de datos central en tiempo real"
+                        : isConfigured
+                          ? cfg?.modo_conexion === "db_directa"
+                            ? "Conectado a PostgreSQL Cloud"
+                            : "Conectado a PosBit Cloud API"
+                          : "Operando solo en base local"}
                   </p>
                 </div>
               </div>
@@ -261,8 +284,12 @@ export function CloudSyncBadge() {
 
             <div className="mt-3 space-y-2 text-xs">
               <div className="flex items-center justify-between rounded-md bg-muted/40 px-2.5 py-1.5">
-                <span className="text-muted-foreground">Cambios locales pendientes</span>
-                <span className="font-mono font-semibold text-foreground">{pendientes}</span>
+                <span className="text-muted-foreground">
+                  {esNubeCentral ? "Estado del nodo central" : "Cambios locales pendientes"}
+                </span>
+                <span className="font-mono font-semibold text-foreground">
+                  {esNubeCentral ? "En línea" : pendientes}
+                </span>
               </div>
 
               <div className="flex items-center justify-between px-1 text-[11px]">
@@ -279,7 +306,7 @@ export function CloudSyncBadge() {
                 </span>
               </div>
 
-              {cfg?.ultimo_error && (
+              {cfg?.ultimo_error && !esNubeCentral && (
                 <div className="flex items-start gap-2 rounded-md border border-danger/20 bg-danger/10 p-2 text-[11px] text-danger">
                   <AlertTriangle size={13} className="mt-0.5 shrink-0" />
                   <span className="line-clamp-3">{cfg.ultimo_error}</span>
@@ -295,7 +322,16 @@ export function CloudSyncBadge() {
             </div>
 
             <div className="mt-3 flex gap-2 border-t border-border/60 pt-3">
-              {isConfigured ? (
+              {esNubeCentral ? (
+                <Link
+                  href="/configuracion"
+                  onClick={() => setOpen(false)}
+                  className="flex h-8 w-full items-center justify-center gap-1.5 rounded-md bg-primary px-3 text-xs font-medium text-primary-foreground hover:bg-primary/90"
+                >
+                  <Settings size={13} />
+                  Ver Parámetros de Conexión Cloud
+                </Link>
+              ) : isConfigured ? (
                 <Button
                   size="sm"
                   className="w-full gap-1.5 text-xs"
