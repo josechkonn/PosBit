@@ -2898,7 +2898,6 @@ export default function App() {
                   ? monedas.find((x) => String(x.id) === String(m.tasa_ref_moneda_id))
                   : baseMonedaSistema;
                 const directa = tasaDirectaUsd(m);
-                const tasaEfectivaUsd = tasaUsd(m, monedas);
 
                 return (
                   <View
@@ -2912,39 +2911,34 @@ export default function App() {
                       gap: 4,
                     }}
                   >
-                    <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center" }}>
-                      <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
-                        <Text style={{ fontSize: 13, fontWeight: "800", color: THEME.foreground }}>
-                          {m.nombre} ({m.codigo})
-                        </Text>
-                        {m.es_base === 1 && (
-                          <View
-                            style={[
-                              styles.statusBadge,
-                              { backgroundColor: THEME.secondary, borderColor: THEME.primary },
-                            ]}
-                          >
-                            <Text style={[styles.statusBadgeText, { color: THEME.primary600 }]}>
-                              Moneda Base
-                            </Text>
-                          </View>
-                        )}
-                        {directa !== null && (
-                          <View
-                            style={[
-                              styles.statusBadge,
-                              { backgroundColor: THEME.successSoft, borderColor: THEME.successBorder },
-                            ]}
-                          >
-                            <Text style={[styles.statusBadgeText, { color: THEME.successStrong }]}>
-                              USD ↔ {m.codigo} Directo
-                            </Text>
-                          </View>
-                        )}
-                      </View>
-                      <Text style={{ fontSize: 13, fontWeight: "800", color: THEME.primary600 }}>
-                        1 USD = {m.simbolo} {Number(tasaEfectivaUsd).toLocaleString("es-VE", { maximumFractionDigits: 4 })}
+                    <View style={{ flexDirection: "row", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+                      <Text style={{ fontSize: 13, fontWeight: "800", color: THEME.foreground }}>
+                        {m.nombre} ({m.codigo})
                       </Text>
+                      {m.es_base === 1 && (
+                        <View
+                          style={[
+                            styles.statusBadge,
+                            { backgroundColor: THEME.secondary, borderColor: THEME.primary },
+                          ]}
+                        >
+                          <Text style={[styles.statusBadgeText, { color: THEME.primary600 }]}>
+                            Moneda Base
+                          </Text>
+                        </View>
+                      )}
+                      {directa !== null && (
+                        <View
+                          style={[
+                            styles.statusBadge,
+                            { backgroundColor: THEME.successSoft, borderColor: THEME.successBorder },
+                          ]}
+                        >
+                          <Text style={[styles.statusBadgeText, { color: THEME.successStrong }]}>
+                            USD ↔ {m.codigo} Directo
+                          </Text>
+                        </View>
+                      )}
                     </View>
 
                     {m.es_base !== 1 && (

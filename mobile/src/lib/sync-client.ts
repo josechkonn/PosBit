@@ -272,6 +272,7 @@ export async function syncMobileWithCloud(): Promise<{
     creditos: creditosMerged,
     abonos: delta.tables?.abonos,
     ventas: delta.tables?.ventas,
+    venta_items: delta.tables?.venta_items,
     eliminados: delta.eliminados,
   });
 
@@ -428,4 +429,171 @@ export async function registrarAbonoMobile(payload: {
   // Fallback 100% offline en SQLite
   await createOfflineAbono(payload);
   return { online: false };
+}
+
+/**
+ * Aplica un pago de deuda global del cliente repartiéndolo automáticamente entre sus facturas pendientes
+ * desde la más antigua (FIFO), idéntico a /api/creditos/pagar-deuda en la versión Web.
+ * Si está sin conexión, aplica el reparto sobre SQLite local y encola los abonos.
+ */
+export async function pagarDeudaGlobalMobile(payload: {
+  cliente_id: string;
+  monto: number;
+  moneda_id: string;
+  fecha: string;
+  metodo_pago_id: string | null;
+  caja_id: string | null;
+  observaciones?: string | null;
+  distribucionOffline: Array<{
+    credito_id: string;
+    moneda_id: string;
+    monto_aplicado: number;
+  }>;
+}): Promise<{
+  online: boolean;
+  aplicadas: number;
+  completadas: number;
+  sobrante_base?: number;
+}> {
+  const { serverUrl, token } = await getStoredSession();
+  if (serverUrl && token) {
+    try {
+      const res = await fetch(`${serverUrl}/api/creditos/pagar-deuda`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          cliente_id: payload.cliente_id,
+          monto: payload.monto,
+          moneda_id: payload.moneda_id,
+          fecha: payload.fecha,
+          metodo_pago_id: payload.metodo_pago_id,
+          caja_id: payload.caja_id,
+          observaciones: payload.observaciones || null,
+        }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(data.error || "Error al aplicar el pago de deuda");
+      }
+
+      // Actualizar los créditos afectados en SQLite local inmediatamente
+      const db = await getMobileDb();
+      if (Array.isArray(data.aplicado)) {
+        for (const ap of data.aplicado) {
+          const row = await db.getFirstAsync<{ saldo: number }>(
+            `SELECT saldo FROM creditos WHERE id = ?`,
+            [String(ap.credito_id)]
+          );
+          if (row) {
+            const nuevoSaldo = Math.max(0, Number(row.saldo) - (Number(ap.monto) || 0));
+            const nuevoEstado = ap.estado || (nuevoSaldo <= 0.009 ? "Pagado" : "Parcial");
+            await db.runAsync(
+              `UPDATE creditos SET saldo = ?, estado = ? WHERE id = ?`,
+              [nuevoEstado === "Pagado" ? 0 : nuevoSaldo, String(nuevoEstado), String(ap.credito_id)]
+            );
+          }
+        }
+      }
+
+      return {
+        online: true,
+        aplicadas: Array.isArray(data.aplicado) ? data.aplicado.length : 0,
+        completadas: Number(data.creditos_completados) || 0,
+        sobrante_base: Number(data.sobrante_base) || 0,
+      };
+    } catch (err: any) {
+      if (err?.message && !err.message.includes("Network") && !err.message.includes("fetch")) {
+        throw err;
+      }
+    }
+  }
+
+  // Fallback offline: repartir sobre cada crédito pendiente según el preview FIFO
+  let aplicadas = 0;
+  let completadas = 0;
+  const db = await getMobileDb();
+  for (const dist of payload.distribucionOffline) {
+    if (dist.monto_aplicado <= 0.0005) continue;
+    const row = await db.getFirstAsync<{ saldo: number }>(
+      `SELECT saldo FROM creditos WHERE id = ?`,
+      [dist.credito_id]
+    );
+    const saldoAntes = Number(row?.saldo || 0);
+    await createOfflineAbono({
+      credito_id: dist.credito_id,
+      cliente_id: payload.cliente_id,
+      fecha: payload.fecha,
+      monto: dist.monto_aplicado,
+      moneda_id: dist.moneda_id,
+      monto_en_moneda_credito: dist.monto_aplicado,
+      metodo_pago_id: payload.metodo_pago_id,
+      caja_id: payload.caja_id,
+      observaciones: payload.observaciones
+        ? `${payload.observaciones} (Abono global)`
+        : "Abono global repartido",
+    });
+    aplicadas++;
+    if (saldoAntes - dist.monto_aplicado <= 0.01) {
+      completadas++;
+    }
+  }
+
+  return {
+    online: false,
+    aplicadas,
+    completadas,
+    sobrante_base: 0,
+  };
+}
+
+/**
+ * Obtiene el perfil completo de un cliente desde el servidor (/api/clientes/[id], /api/ventas?cliente_id=[id], /api/retornos?cliente_id=[id])
+ * incluyendo estadísticas, top productos más comprados, ventas detalladas con ítems y retornos.
+ */
+export async function fetchClientePerfilCloud(clienteId: string): Promise<{
+  detalle: any | null;
+  ventas: any[];
+  ventaItems: any[];
+  creditos: any[];
+  retornos: any[];
+  retornoItems: any[];
+} | null> {
+  const { serverUrl, token } = await getStoredSession();
+  if (!serverUrl || !token) return null;
+
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+    Authorization: `Bearer ${token}`,
+  };
+
+  const fetchJson = async (url: string) => {
+    try {
+      const r = await fetch(url, { method: "GET", headers });
+      if (!r.ok) return null;
+      return await r.json();
+    } catch {
+      return null;
+    }
+  };
+
+  const [det, vData, crData, retData] = await Promise.all([
+    fetchJson(`${serverUrl}/api/clientes/${encodeURIComponent(clienteId)}`),
+    fetchJson(`${serverUrl}/api/ventas?cliente_id=${encodeURIComponent(clienteId)}`),
+    fetchJson(`${serverUrl}/api/creditos?cliente_id=${encodeURIComponent(clienteId)}`),
+    fetchJson(`${serverUrl}/api/retornos?cliente_id=${encodeURIComponent(clienteId)}`),
+  ]);
+
+  if (!det && !vData && !crData) return null;
+
+  return {
+    detalle: det,
+    ventas: Array.isArray(vData?.ventas) ? vData.ventas : [],
+    ventaItems: Array.isArray(vData?.items) ? vData.items : [],
+    creditos: Array.isArray(crData?.creditos) ? crData.creditos : [],
+    retornos: Array.isArray(retData?.retornos) ? retData.retornos : [],
+    retornoItems: Array.isArray(retData?.items) ? retData.items : [],
+  };
 }

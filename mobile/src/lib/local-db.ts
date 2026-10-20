@@ -163,6 +163,21 @@ export interface LocalVentaRemota {
   observaciones: string | null;
 }
 
+export interface LocalVentaItemRemoto {
+  id: string;
+  venta_id: string;
+  producto_id: number;
+  producto_codigo: string;
+  producto_nombre: string;
+  cantidad: number;
+  precio_unit: number;
+  subtotal: number;
+  subtotal_base: number;
+  descuento_base: number;
+  presentacion_nombre: string | null;
+  presentacion_unidades: number | null;
+}
+
 export interface LocalVentaPendiente {
   id: string;
   numero: string;
@@ -373,6 +388,19 @@ export async function getMobileDb(): Promise<SQLite.SQLiteDatabase> {
       observaciones TEXT
     );
 
+    CREATE TABLE IF NOT EXISTS venta_items_remotos (
+      id TEXT PRIMARY KEY,
+      venta_id TEXT NOT NULL,
+      producto_id INTEGER NOT NULL,
+      cantidad REAL NOT NULL DEFAULT 0,
+      precio_unit REAL NOT NULL DEFAULT 0,
+      subtotal REAL NOT NULL DEFAULT 0,
+      subtotal_base REAL NOT NULL DEFAULT 0,
+      descuento_base REAL NOT NULL DEFAULT 0,
+      presentacion_nombre TEXT,
+      presentacion_unidades INTEGER
+    );
+
     CREATE INDEX IF NOT EXISTS idx_mobile_productos_nombre ON productos(activo, nombre);
     CREATE INDEX IF NOT EXISTS idx_mobile_productos_codigo ON productos(codigo);
     CREATE INDEX IF NOT EXISTS idx_mobile_clientes_nombre ON clientes(nombre);
@@ -483,6 +511,7 @@ export async function saveCatalogOffline(data: {
   creditos?: any[];
   abonos?: any[];
   ventas?: any[];
+  venta_items?: any[];
   eliminados?: Array<{ tabla: string; registro_id: string }>;
 }): Promise<void> {
   const db = await getMobileDb();
@@ -824,6 +853,38 @@ export async function saveCatalogOffline(data: {
       }
     }
 
+    if (Array.isArray(data.venta_items)) {
+      for (const vi of data.venta_items) {
+        if (!vi || !vi.id) continue;
+        await db.runAsync(
+          `INSERT INTO venta_items_remotos (id, venta_id, producto_id, cantidad, precio_unit, subtotal, subtotal_base, descuento_base, presentacion_nombre, presentacion_unidades)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT(id) DO UPDATE SET
+             venta_id = excluded.venta_id,
+             producto_id = excluded.producto_id,
+             cantidad = excluded.cantidad,
+             precio_unit = excluded.precio_unit,
+             subtotal = excluded.subtotal,
+             subtotal_base = excluded.subtotal_base,
+             descuento_base = excluded.descuento_base,
+             presentacion_nombre = excluded.presentacion_nombre,
+             presentacion_unidades = excluded.presentacion_unidades`,
+          [
+            String(vi.id),
+            String(vi.venta_id),
+            Number(vi.producto_id) || 0,
+            Number(vi.cantidad) || 0,
+            Number(vi.precio_unit) || 0,
+            Number(vi.subtotal) || 0,
+            Number(vi.subtotal_base) || 0,
+            Number(vi.descuento_base) || 0,
+            vi.presentacion_nombre ? String(vi.presentacion_nombre) : null,
+            vi.presentacion_unidades != null ? Number(vi.presentacion_unidades) : null,
+          ]
+        );
+      }
+    }
+
     if (Array.isArray(data.eliminados)) {
       for (const del of data.eliminados) {
         if (del.tabla === "productos") {
@@ -1109,6 +1170,16 @@ export async function getLocalVentasRemotas(): Promise<LocalVentaRemota[]> {
     LEFT JOIN metodos_pago mp ON v.metodo_pago_id = mp.id
     ORDER BY v.fecha DESC, v.id DESC
     LIMIT 150
+  `);
+}
+
+export async function getLocalVentaItemsRemotos(): Promise<LocalVentaItemRemoto[]> {
+  const db = await getMobileDb();
+  return await db.getAllAsync<LocalVentaItemRemoto>(`
+    SELECT vi.*, COALESCE(p.codigo, '') as producto_codigo, COALESCE(p.nombre, 'Producto') as producto_nombre
+    FROM venta_items_remotos vi
+    LEFT JOIN productos p ON vi.producto_id = p.id
+    ORDER BY vi.venta_id DESC
   `);
 }
 
