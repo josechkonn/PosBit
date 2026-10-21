@@ -39,6 +39,20 @@ export const fmtMonedaConSimbolo = (n: number | string, simbolo: string, decimal
 };
 
 export const fmtDate = (d: string | Date) => {
+  if (typeof d === "string") {
+    // Si viene como YYYY-MM-DD o ISO con fecha fija, evitar desplazamiento por zona horaria UTC
+    const m = d.match(/^(\d{4})-(\d{2})-(\d{2})/);
+    if (m) {
+      const year = parseInt(m[1], 10);
+      const month = parseInt(m[2], 10) - 1;
+      const day = parseInt(m[3], 10);
+      return new Date(year, month, day).toLocaleDateString("es-BO", {
+        day: "2-digit",
+        month: "short",
+        year: "numeric",
+      });
+    }
+  }
   const date = typeof d === "string" ? new Date(d) : d;
   return date.toLocaleDateString("es-BO", {
     day: "2-digit",

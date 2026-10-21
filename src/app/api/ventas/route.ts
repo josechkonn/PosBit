@@ -93,6 +93,7 @@ export async function GET(request: Request) {
       `
       SELECT 
         v.*,
+        v.fecha::text as fecha,
         cl.nombre as cliente_nombre,
         COALESCE(mo.codigo, 'COP') as moneda_codigo,
         COALESCE(mo.simbolo, '$') as moneda_simbolo,
@@ -186,19 +187,27 @@ export async function GET(request: Request) {
     const prevCursor = ventas.length > 0 ? String(ventas[0].id) : null;
     const hasMore = limit ? (page ? page * limit < totalFinal : ventas.length === limit) : false;
 
-    return NextResponse.json({
-      ventas: ventasCompletas,
-      items,
-      pagination: {
-        page: page ?? 1,
-        limit: limit ?? ventas.length,
-        total: totalFinal,
-        totalPages,
-        nextCursor,
-        prevCursor,
-        hasMore,
+    return NextResponse.json(
+      {
+        ventas: ventasCompletas,
+        items,
+        pagination: {
+          page: page ?? 1,
+          limit: limit ?? ventas.length,
+          total: totalFinal,
+          totalPages,
+          nextCursor,
+          prevCursor,
+          hasMore,
+        },
       },
-    });
+      {
+        headers: {
+          "Cache-Control": "no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0",
+          Pragma: "no-cache",
+        },
+      }
+    );
   } catch (error) {
     return NextResponse.json({ error: "Error al obtener ventas" }, { status: 500 });
   }
