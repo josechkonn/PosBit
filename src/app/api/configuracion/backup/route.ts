@@ -26,6 +26,7 @@ const TABLES_ORDER = [
   "ventas",
   "venta_items",
   "venta_pagos",
+  "venta_cobros_extra",
   "creditos",
   "abonos",
   "retornos",
@@ -108,8 +109,27 @@ export async function POST(request: Request) {
           try {
             await client.query(`DELETE FROM "${table}"`);
           } catch (delErr: any) {
-            console.warn(`Aviso al vaciar tabla ${table}:`, delErr?.message);
+            try {
+              await client.query(`TRUNCATE TABLE "${table}" CASCADE`);
+            } catch {
+              console.warn(`Aviso al vaciar tabla ${table}:`, delErr?.message);
+            }
           }
+        }
+
+        // Obtener columnas válidas de la base de datos actual para ser 100% compatibles
+        // con versiones anteriores o futuras de PosBit (evitar error de columna inexistente)
+        const allColsRes = await client.query(
+          `SELECT table_name, column_name FROM information_schema.columns WHERE table_schema = 'public'`
+        );
+        const validColsByTable = new Map<string, Set<string>>();
+        for (const r of allColsRes.rows) {
+          let s = validColsByTable.get(r.table_name);
+          if (!s) {
+            s = new Set<string>();
+            validColsByTable.set(r.table_name, s);
+          }
+          s.add(r.column_name);
         }
 
         // 2. Insertar tablas en orden directo
@@ -120,11 +140,13 @@ export async function POST(request: Request) {
             continue;
           }
 
+          const validCols = validColsByTable.get(table) || new Set<string>();
+
           // Lotes de 100 registros para optimizar parámetros SQL
           const BATCH_SIZE = 100;
           for (let i = 0; i < rows.length; i += BATCH_SIZE) {
             const batch = rows.slice(i, i + BATCH_SIZE);
-            const columns = Object.keys(batch[0]);
+            const columns = Object.keys(batch[0]).filter((c) => validCols.size === 0 || validCols.has(c));
             if (columns.length === 0) continue;
 
             const colNames = columns.map((c) => `"${c}"`).join(", ");
