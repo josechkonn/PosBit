@@ -313,6 +313,21 @@ export default function ClientePerfilPage() {
     fetchVentas();
     fetchCreditos();
     fetchRetornos();
+
+    const refreshAll = () => {
+      if (typeof document !== "undefined" && document.visibilityState === "hidden") return;
+      fetchDetalle();
+      fetchVentas();
+      fetchCreditos();
+      fetchRetornos();
+    };
+
+    const interval = setInterval(refreshAll, 8000);
+    window.addEventListener("focus", refreshAll);
+    return () => {
+      clearInterval(interval);
+      window.removeEventListener("focus", refreshAll);
+    };
   }, [id, fetchDetalle, fetchVentas, fetchCreditos, fetchRetornos]);
 
   /* ─── Derivados ─────────────────────────────────────────────────── */

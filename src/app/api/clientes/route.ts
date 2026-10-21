@@ -81,7 +81,7 @@ export async function GET(request: Request) {
              SUM(cr.saldo_base) as total_saldo_base
            FROM creditos cr
            JOIN monedas mo ON cr.moneda_id = mo.id
-           WHERE cr.cliente_id = cl.id AND cr.estado <> 'Pagado'
+           WHERE cr.cliente_id = cl.id AND cr.estado <> 'Pagado' AND cr.saldo > 0.009
            GROUP BY mo.codigo, mo.simbolo, mo.es_base
          ) d
         ) as deuda_desglosada,

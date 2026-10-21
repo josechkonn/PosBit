@@ -62,8 +62,8 @@ export async function GET(request: Request) {
         mo.codigo,
         mo.simbolo,
         mo.es_base,
-        SUM(CASE WHEN cr.estado <> 'Pagado' THEN cr.saldo ELSE 0 END) as total_saldo,
-        SUM(CASE WHEN cr.estado <> 'Pagado' THEN cr.saldo_base ELSE 0 END) as total_saldo_base
+        SUM(CASE WHEN cr.estado <> 'Pagado' AND cr.saldo > 0.009 THEN cr.saldo ELSE 0 END) as total_saldo,
+        SUM(CASE WHEN cr.estado <> 'Pagado' AND cr.saldo > 0.009 THEN cr.saldo_base ELSE 0 END) as total_saldo_base
       FROM creditos cr
       JOIN monedas mo ON cr.moneda_id = mo.id
       GROUP BY mo.codigo, mo.simbolo, mo.es_base

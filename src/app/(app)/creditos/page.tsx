@@ -71,6 +71,18 @@ export default function CreditosPage() {
 
   useEffect(() => {
     fetchCreditos();
+
+    const handleRefresh = () => {
+      if (typeof document !== "undefined" && document.visibilityState === "hidden") return;
+      fetchCreditos();
+    };
+
+    const interval = setInterval(handleRefresh, 8000);
+    window.addEventListener("focus", handleRefresh);
+    return () => {
+      clearInterval(interval);
+      window.removeEventListener("focus", handleRefresh);
+    };
   }, [fetchCreditos]);
 
   const openAbono = (credito: Credito) => {

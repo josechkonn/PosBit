@@ -415,8 +415,8 @@ export async function registrarAbonoMobile(payload: {
       // Actualizar crédito y abonos en SQLite inmediatamente
       const db = await getMobileDb();
       await db.runAsync(
-        `UPDATE creditos SET saldo = ?, estado = ? WHERE id = ?`,
-        [Number(data.nuevoSaldo) || 0, String(data.nuevoEstado || "Parcial"), payload.credito_id]
+        `UPDATE creditos SET saldo = ?, estado = ?, actualizado_en = ? WHERE id = ?`,
+        [Number(data.nuevoSaldo) || 0, String(data.nuevoEstado || "Parcial"), new Date().toISOString(), payload.credito_id]
       );
       if (Array.isArray(data.abonos)) {
         await saveCatalogOffline({ abonos: data.abonos });
@@ -496,8 +496,8 @@ export async function pagarDeudaGlobalMobile(payload: {
             const nuevoSaldo = isPagado ? 0 : Math.max(0, Number(ap.saldo ?? (row.saldo - (Number(ap.monto) || 0))));
             const nuevoEstado = isPagado ? "Pagado" : "Parcial";
             await db.runAsync(
-              `UPDATE creditos SET saldo = ?, estado = ? WHERE id = ?`,
-              [nuevoSaldo, nuevoEstado, String(row.id)]
+              `UPDATE creditos SET saldo = ?, estado = ?, actualizado_en = ? WHERE id = ?`,
+              [nuevoSaldo, nuevoEstado, new Date().toISOString(), String(row.id)]
             );
           }
         }

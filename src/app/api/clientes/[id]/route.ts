@@ -42,7 +42,7 @@ export async function GET(
        LEFT JOIN (
          SELECT cr.moneda_id, SUM(cr.saldo) as saldo
          FROM creditos cr
-         WHERE cr.cliente_id = $1 AND cr.estado <> 'Pagado'
+         WHERE cr.cliente_id = $1 AND cr.estado <> 'Pagado' AND cr.saldo > 0.009
          GROUP BY cr.moneda_id
        ) d ON d.moneda_id = m.id
        WHERE m.activo = true

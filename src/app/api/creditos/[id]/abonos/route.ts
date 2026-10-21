@@ -244,15 +244,23 @@ export async function POST(
       }
 
       // Actualizar crédito
-      const nuevoSaldo = Math.max(0, saldoActualCredito - totalAbonadoEnMonedaCredito);
-      const nuevoSaldoBase = Math.max(
-        0,
-        parseFloat(String(credito.saldo_base || 0)) - totalAbonadoEnBase
-      );
-      const nuevoEstado = nuevoSaldo <= 0.01 ? "Pagado" : "Parcial";
+      const diffSaldo = Math.max(0, saldoActualCredito - totalAbonadoEnMonedaCredito);
+      const isPagado = diffSaldo <= 0.01;
+      const nuevoEstado = isPagado ? "Pagado" : "Parcial";
+      const nuevoSaldo = isPagado ? 0 : redondear(diffSaldo, decCredito);
+      const nuevoSaldoBase = isPagado
+        ? 0
+        : redondear(
+            convertirConMetodo(nuevoSaldo, monedaCredito, baseMoneda, {
+              metodo: cfg.metodo_conversion_ventas,
+              monedaTransito: transitoVentas,
+              catalogo: monedasCatalogo,
+            }, 6),
+            6
+          );
 
       await client.query(
-        `UPDATE creditos SET saldo = $1, saldo_base = $2, estado = $3 WHERE id = $4`,
+        `UPDATE creditos SET saldo = $1, saldo_base = $2, estado = $3, actualizado_en = NOW() WHERE id = $4`,
         [nuevoSaldo, nuevoSaldoBase, nuevoEstado, credito.id]
       );
 

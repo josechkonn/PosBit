@@ -104,22 +104,31 @@ export async function POST(request: Request) {
         if (!monedaCredito) continue;
         const dec = Number(monedaCredito.decimales ?? 2);
 
-        let saldoBase = parseFloat(String(credito.saldo_base || 0));
-        if (saldoBase <= 0.0005) {
-          saldoBase = redondear(convertirConMetodo(saldo, monedaCredito, baseMoneda, regla, 6), 6);
+        // Saldo en moneda base calculado dinámicamente con la tasa y regla actual
+        const currentSaldoBase = redondear(
+          convertirConMetodo(saldo, monedaCredito, baseMoneda, regla, 6),
+          6
+        );
+
+        if (poolBase <= 0.0005) break;
+
+        const isCompleta = poolBase >= currentSaldoBase - 0.005;
+        let takeCurrency: number;
+        let takeBase: number;
+
+        if (isCompleta) {
+          takeCurrency = saldo;
+          takeBase = Math.min(poolBase, currentSaldoBase);
+          poolBase = redondear(Math.max(0, poolBase - currentSaldoBase), 6);
+        } else {
+          takeBase = poolBase;
+          takeCurrency = redondear(
+            convertirConMetodo(takeBase, baseMoneda, monedaCredito, regla, dec),
+            dec
+          );
+          takeCurrency = Math.min(takeCurrency, saldo);
+          poolBase = 0;
         }
-
-        const takeBase = redondear(Math.min(poolBase, saldoBase), 6);
-        if (takeBase <= 0.0005) break; // ya no queda monto que repartir
-
-        // Monto en la moneda del crédito
-        let takeCurrency =
-          saldoBase > 0 && Math.abs(takeBase - saldoBase) > 0.005
-            ? redondear((saldo * takeBase) / saldoBase, dec)
-            : saldo;
-        takeCurrency = Math.min(takeCurrency, saldo); // nunca superar el saldo
-
-        poolBase = redondear(Math.max(0, poolBase - takeBase), 6);
 
         await client.query(
           `INSERT INTO abonos (credito_id, cliente_id, retorno_id, fecha, monto, moneda_id, monto_base, metodo_pago_id, caja_id, observaciones)
@@ -138,10 +147,10 @@ export async function POST(request: Request) {
         );
 
         const diffSaldo = Math.max(0, saldo - takeCurrency);
-        const diffSaldoBase = Math.max(0, saldoBase - takeBase);
-        const nuevoEstado = diffSaldo <= 0.01 || diffSaldoBase <= 0.005 ? "Pagado" : "Parcial";
+        const diffSaldoBase = Math.max(0, currentSaldoBase - takeBase);
+        const nuevoEstado = isCompleta || diffSaldo <= 0.01 || diffSaldoBase <= 0.005 ? "Pagado" : "Parcial";
         const nuevoSaldo = nuevoEstado === "Pagado" ? 0 : redondear(diffSaldo, dec);
-        const nuevoSaldoBase = nuevoEstado === "Pagado" ? 0 : redondear(diffSaldoBase, 6);
+        const nuevoSaldoBase = nuevoEstado === "Pagado" ? 0 : redondear(convertirConMetodo(nuevoSaldo, monedaCredito, baseMoneda, regla, 6), 6);
 
         await client.query(
           `UPDATE creditos SET saldo = $1, saldo_base = $2, estado = $3, actualizado_en = NOW() WHERE id = $4`,
