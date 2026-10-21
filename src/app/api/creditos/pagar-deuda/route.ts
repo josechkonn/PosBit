@@ -77,13 +77,18 @@ export async function POST(request: Request) {
         catalogo: monedasCatalogo,
       };
 
-      // Todo el pago se convierte una sola vez a USD (base) y de ahí se reparte.
-      const montoBasePago = convertirConMetodo(montoPago, monedaPago, baseMoneda, regla, 6);
+      // Monto base contable en USD (para transacciones y métricas)
+      const montoBasePago = redondear(
+        convertirConMetodo(montoPago, monedaPago, baseMoneda, regla, 6),
+        6
+      );
       if (montoBasePago <= 0.0005) {
         throw new Error("El monto equivale a menos de 0.01 en la moneda base");
       }
 
-      let poolBase = montoBasePago;
+      // El pool del pago se mantiene directamente en la moneda en que paga el cliente
+      // para evitar triangulación por USD si el sistema está configurado en modo directo.
+      let poolPago = montoPago;
       const aplicado: Array<{
         credito_id: string;
         numero: string;
@@ -104,31 +109,36 @@ export async function POST(request: Request) {
         if (!monedaCredito) continue;
         const dec = Number(monedaCredito.decimales ?? 2);
 
-        // Saldo en moneda base calculado dinámicamente con la tasa y regla actual
-        const currentSaldoBase = redondear(
-          convertirConMetodo(saldo, monedaCredito, baseMoneda, regla, 6),
-          6
-        );
+        // Convertir el saldo del crédito a la moneda de pago usando la regla de ventas
+        const esMismaMoneda = String(monedaCredito.id) === String(monedaPago.id);
+        const costoEnMonedaPago = esMismaMoneda
+          ? saldo
+          : convertirConMetodo(saldo, monedaCredito, monedaPago, regla, 6);
 
-        if (poolBase <= 0.0005) break;
+        if (poolPago <= 0.0005) break;
 
-        const isCompleta = poolBase >= currentSaldoBase - 0.005;
+        // Tolerancia de 0.05 por redondeo de centavos o enteros
+        const isCompleta = poolPago >= (costoEnMonedaPago - 0.05);
         let takeCurrency: number;
-        let takeBase: number;
 
         if (isCompleta) {
           takeCurrency = saldo;
-          takeBase = Math.min(poolBase, currentSaldoBase);
-          poolBase = redondear(Math.max(0, poolBase - currentSaldoBase), 6);
+          poolPago = Math.max(0, poolPago - costoEnMonedaPago);
         } else {
-          takeBase = poolBase;
-          takeCurrency = redondear(
-            convertirConMetodo(takeBase, baseMoneda, monedaCredito, regla, dec),
-            dec
-          );
+          takeCurrency = esMismaMoneda
+            ? poolPago
+            : redondear(
+                convertirConMetodo(poolPago, monedaPago, monedaCredito, regla, dec),
+                dec
+              );
           takeCurrency = Math.min(takeCurrency, saldo);
-          poolBase = 0;
+          poolPago = 0;
         }
+
+        const takeBase = redondear(
+          convertirConMetodo(takeCurrency, monedaCredito, baseMoneda, regla, 6),
+          6
+        );
 
         await client.query(
           `INSERT INTO abonos (credito_id, cliente_id, retorno_id, fecha, monto, moneda_id, monto_base, metodo_pago_id, caja_id, observaciones)
@@ -147,8 +157,7 @@ export async function POST(request: Request) {
         );
 
         const diffSaldo = Math.max(0, saldo - takeCurrency);
-        const diffSaldoBase = Math.max(0, currentSaldoBase - takeBase);
-        const nuevoEstado = isCompleta || diffSaldo <= 0.01 || diffSaldoBase <= 0.005 ? "Pagado" : "Parcial";
+        const nuevoEstado = isCompleta || diffSaldo <= 0.01 ? "Pagado" : "Parcial";
         const nuevoSaldo = nuevoEstado === "Pagado" ? 0 : redondear(diffSaldo, dec);
         const nuevoSaldoBase = nuevoEstado === "Pagado" ? 0 : redondear(convertirConMetodo(nuevoSaldo, monedaCredito, baseMoneda, regla, 6), 6);
 
@@ -196,10 +205,15 @@ export async function POST(request: Request) {
         ]);
       }
 
+      const poolBaseRestante = redondear(
+        convertirConMetodo(poolPago, monedaPago, baseMoneda, regla, 6),
+        6
+      );
+
       return {
         aplicado,
-        total_abonado_base: redondear(montoBasePago - poolBase, 6),
-        sobrante_base: redondear(poolBase, 6),
+        total_abonado_base: redondear(montoBasePago - poolBaseRestante, 6),
+        sobrante_base: poolBaseRestante,
         creditos_completados: aplicado.filter((a) => a.estado === "Pagado").length,
       };
     });

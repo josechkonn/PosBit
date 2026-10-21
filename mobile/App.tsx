@@ -2100,12 +2100,30 @@ export default function App() {
     }, 0);
   }, [pagoDeudaPendientesFifo, monedas, baseMonedaSistema, convertirConRegla]);
 
+  const pagoDeudaTotalEnMonedaPago = useMemo(() => {
+    if (!pagoDeudaMonedaObj) return 0;
+    const dec = Number(pagoDeudaMonedaObj.decimales ?? 2);
+    let total = 0;
+    for (const cr of pagoDeudaPendientesFifo) {
+      const mCr =
+        monedas.find((m) => String(m.id) === String(cr.moneda_id) || m.codigo === cr.moneda_codigo) ||
+        pagoDeudaMonedaObj;
+      const saldo = Number(cr.saldo) || 0;
+      if (String(mCr.id) === String(pagoDeudaMonedaObj.id)) {
+        total += saldo;
+      } else {
+        total += convertirConRegla(saldo, mCr, pagoDeudaMonedaObj, "ventas", 6);
+      }
+    }
+    const factor = Math.pow(10, dec);
+    return Math.round((total + Number.EPSILON) * factor) / factor;
+  }, [pagoDeudaPendientesFifo, pagoDeudaMonedaObj, monedas, convertirConRegla]);
+
   // Vista previa en vivo de cómo se reparte el abono global entre cada factura pendiente
   const pagoDeudaPreview = useMemo(() => {
     const val = parseFloat(pdMontoStr.replace(",", ".")) || 0;
     if (
       !pagoDeudaMonedaObj ||
-      !baseMonedaSistema ||
       val <= 0 ||
       pagoDeudaPendientesFifo.length === 0
     ) {
@@ -2119,7 +2137,7 @@ export default function App() {
       };
     }
 
-    let poolBase = convertirConRegla(val, pagoDeudaMonedaObj, baseMonedaSistema, "ventas", 6);
+    let pool = val;
     const lineas: Array<{
       credito: LocalCredito;
       estado: "completa" | "parcial" | "pendiente";
@@ -2129,28 +2147,48 @@ export default function App() {
     for (const cr of pagoDeudaPendientesFifo) {
       const mCr =
         monedas.find((m) => String(m.id) === String(cr.moneda_id) || m.codigo === cr.moneda_codigo) ||
-        baseMonedaSistema;
+        pagoDeudaMonedaObj;
       const saldo = Number(cr.saldo) || 0;
-      const saldoBase = convertirConRegla(saldo, mCr, baseMonedaSistema, "ventas", 6);
-      if (poolBase <= 0.0005) {
+      const esMisma = String(mCr.id) === String(pagoDeudaMonedaObj.id);
+      const decCr = Number(mCr.decimales ?? 2);
+      const costoEnMonedaPago = esMisma
+        ? saldo
+        : convertirConRegla(saldo, mCr, pagoDeudaMonedaObj, "ventas", 6);
+
+      if (pool <= 0.0005) {
         lineas.push({ credito: cr, estado: "pendiente", monto: 0 });
         continue;
       }
-      const takeBase = Math.min(poolBase, saldoBase);
-      const isCompleta = takeBase >= saldoBase - 0.005 || poolBase >= saldoBase - 0.005;
-      const takeEnMonedaCr = isCompleta ? saldo : (saldoBase > 0 ? (takeBase * saldo) / saldoBase : saldo);
-      const takeFinal = Math.min(takeEnMonedaCr, saldo);
-      poolBase = Math.max(0, poolBase - takeBase);
+
+      const isCompleta = pool >= (costoEnMonedaPago - 0.05);
+      let takeCr: number;
+
+      if (isCompleta) {
+        takeCr = saldo;
+        pool = Math.max(0, pool - costoEnMonedaPago);
+      } else {
+        takeCr = esMisma
+          ? pool
+          : convertirConRegla(pool, pagoDeudaMonedaObj, mCr, "ventas", decCr);
+        takeCr = Math.min(takeCr, saldo);
+        pool = 0;
+      }
+
       lineas.push({
         credito: cr,
         estado: isCompleta ? "completa" : "parcial",
-        monto: isCompleta ? saldo : takeFinal,
+        monto: isCompleta ? saldo : takeCr,
       });
     }
 
+    const restoBase =
+      pool > 0.005 && baseMonedaSistema
+        ? convertirConRegla(pool, pagoDeudaMonedaObj, baseMonedaSistema, "ventas", 6)
+        : 0;
+
     return {
       lineas,
-      restoBase: poolBase > 0.005 ? poolBase : 0,
+      restoBase,
     };
   }, [
     pdMontoStr,
@@ -2162,17 +2200,9 @@ export default function App() {
   ]);
 
   const rellenarTotalPagoDeuda = useCallback(() => {
-    if (!pagoDeudaMonedaObj || !baseMonedaSistema || pagoDeudaTotalBase <= 0) return;
-    const dec = Number(pagoDeudaMonedaObj.decimales ?? 2);
-    const totalEnMoneda = convertirConRegla(
-      pagoDeudaTotalBase,
-      baseMonedaSistema,
-      pagoDeudaMonedaObj,
-      "ventas",
-      dec
-    );
-    setPdMontoStr(String(totalEnMoneda));
-  }, [pagoDeudaMonedaObj, baseMonedaSistema, pagoDeudaTotalBase, convertirConRegla]);
+    if (!pagoDeudaMonedaObj || pagoDeudaTotalEnMonedaPago <= 0) return;
+    setPdMontoStr(String(pagoDeudaTotalEnMonedaPago));
+  }, [pagoDeudaMonedaObj, pagoDeudaTotalEnMonedaPago]);
 
   const handleConfirmPagoDeudaGlobal = async () => {
     if (!pagoDeudaCliente || !pagoDeudaMonedaObj) return;
@@ -7147,7 +7177,7 @@ export default function App() {
                           </Text>
                           <TouchableOpacity
                             onPress={rellenarTotalPagoDeuda}
-                            disabled={pagoDeudaTotalBase <= 0}
+                            disabled={pagoDeudaTotalEnMonedaPago <= 0}
                           >
                             <Text
                               style={{

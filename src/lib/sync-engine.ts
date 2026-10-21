@@ -661,6 +661,32 @@ export async function applyDeltaToDb(
       }
     }
 
+    // Cargar IDs de registros previamente eliminados para no resucitarlos con datos obsoletos
+    const deletedIdsByTable = new Map<string, Set<string>>();
+    if (hasTableRows) {
+      const activeTables = Object.keys(payload.tables || {}).filter(
+        (t) => (payload.tables?.[t]?.length ?? 0) > 0
+      );
+      if (activeTables.length > 0) {
+        try {
+          const delsRes = await client.query(
+            `SELECT tabla, registro_id FROM sync_eliminados WHERE tabla = ANY($1::text[])`,
+            [activeTables]
+          );
+          for (const d of delsRes.rows) {
+            let set = deletedIdsByTable.get(d.tabla);
+            if (!set) {
+              set = new Set<string>();
+              deletedIdsByTable.set(d.tabla, set);
+            }
+            set.add(String(d.registro_id));
+          }
+        } catch {
+          // Si la tabla sync_eliminados no estuviera disponible, continuar
+        }
+      }
+    }
+
     const [
       existingMonedas,
       existingCajas,
@@ -963,6 +989,10 @@ export async function applyDeltaToDb(
           resolveUniqueNumero(row, retornosByNum);
         }
 
+        if (row.id && deletedIdsByTable.get(table)?.has(String(row.id))) {
+          continue;
+        }
+
         const pkKey =
           table === "producto_proveedores"
             ? `${row.producto_id}::${row.proveedor_id}`
@@ -1084,16 +1114,34 @@ export async function applyDeltaToDb(
         if (!allowedTables.has(tomb.tabla)) continue;
         try {
           await client.query("SAVEPOINT sp_sync_del");
+          const rawId = String(tomb.registro_id);
+          const mappedId =
+            (tomb.tabla === "metodos_pago" ? metodoPagoIdMap.get(rawId) : undefined) ||
+            (tomb.tabla === "categorias" ? categoriaIdMap.get(rawId) : undefined) ||
+            (tomb.tabla === "marcas" ? marcaIdMap.get(rawId) : undefined) ||
+            (tomb.tabla === "proveedores" ? proveedorIdMap.get(rawId) : undefined) ||
+            (tomb.tabla === "productos" ? productoIdMap.get(rawId) : undefined) ||
+            (tomb.tabla === "cajas" ? cajaIdMap.get(rawId) : undefined) ||
+            (tomb.tabla === "monedas" ? monedaIdMap.get(rawId) : undefined);
+
+          const idsToDelete = [rawId];
+          if (mappedId && String(mappedId) !== rawId) {
+            idsToDelete.push(String(mappedId));
+          }
+
           const delRes = await client.query(
-            `DELETE FROM "${tomb.tabla}" WHERE id::text = $1`,
-            [String(tomb.registro_id)]
+            `DELETE FROM "${tomb.tabla}" WHERE id::text = ANY($1::text[])`,
+            [idsToDelete]
           );
-          await client.query(
-            `INSERT INTO sync_eliminados (tabla, registro_id, eliminado_en)
-             VALUES ($1, $2, $3)
-             ON CONFLICT (tabla, registro_id) DO UPDATE SET eliminado_en = EXCLUDED.eliminado_en`,
-            [tomb.tabla, String(tomb.registro_id), tomb.eliminado_en || new Date().toISOString()]
-          );
+
+          for (const delId of idsToDelete) {
+            await client.query(
+              `INSERT INTO sync_eliminados (tabla, registro_id, eliminado_en)
+               VALUES ($1, $2, $3)
+               ON CONFLICT (tabla, registro_id) DO UPDATE SET eliminado_en = EXCLUDED.eliminado_en`,
+              [tomb.tabla, delId, tomb.eliminado_en || new Date().toISOString()]
+            );
+          }
           await client.query("RELEASE SAVEPOINT sp_sync_del");
           deletedRows += delRes.rowCount ?? 0;
         } catch {

@@ -164,41 +164,78 @@ export function PagarDeudaModal({
 
   const preview = useMemo<{ lineas: LineaPreview[]; restoBase: number }>(() => {
     const lineas: LineaPreview[] = [];
-    if (!monedaPago || !baseMoneda || valor <= 0 || pendientesFifo.length === 0) {
+    if (!monedaPago || valor <= 0 || pendientesFifo.length === 0) {
       return {
         lineas: pendientesFifo.map((c) => ({ credito: c, estado: "pendiente", monto: 0 })),
         restoBase: 0,
       };
     }
-    let pool = convertirProducto(valor, monedaPago, baseMoneda, "venta", 6);
+    const decPago = Number(monedaPago.decimales ?? 2);
+    let pool = valor;
     for (const c of pendientesFifo) {
-      const mCredito = monedas.find((m) => m.id === c.moneda_id) ?? baseMoneda;
+      const mCredito = monedas.find((m) => m.id === c.moneda_id) ?? monedaPago;
       const saldo = Number(c.saldo);
-      const saldoBase = convertirProducto(saldo, mCredito, baseMoneda, "venta", 6);
+      const decCredito = Number(mCredito.decimales ?? 2);
+      const costoEnPago =
+        String(mCredito.id) === String(monedaPago.id)
+          ? saldo
+          : (monedas.length > 0 ? convertirProducto(saldo, mCredito, monedaPago, "venta", 6) : saldo);
+
       if (pool <= 0.0005) {
         lineas.push({ credito: c, estado: "pendiente", monto: 0 });
         continue;
       }
-      const takeBase = Math.min(pool, saldoBase);
-      const take = saldoBase > 0 ? (takeBase * saldo) / saldoBase : saldo;
-      const takeFinal = Math.min(take, saldo);
-      pool -= takeBase;
-      lineas.push({
-        credito: c,
-        estado: takeBase >= saldoBase - 0.005 ? "completa" : "parcial",
-        monto: takeFinal,
-      });
+
+      // Si el pool cubre el costo (con tolerancia de 0.05 para redondeos de centavos/paridades)
+      const isCompleta = pool >= costoEnPago - 0.05;
+      if (isCompleta) {
+        pool = Math.max(0, pool - costoEnPago);
+        lineas.push({
+          credito: c,
+          estado: "completa",
+          monto: saldo,
+        });
+      } else {
+        const takeInCredito = Math.min(
+          saldo,
+          convertirProducto(pool, monedaPago, mCredito, "venta", decCredito)
+        );
+        pool = 0;
+        lineas.push({
+          credito: c,
+          estado: "parcial",
+          monto: takeInCredito,
+        });
+      }
     }
     return { lineas, restoBase: pool > 0 ? pool : 0 };
-  }, [monedaPago, baseMoneda, valor, pendientesFifo, monedas, convertirProducto]);
+  }, [monedaPago, valor, pendientesFifo, monedas, convertirProducto]);
 
   const deudaTotalBase = useMemo(
     () =>
       pendientesFifo.reduce((s, c) => {
-        const mCredito = monedas.find((m) => m.id === c.moneda_id) ?? baseMoneda;
-        return s + (monedas.length > 0 ? convertirProducto(Number(c.saldo), mCredito, baseMoneda, "venta", 6) : Number(c.saldo));
+        const mCredito = monedas.find((m) => m.id === c.moneda_id);
+        const saldo = Number(c.saldo);
+        if (saldo <= 0) return s;
+        if (!baseMoneda || !mCredito) return s + saldo;
+        return s + (monedas.length > 0 ? convertirProducto(saldo, mCredito, baseMoneda, "venta", 6) : saldo);
       }, 0),
     [pendientesFifo, monedas, baseMoneda, convertirProducto]
+  );
+
+  const deudaTotalEnMonedaPago = useMemo(
+    () =>
+      pendientesFifo.reduce((s, c) => {
+        if (!monedaPago) return s;
+        const mCredito = monedas.find((m) => m.id === c.moneda_id) ?? monedaPago;
+        const saldo = Number(c.saldo);
+        if (saldo <= 0) return s;
+        if (String(mCredito.id) === String(monedaPago.id)) {
+          return s + saldo;
+        }
+        return s + (monedas.length > 0 ? convertirProducto(saldo, mCredito, monedaPago, "venta", 6) : saldo);
+      }, 0),
+    [pendientesFifo, monedas, monedaPago, convertirProducto]
   );
 
   const comoBase =
@@ -232,9 +269,9 @@ export function PagarDeudaModal({
 
   /** Rellena el monto con la deuda total, expresada en la moneda seleccionada. */
   const rellenarTotal = () => {
-    if (!monedaPago || !baseMoneda || deudaTotalBase <= 0) return;
+    if (!monedaPago || deudaTotalEnMonedaPago <= 0) return;
     const dec = Number(monedaPago.decimales ?? 2);
-    const totalEnMoneda = convertirProducto(deudaTotalBase, baseMoneda, monedaPago, "venta", dec);
+    const totalEnMoneda = Math.round(deudaTotalEnMonedaPago * 100) / 100;
     setMonto(String(totalEnMoneda));
   };
 
@@ -385,7 +422,7 @@ export function PagarDeudaModal({
           <button
             type="button"
             onClick={rellenarTotal}
-            disabled={!monedaPago || deudaTotalBase <= 0}
+            disabled={!monedaPago || deudaTotalEnMonedaPago <= 0}
             className="text-xs font-semibold text-primary transition-colors hover:text-primary-600 disabled:pointer-events-none disabled:opacity-40"
           >
             Pagar todo
