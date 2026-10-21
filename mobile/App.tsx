@@ -17,8 +17,9 @@ import {
   Image,
   PanResponder,
   Animated,
+  Alert,
 } from "react-native";
-import Feather from "@expo/vector-icons/Feather";
+import Feather from "./src/lib/icons";
 import {
   LocalMoneda,
   LocalConfiguracionGlobal,
@@ -181,10 +182,6 @@ function getMetodoEmoji(tipo?: string, nombre?: string): string {
 
 export default function App() {
   const [booting, setBooting] = useState(true);
-
-  useEffect(() => {
-    Feather.loadFont().catch((err) => console.warn("Feather font load err:", err));
-  }, []);
   const [session, setSession] = useState<{
     serverUrl: string;
     token: string;
@@ -266,13 +263,17 @@ export default function App() {
   const [limiteInputStr, setLimiteInputStr] = useState("");
   const [receiptModal, setReceiptModal] = useState<any | null>(null);
 
-  // Modal Finalizar Venta: Arrastrar hacia abajo para cerrar (PanResponder suave)
+  // Modal Finalizar Venta: Arrastrar hacia abajo para cerrar (PanResponder suave y sensible)
   const checkoutSheetTranslateY = useRef(new Animated.Value(0)).current;
   const checkoutPanResponder = useRef(
     PanResponder.create({
-      onStartShouldSetPanResponder: () => false,
+      onStartShouldSetPanResponder: () => true,
+      onStartShouldSetPanResponderCapture: () => false,
       onMoveShouldSetPanResponder: (_, gs) => {
-        return gs.dy > 8 && Math.abs(gs.dy) > Math.abs(gs.dx);
+        return gs.dy > 3 && Math.abs(gs.dy) > Math.abs(gs.dx);
+      },
+      onMoveShouldSetPanResponderCapture: (_, gs) => {
+        return gs.dy > 5 && Math.abs(gs.dy) > Math.abs(gs.dx);
       },
       onPanResponderMove: (_, gs) => {
         if (gs.dy > 0) {
@@ -280,7 +281,7 @@ export default function App() {
         }
       },
       onPanResponderRelease: (_, gs) => {
-        if (gs.dy > 110 || gs.vy > 0.5) {
+        if (gs.dy > 60 || gs.vy > 0.3) {
           Animated.timing(checkoutSheetTranslateY, {
             toValue: 650,
             duration: 180,
@@ -800,6 +801,22 @@ export default function App() {
     },
     [showToast]
   );
+
+  const decreaseOrRemoveFromCart = useCallback((productId: number) => {
+    setCart((prev) => {
+      const matchingIndices = prev
+        .map((c, idx) => (c.product.id === productId ? idx : -1))
+        .filter((idx) => idx !== -1);
+      if (matchingIndices.length === 0) return prev;
+      const targetIdx = matchingIndices[matchingIndices.length - 1];
+      const targetItem = prev[targetIdx];
+      if (targetItem.qty > 1) {
+        return prev.map((c, idx) => (idx === targetIdx ? { ...c, qty: c.qty - 1 } : c));
+      } else {
+        return prev.filter((_, idx) => idx !== targetIdx);
+      }
+    });
+  }, []);
 
   const updateCartQty = useCallback(
     (clave: string, delta: number) => {
@@ -2389,68 +2406,78 @@ export default function App() {
         )}
       </View>
 
-      {/* Toast flotante absoluto (no desplaza el layout/DOM) */}
-      {toastMsg && (
-        <View
-          style={[
-            styles.toastBanner,
-            toastMsg.type === "error"
-              ? { backgroundColor: THEME.dangerSoft, borderColor: THEME.dangerBorder }
-              : toastMsg.type === "info"
-              ? { backgroundColor: THEME.infoSoft, borderColor: THEME.infoBorder }
-              : { backgroundColor: THEME.successSoft, borderColor: THEME.successBorder },
-          ]}
-        >
-          <Feather
-            name={
-              toastMsg.type === "error"
-                ? "alert-circle"
-                : toastMsg.type === "info"
-                ? "info"
-                : "check-circle"
-            }
-            size={17}
-            color={
-              toastMsg.type === "error"
-                ? THEME.dangerStrong
-                : toastMsg.type === "info"
-                ? THEME.infoStrong
-                : THEME.successStrong
-            }
-          />
-          <Text
-            style={[
-              styles.toastBannerText,
-              {
-                color:
+      {/* Toast flotante absoluto (en Modal transparente para flotar por encima de cualquier otro Modal nativo) */}
+      <Modal
+        visible={Boolean(toastMsg)}
+        transparent
+        animationType="fade"
+        statusBarTranslucent
+        onRequestClose={() => setToastMsg(null)}
+      >
+        <View style={styles.toastModalContainer} pointerEvents="box-none">
+          {toastMsg && (
+            <View
+              style={[
+                styles.toastBanner,
+                toastMsg.type === "error"
+                  ? { backgroundColor: THEME.dangerSoft, borderColor: THEME.dangerBorder }
+                  : toastMsg.type === "info"
+                  ? { backgroundColor: THEME.infoSoft, borderColor: THEME.infoBorder }
+                  : { backgroundColor: THEME.successSoft, borderColor: THEME.successBorder },
+              ]}
+            >
+              <Feather
+                name={
+                  toastMsg.type === "error"
+                    ? "alert-circle"
+                    : toastMsg.type === "info"
+                    ? "info"
+                    : "check-circle"
+                }
+                size={18}
+                color={
                   toastMsg.type === "error"
                     ? THEME.dangerStrong
                     : toastMsg.type === "info"
                     ? THEME.infoStrong
-                    : THEME.successStrong,
-              },
-            ]}
-          >
-            {toastMsg.text}
-          </Text>
-          <TouchableOpacity
-            onPress={() => setToastMsg(null)}
-            hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
-          >
-            <Feather
-              name="x"
-              size={15}
-              color={
-                toastMsg.type === "error"
-                  ? THEME.dangerStrong
-                  : toastMsg.type === "info"
-                  ? THEME.infoStrong
-                  : THEME.successStrong
-              }
-            />
-          </TouchableOpacity>
+                    : THEME.successStrong
+                }
+              />
+              <Text
+                style={[
+                  styles.toastBannerText,
+                  {
+                    color:
+                      toastMsg.type === "error"
+                        ? THEME.dangerStrong
+                        : toastMsg.type === "info"
+                        ? THEME.infoStrong
+                        : THEME.successStrong,
+                  },
+                ]}
+              >
+                {toastMsg.text}
+              </Text>
+              <TouchableOpacity
+                onPress={() => setToastMsg(null)}
+                hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+              >
+                <Feather
+                  name="x"
+                  size={16}
+                  color={
+                    toastMsg.type === "error"
+                      ? THEME.dangerStrong
+                      : toastMsg.type === "info"
+                      ? THEME.infoStrong
+                      : THEME.successStrong
+                  }
+                />
+              </TouchableOpacity>
+            </View>
+          )}
         </View>
-      )}
+      </Modal>
 
       {/* ── CONTENIDO PRINCIPAL SEGÚN RUTA ── */}
 
@@ -2567,6 +2594,32 @@ export default function App() {
                   Carrito ({cart.reduce((s, c) => s + c.qty, 0)})
                 </Text>
               </TouchableOpacity>
+
+              {cart.length > 0 && (
+                <TouchableOpacity
+                  style={styles.posClearCartPill}
+                  onPress={() => {
+                    Alert.alert(
+                      "Vaciar Carrito",
+                      "¿Estás seguro de que deseas vaciar todos los productos del carrito?",
+                      [
+                        { text: "Cancelar", style: "cancel" },
+                        {
+                          text: "Vaciar",
+                          style: "destructive",
+                          onPress: () => {
+                            setCart([]);
+                            showToast("Carrito vaciado", "info");
+                          },
+                        },
+                      ]
+                    );
+                  }}
+                >
+                  <Feather name="trash-2" size={13} color={THEME.dangerStrong} />
+                  <Text style={styles.posClearCartPillText}>Vaciar</Text>
+                </TouchableOpacity>
+              )}
 
               {heldCarts.length > 0 && (
                 <TouchableOpacity
@@ -2692,8 +2745,17 @@ export default function App() {
                             </Text>
                           </View>
                           {inCartQty > 0 && (
-                            <View style={styles.inCartCountBadge}>
-                              <Text style={styles.inCartCountBadgeText}>{inCartQty}</Text>
+                            <View style={styles.inCartControlGroup}>
+                              <TouchableOpacity
+                                style={styles.inCartMinusBtn}
+                                onPress={() => decreaseOrRemoveFromCart(item.id)}
+                                hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                              >
+                                <Feather name="minus" size={11} color="#fff" />
+                              </TouchableOpacity>
+                              <View style={styles.inCartCountBadge}>
+                                <Text style={styles.inCartCountBadgeText}>{inCartQty}</Text>
+                              </View>
                             </View>
                           )}
                         </View>
@@ -3841,26 +3903,51 @@ export default function App() {
                             </View>
                           </View>
 
-                          <View style={styles.creditoAmountsGrid}>
-                            <View>
-                              <Text style={styles.fieldLabelSmall}>TOTAL</Text>
-                              <Text style={styles.creditoAmountTotal}>
-                                {fmt(cr.monto_total, cr.moneda_codigo)}
-                              </Text>
+                          <View style={styles.creditoAmountsContainer}>
+                            <View style={styles.creditoAmountsTopRow}>
+                              <View style={styles.creditoAmountCol}>
+                                <Text style={styles.fieldLabelSmall}>TOTAL ORIGINAL</Text>
+                                <Text style={styles.creditoAmountTotal} numberOfLines={1}>
+                                  {fmt(cr.monto_total, cr.moneda_codigo)}
+                                </Text>
+                              </View>
+                              <View style={[styles.creditoAmountCol, { alignItems: "flex-end" }]}>
+                                <Text style={styles.fieldLabelSmall}>ABONADO</Text>
+                                <Text style={styles.creditoAmountAbonado} numberOfLines={1}>
+                                  {fmt(cr.abonado, cr.moneda_codigo)}
+                                </Text>
+                              </View>
                             </View>
-                            <View>
-                              <Text style={styles.fieldLabelSmall}>ABONADO</Text>
-                              <Text style={styles.creditoAmountAbonado}>
-                                {fmt(cr.abonado, cr.moneda_codigo)}
-                              </Text>
-                            </View>
-                            <View style={{ alignItems: "flex-end" }}>
-                              <Text style={styles.fieldLabelSmall}>SALDO</Text>
+
+                            <View
+                              style={[
+                                styles.creditoSaldoHighlightRow,
+                                isPagado
+                                  ? { backgroundColor: THEME.successSoft, borderColor: THEME.successBorder }
+                                  : { backgroundColor: THEME.dangerSoft, borderColor: THEME.dangerBorder },
+                              ]}
+                            >
+                              <View style={{ flexDirection: "row", alignItems: "center", gap: 5 }}>
+                                <Feather
+                                  name={isPagado ? "check-circle" : "alert-circle"}
+                                  size={13}
+                                  color={isPagado ? THEME.successStrong : THEME.dangerStrong}
+                                />
+                                <Text
+                                  style={[
+                                    styles.creditoSaldoLabel,
+                                    { color: isPagado ? THEME.successStrong : THEME.dangerStrong },
+                                  ]}
+                                >
+                                  SALDO PENDIENTE
+                                </Text>
+                              </View>
                               <Text
                                 style={[
                                   styles.creditoAmountSaldo,
-                                  isPagado && { color: THEME.successStrong },
+                                  { color: isPagado ? THEME.successStrong : THEME.dangerStrong },
                                 ]}
+                                numberOfLines={1}
                               >
                                 {fmt(cr.saldo, cr.moneda_codigo)}
                               </Text>
@@ -4334,26 +4421,51 @@ export default function App() {
                     </View>
                   </View>
 
-                  <View style={styles.creditoAmountsGrid}>
-                    <View>
-                      <Text style={styles.fieldLabelSmall}>TOTAL</Text>
-                      <Text style={styles.creditoAmountTotal}>
-                        {item.moneda_simbolo} {item.monto_total.toFixed(2)} {item.moneda_codigo}
-                      </Text>
+                  <View style={styles.creditoAmountsContainer}>
+                    <View style={styles.creditoAmountsTopRow}>
+                      <View style={styles.creditoAmountCol}>
+                        <Text style={styles.fieldLabelSmall}>TOTAL ORIGINAL</Text>
+                        <Text style={styles.creditoAmountTotal} numberOfLines={1}>
+                          {item.moneda_simbolo} {item.monto_total.toFixed(2)} {item.moneda_codigo}
+                        </Text>
+                      </View>
+                      <View style={[styles.creditoAmountCol, { alignItems: "flex-end" }]}>
+                        <Text style={styles.fieldLabelSmall}>ABONADO</Text>
+                        <Text style={styles.creditoAmountAbonado} numberOfLines={1}>
+                          {item.moneda_simbolo} {item.abonado.toFixed(2)} {item.moneda_codigo}
+                        </Text>
+                      </View>
                     </View>
-                    <View>
-                      <Text style={styles.fieldLabelSmall}>ABONADO</Text>
-                      <Text style={styles.creditoAmountAbonado}>
-                        {item.moneda_simbolo} {item.abonado.toFixed(2)}
-                      </Text>
-                    </View>
-                    <View style={{ alignItems: "flex-end" }}>
-                      <Text style={styles.fieldLabelSmall}>SALDO PENDIENTE</Text>
+
+                    <View
+                      style={[
+                        styles.creditoSaldoHighlightRow,
+                        isPagado
+                          ? { backgroundColor: THEME.successSoft, borderColor: THEME.successBorder }
+                          : { backgroundColor: THEME.dangerSoft, borderColor: THEME.dangerBorder },
+                      ]}
+                    >
+                      <View style={{ flexDirection: "row", alignItems: "center", gap: 5 }}>
+                        <Feather
+                          name={isPagado ? "check-circle" : "alert-circle"}
+                          size={13}
+                          color={isPagado ? THEME.successStrong : THEME.dangerStrong}
+                        />
+                        <Text
+                          style={[
+                            styles.creditoSaldoLabel,
+                            { color: isPagado ? THEME.successStrong : THEME.dangerStrong },
+                          ]}
+                        >
+                          SALDO PENDIENTE
+                        </Text>
+                      </View>
                       <Text
                         style={[
                           styles.creditoAmountSaldo,
-                          isPagado && { color: THEME.successStrong },
+                          { color: isPagado ? THEME.successStrong : THEME.dangerStrong },
                         ]}
+                        numberOfLines={1}
                       >
                         {item.moneda_simbolo} {item.saldo.toFixed(2)} {item.moneda_codigo}
                       </Text>
@@ -5151,12 +5263,15 @@ export default function App() {
             {/* Tirador táctil visual para arrastrar hacia abajo */}
             <View {...checkoutPanResponder.panHandlers} style={styles.dragHandleTouchArea}>
               <View style={styles.dragHandleBar} />
-              <View style={styles.modalHeader}>
-                <Text style={styles.modalTitle}>Finalizar Venta</Text>
-                <TouchableOpacity onPress={handleCloseCheckout}>
-                  <Feather name="x" size={20} color={THEME.mutedForeground} />
-                </TouchableOpacity>
-              </View>
+            </View>
+            <View style={styles.modalHeader}>
+              <Text style={styles.modalTitle}>Finalizar Venta</Text>
+              <TouchableOpacity
+                onPress={handleCloseCheckout}
+                hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
+              >
+                <Feather name="x" size={20} color={THEME.mutedForeground} />
+              </TouchableOpacity>
             </View>
 
             {(() => {
@@ -7485,6 +7600,9 @@ const styles = StyleSheet.create({
     fontSize: 11,
     fontWeight: "700",
   },
+  toastModalContainer: {
+    flex: 1,
+  },
   toastBanner: {
     position: "absolute",
     top: 64,
@@ -7628,6 +7746,22 @@ const styles = StyleSheet.create({
   posModeTabTextActive: {
     color: "#fff",
   },
+  posClearCartPill: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 4,
+    paddingHorizontal: 10,
+    paddingVertical: 7,
+    borderRadius: 8,
+    backgroundColor: THEME.dangerSoft,
+    borderWidth: 1,
+    borderColor: THEME.dangerBorder,
+  },
+  posClearCartPillText: {
+    fontSize: 11,
+    fontWeight: "700",
+    color: THEME.dangerStrong,
+  },
   heldCartPill: {
     flexDirection: "row",
     alignItems: "center",
@@ -7708,6 +7842,22 @@ const styles = StyleSheet.create({
     fontSize: 9,
     fontWeight: "700",
     color: THEME.warningStrong,
+  },
+  inCartControlGroup: {
+    flexDirection: "row",
+    alignItems: "center",
+    backgroundColor: THEME.primary + "18",
+    borderRadius: 14,
+    padding: 2,
+    gap: 3,
+  },
+  inCartMinusBtn: {
+    width: 22,
+    height: 22,
+    borderRadius: 11,
+    backgroundColor: THEME.dangerStrong,
+    alignItems: "center",
+    justifyContent: "center",
   },
   inCartCountBadge: {
     backgroundColor: THEME.primary,
@@ -8315,6 +8465,36 @@ const styles = StyleSheet.create({
     color: THEME.foreground,
     marginTop: 2,
   },
+  creditoAmountsContainer: {
+    backgroundColor: THEME.inputBg,
+    borderRadius: 10,
+    padding: 10,
+    marginTop: 10,
+    gap: 8,
+  },
+  creditoAmountsTopRow: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    gap: 8,
+  },
+  creditoAmountCol: {
+    flex: 1,
+  },
+  creditoSaldoHighlightRow: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    paddingHorizontal: 10,
+    paddingVertical: 7,
+    borderRadius: 8,
+    borderWidth: 1,
+  },
+  creditoSaldoLabel: {
+    fontSize: 10.5,
+    fontWeight: "800",
+    letterSpacing: 0.4,
+  },
   creditoAmountsGrid: {
     flexDirection: "row",
     justifyContent: "space-between",
@@ -8519,16 +8699,18 @@ const styles = StyleSheet.create({
     maxHeight: "92%",
   },
   dragHandleTouchArea: {
-    paddingTop: 4,
-    paddingBottom: 4,
+    paddingTop: 6,
+    paddingBottom: 12,
+    width: "100%",
+    alignItems: "center",
+    justifyContent: "center",
   },
   dragHandleBar: {
-    width: 44,
+    width: 50,
     height: 5,
     borderRadius: 3,
-    backgroundColor: THEME.mutedForeground + "40",
+    backgroundColor: THEME.mutedForeground + "50",
     alignSelf: "center",
-    marginBottom: 10,
   },
   modalHeader: {
     flexDirection: "row",

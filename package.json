@@ -46,6 +46,7 @@
     "@types/react-dom": "^19.2.3",
     "electron": "^33.2.0",
     "electron-builder": "^25.1.8",
+    "feather-icons": "^4.29.2",
     "tailwindcss": "^4.3.3",
     "typescript": "^6.0.3"
   },
