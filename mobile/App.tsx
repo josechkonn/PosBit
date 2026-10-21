@@ -144,7 +144,7 @@ interface PerfilMoneda {
   deuda: number;
 }
 
-const PRESETS_COBRO_EXTRA = ["Delivery", "Envío", "Bolsa", "Propina", "Servicio"];
+const PRESETS_COBRO_EXTRA = ["Producto", "Delivery", "Envío", "Bolsa", "Propina", "Servicio"];
 
 function claveLinea(productoId: number, presentacionId?: string | null): string {
   return `${productoId}::${presentacionId ?? "unit"}`;
@@ -260,6 +260,7 @@ export default function App() {
   const [observacionesVenta, setObservacionesVenta] = useState("");
   const [submittingSale, setSubmittingSale] = useState(false);
   const [grantingCredit, setGrantingCredit] = useState(false);
+  const [creditoSolicitado, setCreditoSolicitado] = useState(false);
   const [limiteInputStr, setLimiteInputStr] = useState("");
   const [receiptModal, setReceiptModal] = useState<any | null>(null);
 
@@ -303,6 +304,7 @@ export default function App() {
 
   const handleCloseCheckout = useCallback(() => {
     setShowCheckoutModal(false);
+    setCreditoSolicitado(false);
     checkoutSheetTranslateY.setValue(0);
   }, [checkoutSheetTranslateY]);
 
@@ -1016,8 +1018,16 @@ export default function App() {
     };
   }, [clienteSeleccionadoObj, monedaSeleccionada]);
 
+  const clienteSinCreditoSuficiente = useMemo(() => {
+    if (!clienteSeleccionadoObj) return false;
+    if (!infoCreditoCliente) return true;
+    if (!infoCreditoCliente.recibe) return true;
+    return infoCreditoCliente.disponible < total;
+  }, [clienteSeleccionadoObj, infoCreditoCliente, total]);
+
   // Abrir Modal de Checkout inicializando la línea de pago en la moneda del método seleccionado
   const handleOpenCheckout = useCallback(() => {
+    setCreditoSolicitado(false);
     if (cart.length === 0) {
       showToast("Agrega al menos un producto al carrito", "error");
       return;
@@ -1127,15 +1137,17 @@ export default function App() {
         return;
       }
 
-      if (usaCredito && infoCreditoCliente) {
-        if (!infoCreditoCliente.recibe || infoCreditoCliente.limite <= 0) {
+      if (usaCredito) {
+        if (clienteSinCreditoSuficiente) {
+          setCreditoSolicitado(true);
           showToast(
-            `${clienteSeleccionadoObj?.nombre} no tiene crédito habilitado en ${monedaSeleccionada}. Usa el botón Otorgar Crédito abajo.`,
+            `${clienteSeleccionadoObj?.nombre} no tiene crédito suficiente en ${monedaSeleccionada}. Pulsa "Otorgar Crédito Rápido".`,
             "error"
           );
           return;
         }
-        if (saldoACredito > infoCreditoCliente.disponible + 0.01) {
+        if (infoCreditoCliente && saldoACredito > infoCreditoCliente.disponible + 0.01) {
+          setCreditoSolicitado(true);
           showToast(
             `El monto a crédito (${fmt(saldoACredito)}) supera el disponible (${fmt(infoCreditoCliente.disponible)})`,
             "error"
@@ -1621,34 +1633,34 @@ export default function App() {
     return null;
   }, [clientes, perfilClienteId, perfilCloudData]);
 
-  // Monedas del perfil con límite y deuda en cada moneda activa (igual que en /clientes/[id])
+  // Monedas del perfil con límite y deuda en cada moneda activa (calculada en vivo para actualizarse de inmediato tras el pago)
   const perfilMonedas = useMemo<PerfilMoneda[]>(() => {
     if (!perfilClienteObj) return [];
-    if (Array.isArray(perfilCloudData?.detalle?.cliente?.monedas) && perfilCloudData.detalle.cliente.monedas.length > 0) {
-      return perfilCloudData.detalle.cliente.monedas.map((m: any) => ({
-        moneda_id: String(m.moneda_id),
-        codigo: String(m.codigo),
-        simbolo: String(m.simbolo || "$"),
-        es_base: Boolean(m.es_base),
-        decimales: Number(m.decimales ?? 2),
-        limite: Number(m.limite) || 0,
-        deuda: Number(m.deuda) || 0,
-      }));
-    }
     return monedas.map((m) => {
-      const limRow = perfilClienteObj.limites_credito.find((l) => String(l.moneda_id) === String(m.id) || l.codigo === m.codigo);
-      const deudaRow = perfilClienteObj.deuda_total.find((d) => d.codigo === m.codigo);
+      const limRow = perfilClienteObj.limites_credito.find(
+        (l) => String(l.moneda_id) === String(m.id) || l.codigo === m.codigo
+      );
+      const deudaReal = creditosData.creditos
+        .filter(
+          (cr) =>
+            String(cr.cliente_id) === String(perfilClienteId) &&
+            cr.estado !== "Pagado" &&
+            Number(cr.saldo) > 0.009 &&
+            (String(cr.moneda_id) === String(m.id) || cr.moneda_codigo === m.codigo)
+        )
+        .reduce((sum, cr) => sum + Number(cr.saldo || 0), 0);
+
       return {
         moneda_id: m.id,
         codigo: m.codigo,
         simbolo: m.simbolo,
         es_base: m.es_base === 1,
-        decimales: m.decimales,
+        decimales: Number(m.decimales ?? 2),
         limite: Number(limRow?.limite ?? 0),
-        deuda: Number(deudaRow?.monto ?? 0),
+        deuda: deudaReal,
       };
     });
-  }, [perfilClienteObj, perfilCloudData, monedas]);
+  }, [perfilClienteObj, creditosData.creditos, monedas, perfilClienteId]);
 
   // Ventas del cliente (combina servidor o SQLite local + ventas móviles pendientes)
   const perfilVentas = useMemo(() => {
@@ -1993,14 +2005,18 @@ export default function App() {
   // Facturas pendientes del cliente ordenadas desde la más antigua (FIFO, igual que el backend)
   const pagoDeudaPendientesFifo = useMemo(() => {
     if (!pagoDeudaCliente) return [];
-    const fuente = creditosData.creditos.length > 0 ? creditosData.creditos : perfilCreditos;
-    const list = fuente.filter(
+    const all = [...creditosData.creditos, ...perfilCreditos];
+    const map = new Map<string, LocalCredito>();
+    for (const c of all) {
+      if (!map.has(String(c.id))) map.set(String(c.id), c);
+    }
+    const list = Array.from(map.values()).filter(
       (cr) =>
         String(cr.cliente_id) === String(pagoDeudaCliente.id) &&
         cr.estado !== "Pagado" &&
         Number(cr.saldo) > 0.009
     );
-    return [...list].sort((a, b) =>
+    return list.sort((a, b) =>
       a.fecha === b.fecha ? String(b.id).localeCompare(String(a.id)) : a.fecha < b.fecha ? -1 : 1
     );
   }, [pagoDeudaCliente, creditosData.creditos, perfilCreditos]);
@@ -2063,13 +2079,14 @@ export default function App() {
         continue;
       }
       const takeBase = Math.min(poolBase, saldoBase);
-      const takeEnMonedaCr = saldoBase > 0 ? (takeBase * saldo) / saldoBase : saldo;
+      const isCompleta = takeBase >= saldoBase - 0.005 || poolBase >= saldoBase - 0.005;
+      const takeEnMonedaCr = isCompleta ? saldo : (saldoBase > 0 ? (takeBase * saldo) / saldoBase : saldo);
       const takeFinal = Math.min(takeEnMonedaCr, saldo);
       poolBase = Math.max(0, poolBase - takeBase);
       lineas.push({
         credito: cr,
-        estado: takeBase >= saldoBase - 0.005 ? "completa" : "parcial",
-        monto: takeFinal,
+        estado: isCompleta ? "completa" : "parcial",
+        monto: isCompleta ? saldo : takeFinal,
       });
     }
 
@@ -2173,8 +2190,8 @@ export default function App() {
       if (creditosEstadoFilter !== "Todos" && cr.estado !== creditosEstadoFilter) return false;
       if (!q) return true;
       return (
-        cr.cliente_nombre.toLowerCase().includes(q) ||
-        cr.numero.toLowerCase().includes(q) ||
+        (cr.cliente_nombre && cr.cliente_nombre.toLowerCase().includes(q)) ||
+        (cr.numero && cr.numero.toLowerCase().includes(q)) ||
         (cr.cliente_documento && cr.cliente_documento.toLowerCase().includes(q)) ||
         (cr.venta_numero && cr.venta_numero.toLowerCase().includes(q))
       );
@@ -3133,7 +3150,7 @@ export default function App() {
                           {clienteSeleccionadoObj.deuda_total.map((d) => (
                             <View key={d.codigo} style={styles.deudaChip}>
                               <Text style={styles.deudaChipText}>
-                                {d.simbolo} {d.monto.toFixed(2)} {d.codigo}
+                                {fmt(d.monto, d.codigo)}
                               </Text>
                             </View>
                           ))}
@@ -3907,14 +3924,28 @@ export default function App() {
                             <View style={styles.creditoAmountsTopRow}>
                               <View style={styles.creditoAmountCol}>
                                 <Text style={styles.fieldLabelSmall}>TOTAL ORIGINAL</Text>
-                                <Text style={styles.creditoAmountTotal} numberOfLines={1}>
-                                  {fmt(cr.monto_total, cr.moneda_codigo)}
+                                <Text
+                                  style={styles.creditoAmountTotal}
+                                  numberOfLines={1}
+                                  adjustsFontSizeToFit
+                                  minimumFontScale={0.75}
+                                >
+                                  {fmt(cr.monto_total, cr.moneda_codigo)}{" "}
+                                  <Text style={styles.creditoAmountCurrency}>{cr.moneda_codigo}</Text>
                                 </Text>
                               </View>
                               <View style={[styles.creditoAmountCol, { alignItems: "flex-end" }]}>
                                 <Text style={styles.fieldLabelSmall}>ABONADO</Text>
-                                <Text style={styles.creditoAmountAbonado} numberOfLines={1}>
-                                  {fmt(cr.abonado, cr.moneda_codigo)}
+                                <Text
+                                  style={styles.creditoAmountAbonado}
+                                  numberOfLines={1}
+                                  adjustsFontSizeToFit
+                                  minimumFontScale={0.75}
+                                >
+                                  {fmt(cr.abonado, cr.moneda_codigo)}{" "}
+                                  <Text style={[styles.creditoAmountCurrency, { color: THEME.successStrong }]}>
+                                    {cr.moneda_codigo}
+                                  </Text>
                                 </Text>
                               </View>
                             </View>
@@ -3948,8 +3979,21 @@ export default function App() {
                                   { color: isPagado ? THEME.successStrong : THEME.dangerStrong },
                                 ]}
                                 numberOfLines={1}
+                                adjustsFontSizeToFit
+                                minimumFontScale={0.75}
                               >
-                                {fmt(cr.saldo, cr.moneda_codigo)}
+                                {fmt(cr.saldo, cr.moneda_codigo)}{" "}
+                                <Text
+                                  style={[
+                                    styles.creditoAmountCurrency,
+                                    {
+                                      color: isPagado ? THEME.successStrong : THEME.dangerStrong,
+                                      fontWeight: "800",
+                                    },
+                                  ]}
+                                >
+                                  {cr.moneda_codigo}
+                                </Text>
                               </Text>
                             </View>
                           </View>
@@ -4298,7 +4342,7 @@ export default function App() {
               ) : (
                 creditosData.por_cobrar.map((r) => (
                   <Text key={r.codigo} style={[styles.kpiValueSmall, { color: THEME.dangerStrong }]}>
-                    {r.simbolo} {r.monto.toFixed(2)} <Text style={{ fontSize: 10 }}>{r.codigo}</Text>
+                    {fmt(r.monto, r.codigo)} <Text style={{ fontSize: 10, fontWeight: "600" }}>{r.codigo}</Text>
                   </Text>
                 ))
               )}
@@ -4340,15 +4384,31 @@ export default function App() {
               })}
             </ScrollView>
 
-            <View style={[styles.searchBox, { marginTop: 8 }]}>
-              <Feather name="search" size={15} color={THEME.mutedForeground} />
+            <View
+              style={[
+                styles.searchBox,
+                { marginTop: 8, width: "100%", flex: undefined, height: 42, paddingHorizontal: 12 },
+              ]}
+            >
+              <Feather name="search" size={16} color={THEME.mutedForeground} />
               <TextInput
-                style={styles.searchBoxInput}
+                style={[styles.searchBoxInput, { fontSize: 13.5 }]}
                 placeholder="Buscar deudor, documento o N° de crédito..."
                 placeholderTextColor={THEME.mutedForeground}
                 value={creditosSearch}
                 onChangeText={setCreditosSearch}
+                autoCapitalize="none"
+                autoCorrect={false}
+                returnKeyType="search"
               />
+              {creditosSearch.length > 0 && (
+                <TouchableOpacity
+                  onPress={() => setCreditosSearch("")}
+                  hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+                >
+                  <Feather name="x-circle" size={16} color={THEME.mutedForeground} />
+                </TouchableOpacity>
+              )}
             </View>
           </View>
 
@@ -4425,14 +4485,28 @@ export default function App() {
                     <View style={styles.creditoAmountsTopRow}>
                       <View style={styles.creditoAmountCol}>
                         <Text style={styles.fieldLabelSmall}>TOTAL ORIGINAL</Text>
-                        <Text style={styles.creditoAmountTotal} numberOfLines={1}>
-                          {item.moneda_simbolo} {item.monto_total.toFixed(2)} {item.moneda_codigo}
+                        <Text
+                          style={styles.creditoAmountTotal}
+                          numberOfLines={1}
+                          adjustsFontSizeToFit
+                          minimumFontScale={0.75}
+                        >
+                          {fmt(item.monto_total, item.moneda_codigo)}{" "}
+                          <Text style={styles.creditoAmountCurrency}>{item.moneda_codigo}</Text>
                         </Text>
                       </View>
                       <View style={[styles.creditoAmountCol, { alignItems: "flex-end" }]}>
                         <Text style={styles.fieldLabelSmall}>ABONADO</Text>
-                        <Text style={styles.creditoAmountAbonado} numberOfLines={1}>
-                          {item.moneda_simbolo} {item.abonado.toFixed(2)} {item.moneda_codigo}
+                        <Text
+                          style={styles.creditoAmountAbonado}
+                          numberOfLines={1}
+                          adjustsFontSizeToFit
+                          minimumFontScale={0.75}
+                        >
+                          {fmt(item.abonado, item.moneda_codigo)}{" "}
+                          <Text style={[styles.creditoAmountCurrency, { color: THEME.successStrong }]}>
+                            {item.moneda_codigo}
+                          </Text>
                         </Text>
                       </View>
                     </View>
@@ -4466,8 +4540,21 @@ export default function App() {
                           { color: isPagado ? THEME.successStrong : THEME.dangerStrong },
                         ]}
                         numberOfLines={1}
+                        adjustsFontSizeToFit
+                        minimumFontScale={0.75}
                       >
-                        {item.moneda_simbolo} {item.saldo.toFixed(2)} {item.moneda_codigo}
+                        {fmt(item.saldo, item.moneda_codigo)}{" "}
+                        <Text
+                          style={[
+                            styles.creditoAmountCurrency,
+                            {
+                              color: isPagado ? THEME.successStrong : THEME.dangerStrong,
+                              fontWeight: "800",
+                            },
+                          ]}
+                        >
+                          {item.moneda_codigo}
+                        </Text>
                       </Text>
                     </View>
                   </View>
@@ -4568,8 +4655,7 @@ export default function App() {
                           </View>
                           <View style={{ alignItems: "flex-end" }}>
                             <Text style={styles.posProdPrice}>
-                              {mon?.simbolo || "$"} {Number(v.total).toFixed(2)}{" "}
-                              {mon?.codigo || ""}
+                              {fmt(Number(v.total) || 0, mon?.codigo)}
                             </Text>
                             <View
                               style={[
@@ -4631,8 +4717,7 @@ export default function App() {
                     </View>
                     <View style={{ alignItems: "flex-end", gap: 4 }}>
                       <Text style={styles.posProdPrice}>
-                        {v.moneda_simbolo || "$"} {Number(v.total).toFixed(2)}{" "}
-                        {v.moneda_codigo || ""}
+                        {fmt(Number(v.total) || 0, v.moneda_codigo)}
                       </Text>
                       <View
                         style={[
@@ -5563,6 +5648,11 @@ export default function App() {
                           setShowClientePickerModal(true);
                           return;
                         }
+                        setCreditoSolicitado(true);
+                        if (clienteSinCreditoSuficiente) {
+                          showToast("Crédito insuficiente. Usa el botón Otorgar Crédito Rápido.", "info");
+                          return;
+                        }
                         handleConfirmSale("credito");
                       }}
                     >
@@ -5641,7 +5731,7 @@ export default function App() {
                           }}
                         >
                           <Text style={styles.fieldLabelSmall}>
-                            MONTO RECIBIDO ({codMetodoActual})
+                            MONTO INGRESADO ({codMetodoActual})
                           </Text>
                           <TouchableOpacity
                             onPress={() => {
@@ -5666,7 +5756,7 @@ export default function App() {
                           </TouchableOpacity>
                         </View>
                         <TextInput
-                          style={styles.input}
+                          style={[styles.input, styles.montoIngresadoInput]}
                           keyboardType="decimal-pad"
                           placeholder={`0.00 en ${codMetodoActual}`}
                           value={lineasPago[0]?.montoStr ?? ""}
@@ -5779,11 +5869,19 @@ export default function App() {
                 </View>
               )}
 
-              {/* Resumen de Entra / Falta (Crédito) / Vuelto */}
+              {/* Resumen de Total Venta / Total Recibido / Falta (Crédito) / Vuelto */}
               <View style={styles.checkoutBalanceBanner}>
                 <View style={styles.summaryRow}>
-                  <Text style={styles.summaryLabel}>Total Recibido:</Text>
-                  <Text style={[styles.summaryVal, { color: THEME.successStrong }]}>
+                  <Text style={[styles.summaryLabel, { fontSize: 13, fontWeight: "700" }]}>Total Venta:</Text>
+                  <Text style={[styles.summaryVal, { fontSize: 14, fontWeight: "800" }]}>
+                    {fmt(totalCobrarMetodo, codMetodoActual)}
+                  </Text>
+                </View>
+                <View style={[styles.summaryRow, { marginTop: 3 }]}>
+                  <Text style={[styles.summaryLabel, { fontSize: 13.5, fontWeight: "800", color: THEME.foreground }]}>
+                    Total Recibido:
+                  </Text>
+                  <Text style={[styles.summaryVal, { fontSize: 17, fontWeight: "900", color: THEME.successStrong }]}>
                     {fmt(
                       !modoMixto ? mRecibido : totalPagadoEnMonedaVenta,
                       !modoMixto ? codMetodoActual : monedaSeleccionada
@@ -5791,11 +5889,11 @@ export default function App() {
                   </Text>
                 </View>
                 {(!modoMixto ? faltaSimple > 0.009 : faltaPorPagar > 0.009) && (
-                  <View style={styles.summaryRow}>
-                    <Text style={[styles.summaryLabel, { color: THEME.dangerStrong }]}>
+                  <View style={[styles.summaryRow, { marginTop: 3 }]}>
+                    <Text style={[styles.summaryLabel, { fontSize: 13, fontWeight: "800", color: THEME.dangerStrong }]}>
                       Saldo pendiente (a Crédito):
                     </Text>
-                    <Text style={[styles.summaryVal, { color: THEME.dangerStrong }]}>
+                    <Text style={[styles.summaryVal, { fontSize: 15, fontWeight: "900", color: THEME.dangerStrong }]}>
                       {fmt(
                         !modoMixto ? faltaSimple : faltaPorPagar,
                         !modoMixto ? codMetodoActual : monedaSeleccionada
@@ -5804,11 +5902,11 @@ export default function App() {
                   </View>
                 )}
                 {(!modoMixto ? vueltoSimple > 0.009 : vueltoEnMonedaVenta > 0.009) && (
-                  <View style={styles.summaryRow}>
-                    <Text style={[styles.summaryLabel, { color: THEME.infoStrong }]}>
+                  <View style={[styles.summaryRow, { marginTop: 3 }]}>
+                    <Text style={[styles.summaryLabel, { fontSize: 13, fontWeight: "800", color: THEME.infoStrong }]}>
                       Vuelto a entregar:
                     </Text>
-                    <Text style={[styles.summaryVal, { color: THEME.infoStrong }]}>
+                    <Text style={[styles.summaryVal, { fontSize: 15, fontWeight: "900", color: THEME.infoStrong }]}>
                       {fmt(
                         !modoMixto ? vueltoSimple : vueltoEnMonedaVenta,
                         !modoMixto ? codMetodoActual : monedaSeleccionada
@@ -5818,52 +5916,129 @@ export default function App() {
                 )}
               </View>
 
-              {/* Panel de Control de Límite de Crédito en Vivo (igual que en el POS Web) */}
-              {clienteSeleccionadoObj && infoCreditoCliente && (
-                <View style={styles.checkoutCreditPanel}>
-                  <View style={{ flexDirection: "row", justifyContent: "space-between" }}>
-                    <Text style={styles.fieldLabelSmall}>
-                      CRÉDITO DE {clienteSeleccionadoObj.nombre.toUpperCase()} ({monedaSeleccionada})
-                    </Text>
-                    <Text style={styles.clientCardMeta}>
-                      Disp: {fmt(infoCreditoCliente.disponible, monedaSeleccionada)}
-                    </Text>
-                  </View>
+              {/* Alerta de Crédito Insuficiente / Otorgar Crédito Rápido idéntico a PC */}
+              {((!modoMixto ? faltaSimple > 0.009 : faltaPorPagar > 0.009) || creditoSolicitado) &&
+                clienteSeleccionadoObj && (
+                  <View style={{ gap: 8 }}>
+                    {clienteSinCreditoSuficiente ? (
+                      <View style={styles.creditoAlertaContainer}>
+                        <View style={{ flexDirection: "row", alignItems: "flex-start", gap: 8 }}>
+                          <Feather
+                            name="alert-triangle"
+                            size={18}
+                            color={THEME.warningStrong}
+                            style={{ marginTop: 2 }}
+                          />
+                          <View style={{ flex: 1 }}>
+                            <Text style={styles.creditoAlertaTitle}>
+                              {!clienteSeleccionadoObj.recibe_credito
+                                ? "Crédito no habilitado"
+                                : `Crédito insuficiente en ${monedaSeleccionada}`}
+                            </Text>
+                            <Text style={styles.creditoAlertaSub}>
+                              {!clienteSeleccionadoObj.recibe_credito
+                                ? `${clienteSeleccionadoObj.nombre} no tiene permiso para comprar a crédito. Puedes otorgárselo con un toque.`
+                                : `Necesita un límite de ${fmt((infoCreditoCliente?.deuda || 0) + total, monedaSeleccionada)} para esta compra.`}
+                            </Text>
+                          </View>
+                        </View>
 
-                  <View style={{ flexDirection: "row", alignItems: "center", gap: 6, marginTop: 6 }}>
-                    <TextInput
-                      style={[styles.input, { flex: 1, marginTop: 0, height: 36, paddingVertical: 4 }]}
-                      keyboardType="decimal-pad"
-                      placeholder="Límite"
-                      value={limiteInputStr}
-                      onChangeText={setLimiteInputStr}
-                    />
-                    <TouchableOpacity
-                      style={styles.outlineSmallBtn}
-                      disabled={grantingCredit}
-                      onPress={() => {
-                        const val = parseFloat(limiteInputStr.replace(",", ".")) || 0;
-                        handleAjustarLimiteCheckout(val);
-                      }}
-                    >
-                      <Text style={styles.outlineSmallBtnText}>Fijar Límite</Text>
-                    </TouchableOpacity>
-                    <TouchableOpacity
-                      style={styles.primarySmallBtn}
-                      disabled={grantingCredit}
-                      onPress={() => {
-                        const necesario = Math.max(
-                          100,
-                          Math.ceil(infoCreditoCliente.deuda + total)
-                        );
-                        handleAjustarLimiteCheckout(necesario);
-                      }}
-                    >
-                      <Text style={styles.primarySmallBtnText}>Otorgar</Text>
-                    </TouchableOpacity>
+                        {/* 3 Columnas: LÍMITE | DEUDA | DISPONIBLE */}
+                        <View style={styles.creditoStatsGrid}>
+                          <View style={styles.creditoStatCol}>
+                            <Text style={styles.creditoStatLabel}>Límite</Text>
+                            <Text style={styles.creditoStatVal} numberOfLines={1} adjustsFontSizeToFit>
+                              {fmt(infoCreditoCliente?.limite || 0, monedaSeleccionada)}
+                            </Text>
+                          </View>
+                          <View style={styles.creditoStatCol}>
+                            <Text style={styles.creditoStatLabel}>Deuda</Text>
+                            <Text style={styles.creditoStatVal} numberOfLines={1} adjustsFontSizeToFit>
+                              {fmt(infoCreditoCliente?.deuda || 0, monedaSeleccionada)}
+                            </Text>
+                          </View>
+                          <View style={styles.creditoStatCol}>
+                            <Text style={styles.creditoStatLabel}>Disponible</Text>
+                            <Text
+                              style={[
+                                styles.creditoStatVal,
+                                {
+                                  color:
+                                    (infoCreditoCliente?.disponible || 0) < total
+                                      ? THEME.dangerStrong
+                                      : THEME.foreground,
+                                },
+                              ]}
+                              numberOfLines={1}
+                              adjustsFontSizeToFit
+                            >
+                              {fmt(infoCreditoCliente?.disponible || 0, monedaSeleccionada)}
+                            </Text>
+                          </View>
+                        </View>
+
+                        <TouchableOpacity
+                          style={styles.creditoOtorgarRapidoBtn}
+                          disabled={grantingCredit}
+                          onPress={async () => {
+                            if (!clienteSeleccionadoObj || !activeMonedaObj) return;
+                            const deudaActual = infoCreditoCliente?.deuda || 0;
+                            const necesario = Math.max(100, Math.ceil(deudaActual + total));
+                            await handleAjustarLimiteCheckout(necesario);
+                          }}
+                        >
+                          {grantingCredit ? (
+                            <ActivityIndicator size="small" color="#fff" />
+                          ) : (
+                            <>
+                              <Feather name="zap" size={15} color="#fff" />
+                              <Text style={styles.creditoOtorgarRapidoBtnText}>
+                                Otorgar Crédito Rápido a {clienteSeleccionadoObj.nombre}
+                              </Text>
+                            </>
+                          )}
+                        </TouchableOpacity>
+                      </View>
+                    ) : (
+                      <View style={styles.creditoHabilitadoContainer}>
+                        <View
+                          style={{
+                            flexDirection: "row",
+                            justifyContent: "space-between",
+                            alignItems: "center",
+                          }}
+                        >
+                          <Text style={styles.creditoHabilitadoLabel}>Crédito del Cliente:</Text>
+                          <Text style={styles.creditoHabilitadoOk}>✓ Habilitado</Text>
+                        </View>
+                        <View
+                          style={{
+                            flexDirection: "row",
+                            justifyContent: "space-between",
+                            alignItems: "center",
+                          }}
+                        >
+                          <Text style={styles.creditoHabilitadoSub}>Deuda actual:</Text>
+                          <Text style={styles.creditoHabilitadoVal}>
+                            {fmt(infoCreditoCliente?.deuda || 0, monedaSeleccionada)}
+                          </Text>
+                        </View>
+                        <View
+                          style={{
+                            flexDirection: "row",
+                            justifyContent: "space-between",
+                            alignItems: "center",
+                          }}
+                        >
+                          <Text style={styles.creditoHabilitadoSub}>Crédito disponible:</Text>
+                          <Text style={[styles.creditoHabilitadoVal, { color: THEME.successStrong }]}>
+                            {fmt(infoCreditoCliente?.disponible || 0, monedaSeleccionada)}
+                          </Text>
+                        </View>
+                      </View>
+                    )}
                   </View>
-                </View>
-              )}
+                )}
 
               {/* Cobros Extra Desplegable (+ Delivery, + Envío, + Bolsa, + Propina) */}
               <View style={styles.cobrosExtraContainer}>
@@ -5966,7 +6141,10 @@ export default function App() {
                   <TouchableOpacity
                     style={[styles.checkoutActionBtn, { backgroundColor: THEME.success, flex: 1 }]}
                     disabled={submittingSale}
-                    onPress={() => handleConfirmSale("completo")}
+                    onPress={() => {
+                      setCreditoSolicitado(false);
+                      handleConfirmSale("completo");
+                    }}
                   >
                     <Feather name="check-circle" size={16} color="#fff" />
                     <Text style={styles.checkoutActionBtnText}>Pagar Completo</Text>
@@ -5986,6 +6164,11 @@ export default function App() {
                         showToast("Selecciona un cliente para registrar la venta a crédito", "error");
                         setClientePickerSearch("");
                         setShowClientePickerModal(true);
+                        return;
+                      }
+                      setCreditoSolicitado(true);
+                      if (clienteSinCreditoSuficiente) {
+                        showToast(`Crédito insuficiente. Pulsa "Otorgar Crédito Rápido" arriba.`, "info");
                         return;
                       }
                       handleConfirmSale("credito");
@@ -6242,8 +6425,7 @@ export default function App() {
                         {tieneDeuda && (
                           <View style={styles.deudaChip}>
                             <Text style={styles.deudaChipText}>
-                              Deuda: {item.deuda_total[0].simbolo}{" "}
-                              {Number(item.deuda_total[0].monto).toFixed(2)}
+                              Deuda: {fmt(Number(item.deuda_total[0].monto) || 0, item.deuda_total[0].codigo)}
                             </Text>
                           </View>
                         )}
@@ -6450,8 +6632,10 @@ export default function App() {
                   <View>
                     <Text style={styles.fieldLabelSmall}>SALDO PENDIENTE</Text>
                     <Text style={[styles.checkoutBigTotal, { color: THEME.dangerStrong }]}>
-                      {abonoModalCredito.moneda_simbolo} {abonoModalCredito.saldo.toFixed(2)}{" "}
-                      {abonoModalCredito.moneda_codigo}
+                      {fmt(abonoModalCredito.saldo, abonoModalCredito.moneda_codigo)}{" "}
+                      <Text style={{ fontSize: 14, fontWeight: "600" }}>
+                        {abonoModalCredito.moneda_codigo}
+                      </Text>
                     </Text>
                   </View>
                   <TouchableOpacity
@@ -6570,8 +6754,10 @@ export default function App() {
                     <View style={styles.pickerRow}>
                       <View style={{ flex: 1 }}>
                         <Text style={styles.clientCardName}>
-                          {item.moneda_simbolo || "$"} {Number(item.monto).toFixed(2)}{" "}
-                          {item.moneda_codigo || ""}
+                          {fmt(Number(item.monto) || 0, item.moneda_codigo)}{" "}
+                          <Text style={{ fontSize: 11, fontWeight: "600", color: THEME.mutedForeground }}>
+                            {item.moneda_codigo || ""}
+                          </Text>
                         </Text>
                         <Text style={styles.clientCardMeta}>
                           {item.fecha}
@@ -8740,9 +8926,118 @@ const styles = StyleSheet.create({
     marginTop: 2,
   },
   checkoutBigTotal: {
-    fontSize: 20,
+    fontSize: 26,
     fontWeight: "900",
     color: THEME.primary,
+  },
+  montoIngresadoInput: {
+    height: 48,
+    fontSize: 19,
+    fontWeight: "800",
+    color: THEME.foreground,
+    backgroundColor: THEME.card,
+    borderColor: THEME.primary,
+    borderWidth: 1.5,
+    borderRadius: 8,
+    paddingHorizontal: 12,
+  },
+  creditoAmountCurrency: {
+    fontSize: 10.5,
+    fontWeight: "700",
+    color: THEME.mutedForeground,
+  },
+  creditoAlertaContainer: {
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: "rgba(245, 158, 11, 0.4)",
+    backgroundColor: "rgba(245, 158, 11, 0.1)",
+    padding: 12,
+    gap: 10,
+  },
+  creditoAlertaTitle: {
+    fontSize: 14,
+    fontWeight: "800",
+    color: THEME.warningStrong,
+  },
+  creditoAlertaSub: {
+    fontSize: 12,
+    color: THEME.foreground,
+    opacity: 0.9,
+    marginTop: 2,
+    lineHeight: 16,
+  },
+  creditoStatsGrid: {
+    flexDirection: "row",
+    backgroundColor: "rgba(245, 158, 11, 0.15)",
+    borderRadius: 8,
+    padding: 8,
+  },
+  creditoStatCol: {
+    flex: 1,
+    alignItems: "center",
+    paddingHorizontal: 4,
+  },
+  creditoStatLabel: {
+    fontSize: 10,
+    fontWeight: "800",
+    color: THEME.mutedForeground,
+    textTransform: "uppercase",
+    letterSpacing: 0.5,
+  },
+  creditoStatVal: {
+    fontSize: 13,
+    fontWeight: "800",
+    color: THEME.foreground,
+    marginTop: 2,
+  },
+  creditoOtorgarRapidoBtn: {
+    backgroundColor: THEME.success,
+    borderRadius: 8,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    paddingVertical: 11,
+    paddingHorizontal: 12,
+    gap: 6,
+    shadowColor: "#000",
+    shadowOpacity: 0.1,
+    shadowRadius: 3,
+    elevation: 2,
+  },
+  creditoOtorgarRapidoBtnText: {
+    color: "#fff",
+    fontSize: 13.5,
+    fontWeight: "800",
+  },
+  creditoHabilitadoContainer: {
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: "rgba(16, 185, 129, 0.3)",
+    backgroundColor: "rgba(16, 185, 129, 0.1)",
+    padding: 10,
+    gap: 4,
+  },
+  creditoHabilitadoLabel: {
+    fontSize: 10.5,
+    fontWeight: "800",
+    textTransform: "uppercase",
+    letterSpacing: 0.5,
+    color: THEME.mutedForeground,
+  },
+  creditoHabilitadoOk: {
+    fontSize: 11.5,
+    fontWeight: "800",
+    color: THEME.successStrong,
+  },
+  creditoHabilitadoSub: {
+    fontSize: 11,
+    fontWeight: "700",
+    color: THEME.mutedForeground,
+  },
+  creditoHabilitadoVal: {
+    fontSize: 12,
+    fontWeight: "800",
+    color: THEME.foreground,
   },
   checkoutSectionHeader: {
     flexDirection: "row",

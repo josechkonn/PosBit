@@ -342,19 +342,23 @@ export async function patchClienteLimiteCloud(payload: {
   recibe_credito?: boolean;
 }) {
   const { serverUrl, token } = await getStoredSession();
-  if (!serverUrl || !token) throw new Error("Sesión no configurada");
 
-  const res = await fetch(`${serverUrl}/api/clientes`, {
-    method: "PATCH",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${token}`,
-    },
-    body: JSON.stringify(payload),
-  });
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) {
-    throw new Error(data.error || "Error al ajustar límite de crédito");
+  try {
+    if (serverUrl && token) {
+      const res = await fetch(`${serverUrl}/api/clientes`, {
+        method: "PATCH",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify(payload),
+      });
+      if (!res.ok) {
+        console.warn("patchClienteLimiteCloud non-200:", res.status);
+      }
+    }
+  } catch (err) {
+    console.warn("patchClienteLimiteCloud offline fallback:", err);
   }
 
   const db = await getMobileDb();
@@ -367,7 +371,7 @@ export async function patchClienteLimiteCloud(payload: {
      ON CONFLICT(cliente_id, moneda_id) DO UPDATE SET limite = excluded.limite`,
     [payload.id, String(payload.moneda_id), Number(payload.limite) || 0]
   );
-  return data;
+  return { ok: true, ...payload };
 }
 
 /**
@@ -483,16 +487,17 @@ export async function pagarDeudaGlobalMobile(payload: {
       const db = await getMobileDb();
       if (Array.isArray(data.aplicado)) {
         for (const ap of data.aplicado) {
-          const row = await db.getFirstAsync<{ saldo: number }>(
-            `SELECT saldo FROM creditos WHERE id = ?`,
-            [String(ap.credito_id)]
+          const row = await db.getFirstAsync<{ id: string; saldo: number }>(
+            `SELECT id, saldo FROM creditos WHERE id = ? OR numero = ?`,
+            [String(ap.credito_id), String(ap.numero || "")]
           );
           if (row) {
-            const nuevoSaldo = Math.max(0, Number(row.saldo) - (Number(ap.monto) || 0));
-            const nuevoEstado = ap.estado || (nuevoSaldo <= 0.009 ? "Pagado" : "Parcial");
+            const isPagado = ap.estado === "Pagado" || Number(ap.saldo ?? 0) <= 0.009;
+            const nuevoSaldo = isPagado ? 0 : Math.max(0, Number(ap.saldo ?? (row.saldo - (Number(ap.monto) || 0))));
+            const nuevoEstado = isPagado ? "Pagado" : "Parcial";
             await db.runAsync(
               `UPDATE creditos SET saldo = ?, estado = ? WHERE id = ?`,
-              [nuevoEstado === "Pagado" ? 0 : nuevoSaldo, String(nuevoEstado), String(ap.credito_id)]
+              [nuevoSaldo, nuevoEstado, String(row.id)]
             );
           }
         }
@@ -517,13 +522,14 @@ export async function pagarDeudaGlobalMobile(payload: {
   const db = await getMobileDb();
   for (const dist of payload.distribucionOffline) {
     if (dist.monto_aplicado <= 0.0005) continue;
-    const row = await db.getFirstAsync<{ saldo: number }>(
-      `SELECT saldo FROM creditos WHERE id = ?`,
-      [dist.credito_id]
+    const row = await db.getFirstAsync<{ id: string; saldo: number }>(
+      `SELECT id, saldo FROM creditos WHERE id = ? OR numero = ?`,
+      [String(dist.credito_id), String(dist.credito_id)]
     );
+    const targetId = row ? row.id : dist.credito_id;
     const saldoAntes = Number(row?.saldo || 0);
     await createOfflineAbono({
-      credito_id: dist.credito_id,
+      credito_id: targetId,
       cliente_id: payload.cliente_id,
       fecha: payload.fecha,
       monto: dist.monto_aplicado,

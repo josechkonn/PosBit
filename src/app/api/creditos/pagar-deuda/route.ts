@@ -6,6 +6,7 @@ import { transaction } from "@/lib/db";
 import { fechaLocalISO } from "@/lib/format";
 import { convertirConMetodo, redondear } from "@/lib/money";
 import { getConfiguracionGlobal } from "@/lib/global-config";
+import { triggerBackgroundSync } from "@/lib/sync-engine";
 
 /**
  * Pago de deuda global del cliente: el operador ingresa un monto en la
@@ -88,14 +89,14 @@ export async function POST(request: Request) {
         numero: string;
         moneda_codigo: string;
         monto: number;
+        saldo?: number;
         monto_base: number;
         estado: string;
       }> = [];
 
       for (const credito of creditosPendientes) {
         const saldo = parseFloat(String(credito.saldo));
-        const saldoBase = parseFloat(String(credito.saldo_base || 0));
-        if (saldo <= 0.009 || saldoBase <= 0.0005) continue;
+        if (saldo <= 0.009) continue;
 
         const monedaCredito = monedasCatalogo.find(
           (m: any) => String(m.id) === String(credito.moneda_id)
@@ -103,18 +104,22 @@ export async function POST(request: Request) {
         if (!monedaCredito) continue;
         const dec = Number(monedaCredito.decimales ?? 2);
 
+        let saldoBase = parseFloat(String(credito.saldo_base || 0));
+        if (saldoBase <= 0.0005) {
+          saldoBase = redondear(convertirConMetodo(saldo, monedaCredito, baseMoneda, regla, 6), 6);
+        }
+
         const takeBase = redondear(Math.min(poolBase, saldoBase), 6);
         if (takeBase <= 0.0005) break; // ya no queda monto que repartir
 
-        // Monto en la moneda del crédito: proporcional a su saldo_base para
-        // que saldo y saldo_base se descuenten de forma consistente.
+        // Monto en la moneda del crédito
         let takeCurrency =
-          saldoBase > 0
+          saldoBase > 0 && Math.abs(takeBase - saldoBase) > 0.005
             ? redondear((saldo * takeBase) / saldoBase, dec)
-            : redondear(convertirConMetodo(takeBase, baseMoneda, monedaCredito, regla, dec), dec);
+            : saldo;
         takeCurrency = Math.min(takeCurrency, saldo); // nunca superar el saldo
 
-        poolBase = redondear(poolBase - takeBase, 6);
+        poolBase = redondear(Math.max(0, poolBase - takeBase), 6);
 
         await client.query(
           `INSERT INTO abonos (credito_id, cliente_id, retorno_id, fecha, monto, moneda_id, monto_base, metodo_pago_id, caja_id, observaciones)
@@ -132,9 +137,11 @@ export async function POST(request: Request) {
           ]
         );
 
-        const nuevoSaldo = redondear(Math.max(0, saldo - takeCurrency), dec);
-        const nuevoSaldoBase = redondear(Math.max(0, saldoBase - takeBase), 6);
-        const nuevoEstado = nuevoSaldo <= 0.009 ? "Pagado" : "Parcial";
+        const diffSaldo = Math.max(0, saldo - takeCurrency);
+        const diffSaldoBase = Math.max(0, saldoBase - takeBase);
+        const nuevoEstado = diffSaldo <= 0.01 || diffSaldoBase <= 0.005 ? "Pagado" : "Parcial";
+        const nuevoSaldo = nuevoEstado === "Pagado" ? 0 : redondear(diffSaldo, dec);
+        const nuevoSaldoBase = nuevoEstado === "Pagado" ? 0 : redondear(diffSaldoBase, 6);
 
         await client.query(
           `UPDATE creditos SET saldo = $1, saldo_base = $2, estado = $3, actualizado_en = NOW() WHERE id = $4`,
@@ -151,6 +158,7 @@ export async function POST(request: Request) {
           numero: credito.numero,
           moneda_codigo: monedaCredito.codigo,
           monto: takeCurrency,
+          saldo: nuevoSaldo,
           monto_base: takeBase,
           estado: nuevoEstado,
         });
@@ -186,6 +194,8 @@ export async function POST(request: Request) {
         creditos_completados: aplicado.filter((a) => a.estado === "Pagado").length,
       };
     });
+
+    triggerBackgroundSync();
 
     return NextResponse.json(result, { status: 201 });
   } catch (error) {
