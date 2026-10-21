@@ -94,8 +94,8 @@ export async function GET(request: Request) {
       SELECT 
         v.*,
         cl.nombre as cliente_nombre,
-        mo.codigo as moneda_codigo,
-        mo.simbolo as moneda_simbolo,
+        COALESCE(mo.codigo, 'COP') as moneda_codigo,
+        COALESCE(mo.simbolo, '$') as moneda_simbolo,
         mp.nombre as metodo_pago_nombre,
         ca.nombre as caja_nombre,
         (SELECT COUNT(*) FROM venta_items WHERE venta_id = v.id) as items_count,
@@ -106,7 +106,7 @@ export async function GET(request: Request) {
         cr.estado as credito_estado
       FROM ventas v
       LEFT JOIN clientes cl ON v.cliente_id = cl.id
-      JOIN monedas mo ON v.moneda_id = mo.id
+      LEFT JOIN monedas mo ON v.moneda_id = mo.id
       LEFT JOIN metodos_pago mp ON v.metodo_pago_id = mp.id
       LEFT JOIN cajas ca ON v.caja_id = ca.id
       LEFT JOIN creditos cr ON cr.venta_id = v.id
@@ -137,18 +137,18 @@ export async function GET(request: Request) {
 
     const [items, pagos, cobros] = await Promise.all([
       query(
-        `SELECT vi.*, pr.nombre as producto_nombre, pr.codigo as producto_codigo
+        `SELECT vi.*, COALESCE(pr.nombre, 'Producto') as producto_nombre, COALESCE(pr.codigo, '') as producto_codigo
          FROM venta_items vi
-         JOIN productos pr ON vi.producto_id = pr.id
+         LEFT JOIN productos pr ON vi.producto_id = pr.id
          WHERE vi.venta_id = ANY($1)
          ORDER BY vi.venta_id, vi.id`,
         [ventaIds]
       ),
       query(
-        `SELECT vp.*, mp.nombre as metodo_pago_nombre, mo.codigo as moneda_codigo, mo.simbolo as moneda_simbolo, mo.decimales as moneda_decimales
+        `SELECT vp.*, mp.nombre as metodo_pago_nombre, COALESCE(mo.codigo, 'COP') as moneda_codigo, COALESCE(mo.simbolo, '$') as moneda_simbolo, COALESCE(mo.decimales, 2) as moneda_decimales
          FROM venta_pagos vp
          LEFT JOIN metodos_pago mp ON vp.metodo_pago_id = mp.id
-         JOIN monedas mo ON vp.moneda_id = mo.id
+         LEFT JOIN monedas mo ON vp.moneda_id = mo.id
          WHERE vp.venta_id = ANY($1)
          ORDER BY vp.venta_id, vp.id`,
         [ventaIds]
