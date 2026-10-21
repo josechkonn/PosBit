@@ -14,6 +14,7 @@ import { RetornoDirectoModal } from "@/components/retorno/retorno-directo-modal"
 import { useToast } from "@/components/ui/toast";
 import { useConfirm } from "@/components/ui/confirm-dialog";
 import { fmt, fmtDate, fmtHora } from "@/lib/format";
+import { Pagination } from "@/components/ui/pagination";
 import * as XLSX from "xlsx";
 
 interface Venta {
@@ -57,6 +58,16 @@ interface VentaItem {
   subtotal_base: number | string;
 }
 
+interface PaginationInfo {
+  page: number;
+  limit: number;
+  total: number;
+  totalPages: number;
+  hasMore?: boolean;
+}
+
+const PAGE_SIZE = 25;
+
 export default function VentasPage() {
   const router = useRouter();
   const { toast } = useToast();
@@ -66,6 +77,13 @@ export default function VentasPage() {
   const [allItems, setAllItems] = useState<VentaItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState("");
+  const [currentPage, setCurrentPage] = useState(1);
+  const [pagination, setPagination] = useState<PaginationInfo>({
+    page: 1,
+    limit: PAGE_SIZE,
+    total: 0,
+    totalPages: 1,
+  });
 
   // Detail modal
   const [detailOpen, setDetailOpen] = useState(false);
@@ -83,14 +101,23 @@ export default function VentasPage() {
   const [sortKey, setSortKey] = useState<string>("fecha");
   const [sortOrder, setSortOrder] = useState<"asc" | "desc">("desc");
 
-  const fetchData = useCallback(async () => {
+  const fetchData = useCallback(async (page = 1, query = "") => {
     setLoading(true);
     try {
-      const res = await fetch("/api/ventas");
+      const params = new URLSearchParams();
+      params.set("page", String(page));
+      params.set("limit", String(PAGE_SIZE));
+      if (query.trim()) {
+        params.set("search", query.trim());
+      }
+      const res = await fetch(`/api/ventas?${params.toString()}`);
       if (res.ok) {
         const data = await res.json();
         setVentas(data.ventas || []);
         setAllItems(data.items || []);
+        if (data.pagination) {
+          setPagination(data.pagination);
+        }
       }
     } catch (error) {
       console.error("Error fetching ventas:", error);
@@ -100,8 +127,11 @@ export default function VentasPage() {
   }, []);
 
   useEffect(() => {
-    fetchData();
-  }, [fetchData]);
+    const timer = setTimeout(() => {
+      fetchData(currentPage, search);
+    }, 250);
+    return () => clearTimeout(timer);
+  }, [currentPage, search, fetchData]);
 
   const handleSort = (key: string) => {
     if (sortKey === key) {
@@ -217,7 +247,7 @@ export default function VentasPage() {
       if (res.ok) {
         toast("Venta eliminada/anulada exitosamente", "success");
         setDetailOpen(false);
-        fetchData();
+        fetchData(currentPage, search);
       } else {
         const data = await res.json();
         toast(data.error || "Error al eliminar", "error");
@@ -271,7 +301,10 @@ export default function VentasPage() {
         <SearchBar
           placeholder="Buscar por factura, cliente o método..."
           value={search}
-          onChange={(e) => setSearch(e.target.value)}
+          onChange={(e) => {
+            setSearch(e.target.value);
+            setCurrentPage(1);
+          }}
         />
         <Button variant="outline" onClick={handleExportExcel}>
           <Download size={13} /> Exportar Excel
@@ -375,6 +408,17 @@ export default function VentasPage() {
         </Table>
       )}
 
+      {!loading && (
+        <Pagination
+          currentPage={pagination.page}
+          totalPages={pagination.totalPages}
+          totalItems={pagination.total}
+          pageSize={pagination.limit}
+          noun="ventas"
+          onPageChange={(p) => setCurrentPage(p)}
+        />
+      )}
+
       <VentaDetailModal
         open={detailOpen}
         venta={selectedVenta}
@@ -403,7 +447,7 @@ export default function VentasPage() {
         onSuccess={(msg) => {
           setRetornoOpen(false);
           setRetornoVenta(null);
-          fetchData();
+          fetchData(currentPage, search);
           toast(msg, "success");
         }}
       />
@@ -416,7 +460,7 @@ export default function VentasPage() {
           setPagoVenta(null);
         }}
         onSuccess={() => {
-          fetchData();
+          fetchData(currentPage, search);
         }}
       />
     </div>

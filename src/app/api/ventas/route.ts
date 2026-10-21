@@ -23,87 +23,145 @@ export async function GET(request: Request) {
   try {
     await requireSession();
     const { searchParams } = new URL(request.url);
-    // Filtro opcional para el perfil del cliente: ?cliente_id=X
-    const clienteId = searchParams.get("cliente_id");
-    const params: any[] = clienteId ? [clienteId] : [];
-    const where = clienteId ? "WHERE v.cliente_id = $1" : "";
-    const whereItems = clienteId
-      ? "WHERE vi.venta_id IN (SELECT id FROM ventas WHERE cliente_id = $1)"
-      : "";
-    const wherePagos = clienteId
-      ? "WHERE vp.venta_id IN (SELECT id FROM ventas WHERE cliente_id = $1)"
-      : "";
-    const whereCobros = clienteId
-      ? "WHERE venta_id IN (SELECT id FROM ventas WHERE cliente_id = $1)"
-      : "";
 
-    const [ventas, items, pagos, cobros] = await Promise.all([
-      query(
-        `
-        SELECT 
-          v.*,
-          cl.nombre as cliente_nombre,
-          mo.codigo as moneda_codigo,
-          mo.simbolo as moneda_simbolo,
-          mp.nombre as metodo_pago_nombre,
-          ca.nombre as caja_nombre,
-          (SELECT COUNT(*) FROM venta_items WHERE venta_id = v.id) as items_count,
-          cr.id as credito_id,
-          cr.numero as credito_numero,
-          cr.monto_total as credito_monto_total,
-          cr.saldo as credito_saldo,
-          cr.estado as credito_estado
-        FROM ventas v
-        LEFT JOIN clientes cl ON v.cliente_id = cl.id
-        JOIN monedas mo ON v.moneda_id = mo.id
-        LEFT JOIN metodos_pago mp ON v.metodo_pago_id = mp.id
-        LEFT JOIN cajas ca ON v.caja_id = ca.id
-        LEFT JOIN creditos cr ON cr.venta_id = v.id
-        ${where}
-        -- fecha es solo el dia; creado_en guarda la hora real para que las
-        -- ventas del mismo dia queden de la mas reciente a la mas antigua.
-        ORDER BY v.fecha DESC, v.creado_en DESC, v.id DESC
-      `,
+    const clienteId = searchParams.get("cliente_id");
+    const search = searchParams.get("search") || searchParams.get("q") || "";
+    const cursor = searchParams.get("cursor");
+    const hasPage = searchParams.has("page");
+    const hasLimit = searchParams.has("limit");
+    const page = hasPage ? Math.max(1, parseInt(searchParams.get("page")!, 10) || 1) : (hasLimit ? 1 : null);
+    const limit = hasLimit
+      ? Math.max(1, parseInt(searchParams.get("limit")!, 10) || 50)
+      : (hasPage ? 50 : null);
+
+    const conditions: string[] = [];
+    const params: any[] = [];
+    let pIdx = 1;
+
+    if (clienteId) {
+      conditions.push(`v.cliente_id = $${pIdx++}`);
+      params.push(clienteId);
+    }
+
+    if (search.trim()) {
+      const q = `%${search.trim().toLowerCase()}%`;
+      conditions.push(`(
+        LOWER(v.numero) LIKE $${pIdx} OR
+        LOWER(COALESCE(v.cliente, '')) LIKE $${pIdx} OR
+        LOWER(COALESCE(cl.nombre, '')) LIKE $${pIdx} OR
+        LOWER(COALESCE(mp.nombre, '')) LIKE $${pIdx} OR
+        LOWER(COALESCE(ca.nombre, '')) LIKE $${pIdx}
+      )`);
+      params.push(q);
+      pIdx++;
+    }
+
+    if (cursor) {
+      // Paginación por cursor: id < cursor (para navegar hacia ventas anteriores)
+      conditions.push(`v.id < $${pIdx++}`);
+      params.push(cursor);
+    }
+
+    const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
+
+    let total = 0;
+    if (page || limit) {
+      const countRes = await queryOne<{ total: number }>(
+        `SELECT COUNT(*)::int as total
+         FROM ventas v
+         LEFT JOIN clientes cl ON v.cliente_id = cl.id
+         LEFT JOIN metodos_pago mp ON v.metodo_pago_id = mp.id
+         LEFT JOIN cajas ca ON v.caja_id = ca.id
+         ${where}`,
         params
+      );
+      total = countRes?.total ?? 0;
+    }
+
+    let paginationClause = "";
+    if (limit) {
+      paginationClause += ` LIMIT $${pIdx++}`;
+      params.push(limit);
+      if (page && page > 1) {
+        const offset = (page - 1) * limit;
+        paginationClause += ` OFFSET $${pIdx++}`;
+        params.push(offset);
+      }
+    }
+
+    const ventas = await query<any>(
+      `
+      SELECT 
+        v.*,
+        cl.nombre as cliente_nombre,
+        mo.codigo as moneda_codigo,
+        mo.simbolo as moneda_simbolo,
+        mp.nombre as metodo_pago_nombre,
+        ca.nombre as caja_nombre,
+        (SELECT COUNT(*) FROM venta_items WHERE venta_id = v.id) as items_count,
+        cr.id as credito_id,
+        cr.numero as credito_numero,
+        cr.monto_total as credito_monto_total,
+        cr.saldo as credito_saldo,
+        cr.estado as credito_estado
+      FROM ventas v
+      LEFT JOIN clientes cl ON v.cliente_id = cl.id
+      JOIN monedas mo ON v.moneda_id = mo.id
+      LEFT JOIN metodos_pago mp ON v.metodo_pago_id = mp.id
+      LEFT JOIN cajas ca ON v.caja_id = ca.id
+      LEFT JOIN creditos cr ON cr.venta_id = v.id
+      ${where}
+      ORDER BY v.fecha DESC, v.creado_en DESC, v.id DESC
+      ${paginationClause}
+      `,
+      params
+    );
+
+    if (ventas.length === 0) {
+      return NextResponse.json({
+        ventas: [],
+        items: [],
+        pagination: {
+          page: page ?? 1,
+          limit: limit ?? 0,
+          total: total,
+          totalPages: limit ? Math.ceil(total / limit) : 1,
+          nextCursor: null,
+          prevCursor: null,
+          hasMore: false,
+        },
+      });
+    }
+
+    const ventaIds = ventas.map((v) => v.id);
+
+    const [items, pagos, cobros] = await Promise.all([
+      query(
+        `SELECT vi.*, pr.nombre as producto_nombre, pr.codigo as producto_codigo
+         FROM venta_items vi
+         JOIN productos pr ON vi.producto_id = pr.id
+         WHERE vi.venta_id = ANY($1)
+         ORDER BY vi.venta_id, vi.id`,
+        [ventaIds]
       ),
       query(
-        `
-        SELECT vi.*, pr.nombre as producto_nombre, pr.codigo as producto_codigo
-        FROM venta_items vi
-        JOIN productos pr ON vi.producto_id = pr.id
-        ${whereItems}
-        ORDER BY vi.venta_id, vi.id
-      `,
-        params
+        `SELECT vp.*, mp.nombre as metodo_pago_nombre, mo.codigo as moneda_codigo, mo.simbolo as moneda_simbolo, mo.decimales as moneda_decimales
+         FROM venta_pagos vp
+         LEFT JOIN metodos_pago mp ON vp.metodo_pago_id = mp.id
+         JOIN monedas mo ON vp.moneda_id = mo.id
+         WHERE vp.venta_id = ANY($1)
+         ORDER BY vp.venta_id, vp.id`,
+        [ventaIds]
       ),
       query(
-        `
-        SELECT vp.*, mp.nombre as metodo_pago_nombre, mo.codigo as moneda_codigo, mo.simbolo as moneda_simbolo, mo.decimales as moneda_decimales
-        FROM venta_pagos vp
-        LEFT JOIN metodos_pago mp ON vp.metodo_pago_id = mp.id
-        JOIN monedas mo ON vp.moneda_id = mo.id
-        ${wherePagos}
-        ORDER BY vp.venta_id, vp.id
-      `,
-        params
-      ),
-      query(
-        `
-        SELECT * FROM venta_cobros_extra
-        ${whereCobros}
-        ORDER BY venta_id, id
-      `,
-        params
-      ).catch((e: any) => {
-        console.warn(
-          "Aviso al consultar venta_cobros_extra (se omiten cobros extra):",
-          e?.message || e
-        );
-        return [] as any[];
-      }),
+        `SELECT * FROM venta_cobros_extra
+         WHERE venta_id = ANY($1)
+         ORDER BY venta_id, id`,
+        [ventaIds]
+      ).catch(() => [] as any[]),
     ]);
 
-    const pagosPorVenta = new Map<number, typeof pagos>();
+    const pagosPorVenta = new Map<any, typeof pagos>();
     for (const p of pagos) {
       const lista = pagosPorVenta.get(p.venta_id) || [];
       lista.push(p);
@@ -111,7 +169,7 @@ export async function GET(request: Request) {
     }
     const ventasConPagos = ventas.map((v) => ({ ...v, pagos: pagosPorVenta.get(v.id) || [] }));
 
-    const cobrosPorVenta = new Map<number, typeof cobros>();
+    const cobrosPorVenta = new Map<any, typeof cobros>();
     for (const c of cobros) {
       const lista = cobrosPorVenta.get(c.venta_id) || [];
       lista.push(c);
@@ -122,7 +180,25 @@ export async function GET(request: Request) {
       cobros_extra: cobrosPorVenta.get(v.id) || [],
     }));
 
-    return NextResponse.json({ ventas: ventasCompletas, items });
+    const totalFinal = total || ventas.length;
+    const totalPages = limit ? Math.ceil(totalFinal / limit) : 1;
+    const nextCursor = ventas.length > 0 ? String(ventas[ventas.length - 1].id) : null;
+    const prevCursor = ventas.length > 0 ? String(ventas[0].id) : null;
+    const hasMore = limit ? (page ? page * limit < totalFinal : ventas.length === limit) : false;
+
+    return NextResponse.json({
+      ventas: ventasCompletas,
+      items,
+      pagination: {
+        page: page ?? 1,
+        limit: limit ?? ventas.length,
+        total: totalFinal,
+        totalPages,
+        nextCursor,
+        prevCursor,
+        hasMore,
+      },
+    });
   } catch (error) {
     return NextResponse.json({ error: "Error al obtener ventas" }, { status: 500 });
   }

@@ -217,13 +217,14 @@ export async function syncMobileWithCloud(): Promise<{
     }
   };
 
-  const [pullRes, monedasDirect, cfgGlobalDirect, clientesDirect, creditosDirect] =
+  const [pullRes, monedasDirect, cfgGlobalDirect, clientesDirect, creditosDirect, ventasDirect] =
     await Promise.all([
       fetch(syncUrl, { method: "GET", headers }),
       fetchJsonSafe(`${serverUrl}/api/monedas`),
       fetchJsonSafe(`${serverUrl}/api/configuracion-global`),
       fetchJsonSafe(`${serverUrl}/api/clientes?limit=500`),
       fetchJsonSafe(`${serverUrl}/api/creditos`),
+      fetchJsonSafe(`${serverUrl}/api/ventas?limit=150`),
     ]);
 
   const pullText = await pullRes.text();
@@ -258,6 +259,14 @@ export async function syncMobileWithCloud(): Promise<{
     Array.isArray(creditosDirect?.creditos) && creditosDirect.creditos.length > 0
       ? creditosDirect.creditos
       : delta.tables?.creditos;
+  const ventasMerged =
+    Array.isArray(ventasDirect?.ventas) && ventasDirect.ventas.length > 0
+      ? ventasDirect.ventas
+      : delta.tables?.ventas;
+  const ventaItemsMerged =
+    Array.isArray(ventasDirect?.items) && ventasDirect.items.length > 0
+      ? ventasDirect.items
+      : delta.tables?.venta_items;
 
   await saveCatalogOffline({
     configuracion_global: cfgGlobalDirect || delta.tables?.configuracion_global,
@@ -271,8 +280,8 @@ export async function syncMobileWithCloud(): Promise<{
     producto_presentaciones: delta.tables?.producto_presentaciones,
     creditos: creditosMerged,
     abonos: delta.tables?.abonos,
-    ventas: delta.tables?.ventas,
-    venta_items: delta.tables?.venta_items,
+    ventas: ventasMerged,
+    venta_items: ventaItemsMerged,
     eliminados: delta.eliminados,
   });
 
