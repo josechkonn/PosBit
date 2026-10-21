@@ -14,8 +14,12 @@ import {
   Modal,
   AppState,
   Share,
+  Image,
+  PanResponder,
+  Animated,
 } from "react-native";
-import { Feather } from "@expo/vector-icons";
+import { useFonts } from "expo-font";
+import Feather from "@expo/vector-icons/Feather";
 import {
   LocalMoneda,
   LocalConfiguracionGlobal,
@@ -177,6 +181,7 @@ function getMetodoEmoji(tipo?: string, nombre?: string): string {
 }
 
 export default function App() {
+  const [fontsLoaded] = useFonts(Feather.font);
   const [booting, setBooting] = useState(true);
   const [session, setSession] = useState<{
     serverUrl: string;
@@ -258,6 +263,45 @@ export default function App() {
   const [grantingCredit, setGrantingCredit] = useState(false);
   const [limiteInputStr, setLimiteInputStr] = useState("");
   const [receiptModal, setReceiptModal] = useState<any | null>(null);
+
+  // Modal Finalizar Venta: Arrastrar hacia abajo para cerrar (PanResponder suave)
+  const checkoutSheetTranslateY = useRef(new Animated.Value(0)).current;
+  const checkoutPanResponder = useRef(
+    PanResponder.create({
+      onStartShouldSetPanResponder: () => false,
+      onMoveShouldSetPanResponder: (_, gs) => {
+        return gs.dy > 8 && Math.abs(gs.dy) > Math.abs(gs.dx);
+      },
+      onPanResponderMove: (_, gs) => {
+        if (gs.dy > 0) {
+          checkoutSheetTranslateY.setValue(gs.dy);
+        }
+      },
+      onPanResponderRelease: (_, gs) => {
+        if (gs.dy > 110 || gs.vy > 0.5) {
+          Animated.timing(checkoutSheetTranslateY, {
+            toValue: 650,
+            duration: 180,
+            useNativeDriver: true,
+          }).start(() => {
+            setShowCheckoutModal(false);
+            checkoutSheetTranslateY.setValue(0);
+          });
+        } else {
+          Animated.spring(checkoutSheetTranslateY, {
+            toValue: 0,
+            bounciness: 4,
+            useNativeDriver: true,
+          }).start();
+        }
+      },
+    })
+  ).current;
+
+  const handleCloseCheckout = useCallback(() => {
+    setShowCheckoutModal(false);
+    checkoutSheetTranslateY.setValue(0);
+  }, [checkoutSheetTranslateY]);
 
   // Clientes Module & Perfil del Cliente State
   const [clientesSearch, setClientesSearch] = useState("");
@@ -415,6 +459,9 @@ export default function App() {
     })();
   }, [refreshLocalState]);
 
+  const posSearchRef = useRef(posSearch);
+  posSearchRef.current = posSearch;
+
   const runSilentSync = useCallback(async () => {
     if (!session || syncInFlightRef.current) return;
     syncInFlightRef.current = true;
@@ -422,7 +469,7 @@ export default function App() {
     try {
       await syncMobileWithCloud();
       setSyncOnline(true);
-      await refreshLocalState(posSearch);
+      await refreshLocalState(posSearchRef.current);
     } catch (err) {
       console.warn("Silent sync warning:", err);
       setSyncOnline(false);
@@ -430,12 +477,12 @@ export default function App() {
       syncInFlightRef.current = false;
       setSyncing(false);
     }
-  }, [session, refreshLocalState, posSearch]);
+  }, [session, refreshLocalState]);
 
   useEffect(() => {
     if (!session) return;
     runSilentSync();
-    const interval = setInterval(runSilentSync, AUTO_SYNC_INTERVAL_MS);
+    const interval = setInterval(runSilentSync, 45_000);
     const sub = AppState.addEventListener("change", (nextState) => {
       if (nextState === "active") runSilentSync();
     });
@@ -447,7 +494,10 @@ export default function App() {
 
   useEffect(() => {
     if (!session) return;
-    getLocalProductos(posSearch).then(setProductos);
+    const t = setTimeout(() => {
+      getLocalProductos(posSearch).then(setProductos);
+    }, 200);
+    return () => clearTimeout(t);
   }, [posSearch, session]);
 
   // ── Motor Oficial de Monedas y Conversión (idéntico a src/lib/money.ts de la Web) ──
@@ -964,6 +1014,7 @@ export default function App() {
     }
     setCheckoutClientSearch("");
     setCheckoutClientDropdownOpen(false);
+    checkoutSheetTranslateY.setValue(0);
     setShowCheckoutModal(true);
   }, [
     cart.length,
@@ -1156,7 +1207,7 @@ export default function App() {
           items: itemsPayload,
         });
 
-        setShowCheckoutModal(false);
+        handleCloseCheckout();
         setReceiptModal({
           numero: ventaCreada.numero,
           fecha: ventaCreada.fecha,
@@ -2106,7 +2157,7 @@ export default function App() {
   );
 
   // ── Loading Screen ──
-  if (booting) {
+  if (booting || !fontsLoaded) {
     return (
       <View style={styles.centerScreen}>
         <StatusBar barStyle="dark-content" backgroundColor={THEME.background} />
@@ -2127,9 +2178,11 @@ export default function App() {
           <View style={styles.loginCard}>
             <View style={styles.loginAccentBar} />
             <View style={styles.loginBrandRow}>
-              <View style={styles.brandLogoBox}>
-                <Text style={styles.brandLogoLetter}>P</Text>
-              </View>
+              <Image
+                source={require("./assets/logo.png")}
+                style={styles.brandLogoImage}
+                resizeMode="contain"
+              />
               <View>
                 <Text style={styles.loginTitle}>PosBit</Text>
                 <Text style={styles.loginSubtitle}>Punto de Venta e Inventario</Text>
@@ -2243,9 +2296,11 @@ export default function App() {
           style={styles.topbarBrand}
           onPress={() => setRoute(route === "pos" ? "dashboard" : "pos")}
         >
-          <View style={styles.topbarLogoSmall}>
-            <Text style={styles.topbarLogoSmallText}>P</Text>
-          </View>
+          <Image
+            source={require("./assets/logo.png")}
+            style={{ width: 28, height: 28, borderRadius: 7 }}
+            resizeMode="contain"
+          />
           <View>
             <Text style={styles.topbarTitle} numberOfLines={1}>
               {routeTitle[route]}
@@ -2568,6 +2623,10 @@ export default function App() {
                 numColumns={2}
                 columnWrapperStyle={{ gap: 10, paddingHorizontal: 12 }}
                 contentContainerStyle={{ paddingTop: 10, paddingBottom: 110, gap: 10 }}
+                initialNumToRender={8}
+                maxToRenderPerBatch={8}
+                windowSize={5}
+                removeClippedSubviews={Platform.OS === "android"}
                 renderItem={({ item }) => {
                   const inCartQty = cart
                     .filter((c) => c.product.id === item.id)
@@ -2588,7 +2647,7 @@ export default function App() {
                     >
                       <View style={styles.posProdTopRow}>
                         <View style={styles.posProdIconWrap}>
-                          <Feather name="package" size={18} color={THEME.primary} />
+                          <Feather name="package" size={16} color={THEME.primary} />
                         </View>
                         <View style={{ flexDirection: "row", alignItems: "center", gap: 4 }}>
                           {item.iva_incluido === 0 && (
@@ -2596,6 +2655,29 @@ export default function App() {
                               <Text style={styles.ivaBadgeText}>+IVA</Text>
                             </View>
                           )}
+                          <View
+                            style={[
+                              styles.stockBadge,
+                              sinStock
+                                ? styles.stockBadgeDanger
+                                : bajoStock
+                                ? styles.stockBadgeWarning
+                                : styles.stockBadgeSuccess,
+                            ]}
+                          >
+                            <Text
+                              style={[
+                                styles.stockBadgeText,
+                                sinStock
+                                  ? { color: THEME.dangerStrong }
+                                  : bajoStock
+                                  ? { color: THEME.warningStrong }
+                                  : { color: THEME.successStrong },
+                              ]}
+                            >
+                              {sinStock ? "Agotado" : `Stock: ${item.stock}`}
+                            </Text>
+                          </View>
                           {inCartQty > 0 && (
                             <View style={styles.inCartCountBadge}>
                               <Text style={styles.inCartCountBadgeText}>{inCartQty}</Text>
@@ -2629,12 +2711,13 @@ export default function App() {
                         </View>
                       )}
 
+                      {/* Footer con el precio completo sin recortar */}
                       <View style={styles.posProdFooter}>
-                        <View style={{ flex: 1, minWidth: 0, paddingRight: 4 }}>
+                        <View style={{ width: "100%" }}>
                           <Text style={styles.posProdPrice} numberOfLines={1}>
                             {fmt(precioMostrado, monedaSeleccionada)}
                           </Text>
-                          <View style={{ flexDirection: "row", gap: 4, flexWrap: "wrap", marginTop: 2 }}>
+                          <View style={{ flexDirection: "row", gap: 6, flexWrap: "wrap", marginTop: 2 }}>
                             {monedas
                               .filter((m) => m.codigo !== monedaSeleccionada)
                               .map((m) => {
@@ -2649,29 +2732,6 @@ export default function App() {
                                 );
                               })}
                           </View>
-                        </View>
-                        <View
-                          style={[
-                            styles.stockBadge,
-                            sinStock
-                              ? styles.stockBadgeDanger
-                              : bajoStock
-                              ? styles.stockBadgeWarning
-                              : styles.stockBadgeSuccess,
-                          ]}
-                        >
-                          <Text
-                            style={[
-                              styles.stockBadgeText,
-                              sinStock
-                                ? { color: THEME.dangerStrong }
-                                : bajoStock
-                                ? { color: THEME.warningStrong }
-                                : { color: THEME.successStrong },
-                            ]}
-                          >
-                            {sinStock ? "Agotado" : `Stock: ${item.stock}`}
-                          </Text>
                         </View>
                       </View>
                     </TouchableOpacity>
@@ -4936,9 +4996,16 @@ export default function App() {
         <View style={styles.drawerOverlay}>
           <View style={styles.sidebarDrawer}>
             <View style={styles.sidebarHeader}>
-              <View>
-                <Text style={styles.sidebarBrandTitle}>PosBit</Text>
-                <Text style={styles.sidebarBrandSub}>Inventario & POS v2.6</Text>
+              <View style={{ flexDirection: "row", alignItems: "center", gap: 10 }}>
+                <Image
+                  source={require("./assets/logo.png")}
+                  style={{ width: 34, height: 34, borderRadius: 8 }}
+                  resizeMode="contain"
+                />
+                <View>
+                  <Text style={styles.sidebarBrandTitle}>PosBit</Text>
+                  <Text style={styles.sidebarBrandSub}>Inventario & POS v2.6</Text>
+                </View>
               </View>
               <TouchableOpacity onPress={() => setDrawerOpen(false)}>
                 <Feather name="x" size={20} color={THEME.sidebarForeground} />
@@ -5052,15 +5119,31 @@ export default function App() {
         visible={showCheckoutModal}
         transparent
         animationType="slide"
-        onRequestClose={() => setShowCheckoutModal(false)}
+        onRequestClose={handleCloseCheckout}
       >
         <View style={styles.modalBackdrop}>
-          <View style={styles.modalSheet}>
-            <View style={styles.modalHeader}>
-              <Text style={styles.modalTitle}>Finalizar Venta</Text>
-              <TouchableOpacity onPress={() => setShowCheckoutModal(false)}>
-                <Feather name="x" size={20} color={THEME.mutedForeground} />
-              </TouchableOpacity>
+          <TouchableOpacity
+            style={{ flex: 1 }}
+            activeOpacity={1}
+            onPress={handleCloseCheckout}
+          />
+          <Animated.View
+            style={[
+              styles.modalSheet,
+              {
+                transform: [{ translateY: checkoutSheetTranslateY }],
+              },
+            ]}
+          >
+            {/* Tirador táctil visual para arrastrar hacia abajo */}
+            <View {...checkoutPanResponder.panHandlers} style={styles.dragHandleTouchArea}>
+              <View style={styles.dragHandleBar} />
+              <View style={styles.modalHeader}>
+                <Text style={styles.modalTitle}>Finalizar Venta</Text>
+                <TouchableOpacity onPress={handleCloseCheckout}>
+                  <Feather name="x" size={20} color={THEME.mutedForeground} />
+                </TouchableOpacity>
+              </View>
             </View>
 
             {(() => {
@@ -5807,7 +5890,7 @@ export default function App() {
             </ScrollView>
             );
           })()}
-          </View>
+          </Animated.View>
         </View>
       </Modal>
 
@@ -7177,6 +7260,11 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
   },
+  brandLogoImage: {
+    width: 48,
+    height: 48,
+    borderRadius: 12,
+  },
   brandLogoLetter: {
     color: "#fff",
     fontSize: 22,
@@ -7657,15 +7745,15 @@ const styles = StyleSheet.create({
   },
   posProdFooter: {
     marginTop: 8,
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
-    gap: 4,
+    flexDirection: "column",
+    alignItems: "flex-start",
+    width: "100%",
   },
   posProdPrice: {
-    fontSize: 14,
+    fontSize: 14.5,
     fontWeight: "800",
     color: THEME.primary,
+    letterSpacing: -0.2,
   },
   stockBadge: {
     paddingHorizontal: 6,
@@ -8416,6 +8504,18 @@ const styles = StyleSheet.create({
     borderTopRightRadius: 18,
     padding: 16,
     maxHeight: "92%",
+  },
+  dragHandleTouchArea: {
+    paddingTop: 4,
+    paddingBottom: 4,
+  },
+  dragHandleBar: {
+    width: 44,
+    height: 5,
+    borderRadius: 3,
+    backgroundColor: THEME.mutedForeground + "40",
+    alignSelf: "center",
+    marginBottom: 10,
   },
   modalHeader: {
     flexDirection: "row",

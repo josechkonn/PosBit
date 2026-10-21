@@ -11,6 +11,7 @@
     "build:apk": "eas build --platform android --profile apk"
   },
   "dependencies": {
+    "@expo/vector-icons": "~14.0.4",
     "@react-native-community/netinfo": "11.4.1",
     "expo": "~52.0.0",
     "expo-asset": "~11.0.5",
