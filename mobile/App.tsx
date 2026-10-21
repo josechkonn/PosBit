@@ -191,8 +191,8 @@ export default function App() {
   // Login Form
   const [serverUrlInput, setServerUrlInput] = useState(DEFAULT_CLOUD_URL);
   const [showAdvancedServer, setShowAdvancedServer] = useState(false);
-  const [emailInput, setEmailInput] = useState("");
-  const [passwordInput, setPasswordInput] = useState("");
+  const [emailInput, setEmailInput] = useState("admin@admin.com");
+  const [passwordInput, setPasswordInput] = useState("123123123");
   const [loginLoading, setLoginLoading] = useState(false);
   const [loginError, setLoginError] = useState<string | null>(null);
 
@@ -252,6 +252,9 @@ export default function App() {
   // POS Checkout Modal State
   const [showCheckoutModal, setShowCheckoutModal] = useState(false);
   const [showMetodoPickerModal, setShowMetodoPickerModal] = useState(false);
+  const [checkoutMetodoDropdownOpen, setCheckoutMetodoDropdownOpen] = useState(false);
+  const checkoutScrollRef = useRef<ScrollView>(null);
+  const checkoutClientSearchRef = useRef<TextInput>(null);
   const [modoMixto, setModoMixto] = useState(false);
   const [lineasPago, setLineasPago] = useState<LineaPago[]>([]);
   const [cobrosExtra, setCobrosExtra] = useState<CobroExtra[]>([]);
@@ -409,36 +412,28 @@ export default function App() {
 
     if (m.length > 0) {
       setMonedaSeleccionada((prev) => {
+        if (prev && m.some((x) => x.codigo === prev)) return prev;
         const cop = m.find((x) => x.codigo === "COP");
         if (cop) return "COP";
-        if (prev && m.some((x) => x.codigo === prev)) return prev;
         const base = m.find((x) => x.es_base === 1) || m[0];
         return base.codigo;
       });
     }
     if (mp.length > 0) {
-      const mpCop = mp.find((x) => x.moneda_codigo === "COP") || mp[0];
       setMetodoPagoSeleccionado((prev) => {
         if (prev && mp.some((x) => String(x.id) === String(prev))) {
-          const cur = mp.find((x) => String(x.id) === String(prev));
-          if (cur?.moneda_codigo !== "COP" && mp.some((x) => x.moneda_codigo === "COP")) {
-            return String(mpCop.id);
-          }
           return prev;
         }
+        const mpCop = mp.find((x) => x.moneda_codigo === "COP") || mp[0];
         return String(mpCop.id);
       });
       setCajaSeleccionada((prev) => {
-        if (prev) {
-          if (mpCop?.moneda_codigo === "COP") {
-            const cur = mp.find((x) => String(x.id) === String(metodoPagoSeleccionado));
-            if (cur?.moneda_codigo !== "COP") {
-              return mpCop.caja_id ? String(mpCop.caja_id) : prev;
-            }
-          }
+        if (prev && c.some((cx) => String(cx.id) === String(prev))) {
           return prev;
         }
-        return mpCop.caja_id ? String(mpCop.caja_id) : c[0]?.id ? String(c[0].id) : "";
+        const curMp = mp.find((x) => String(x.id) === String(metodoPagoSeleccionado));
+        if (curMp?.caja_id) return String(curMp.caja_id);
+        return c[0]?.id ? String(c[0].id) : "";
       });
     }
   }, []);
@@ -925,10 +920,18 @@ export default function App() {
     [subtotal, descuentoTotal, tax, totalCobrosExtraEnMoneda, monedaSeleccionada]
   );
 
-  // Total del carrito expresado en cualquier moneda con la regla de precios y tasas del POS
-  const calcularTotalEnMoneda = useCallback(
-    (codMoneda: string): number => {
-      if (!codMoneda || codMoneda === monedaSeleccionada) return total;
+  // Desglose del carrito expresado en cualquier moneda con la regla de precios y tasas del POS
+  const calcularDesgloseEnMoneda = useCallback(
+    (codMoneda: string) => {
+      if (!codMoneda || codMoneda === monedaSeleccionada) {
+        return {
+          subtotal,
+          impuesto: tax,
+          descuento: descuentoTotal,
+          cobrosExtra: totalCobrosExtraEnMoneda(monedaSeleccionada),
+          total,
+        };
+      }
       let sub = 0;
       let taxMoneda = 0;
       for (const c of cart) {
@@ -942,9 +945,25 @@ export default function App() {
       const dec = decMoneda(codMoneda);
       const factor = Math.pow(10, dec);
       const descuentoMoneda = Math.round(descuentoTotal * escala * factor) / factor;
-      return Math.max(0, sub - descuentoMoneda + taxMoneda + totalCobrosExtraEnMoneda(codMoneda));
+      const cobros = totalCobrosExtraEnMoneda(codMoneda);
+      const tot = Math.max(0, sub - descuentoMoneda + taxMoneda + cobros);
+      return {
+        subtotal: sub,
+        impuesto: taxMoneda,
+        descuento: descuentoMoneda,
+        cobrosExtra: cobros,
+        total: tot,
+      };
     },
-    [cart, total, monedaSeleccionada, totalLineaEnMoneda, subtotal, descuentoTotal, decMoneda, totalCobrosExtraEnMoneda]
+    [cart, total, monedaSeleccionada, totalLineaEnMoneda, subtotal, tax, descuentoTotal, decMoneda, totalCobrosExtraEnMoneda]
+  );
+
+  // Total del carrito expresado en cualquier moneda con la regla de precios y tasas del POS
+  const calcularTotalEnMoneda = useCallback(
+    (codMoneda: string): number => {
+      return calcularDesgloseEnMoneda(codMoneda).total;
+    },
+    [calcularDesgloseEnMoneda]
   );
 
   const clienteSeleccionadoObj = useMemo(
@@ -981,16 +1000,23 @@ export default function App() {
   // Cálculos de Pago Simple / Mixto en el Modal de Checkout
   const totalPagadoEnMonedaVenta = useMemo(() => {
     return lineasPago.reduce((acc, lp) => {
-      const m = parseFloat(lp.montoStr.replace(",", "."));
-      if (!Number.isFinite(m) || m <= 0) return acc;
       const mp = metodosPago.find((x) => String(x.id) === String(lp.metodoId));
       const codLinea = mp?.moneda_codigo || monedaSeleccionada;
+      const strVal = lp.montoStr.trim();
+      const vacio = strVal === "";
       if (!modoMixto && lineasPago.length === 1) {
+        if (vacio) {
+          return total;
+        }
         const totalEsperado = calcularTotalEnMoneda(codLinea);
+        const m = parseFloat(strVal.replace(",", "."));
         if (Math.abs(m - totalEsperado) <= 0.005) {
           return total;
         }
+        return convertirMonto(m, codLinea, monedaSeleccionada, "ventas");
       }
+      const m = parseFloat(strVal.replace(",", "."));
+      if (!Number.isFinite(m) || m <= 0) return acc;
       return acc + convertirMonto(m, codLinea, monedaSeleccionada, "ventas");
     }, 0);
   }, [lineasPago, metodosPago, monedaSeleccionada, convertirMonto, modoMixto, calcularTotalEnMoneda, total]);
@@ -998,15 +1024,15 @@ export default function App() {
   const faltaPorPagar = Math.max(0, Math.round((total - totalPagadoEnMonedaVenta) * 100) / 100);
   const vueltoEnMonedaVenta = Math.max(0, Math.round((totalPagadoEnMonedaVenta - total) * 100) / 100);
 
-  // Información de Crédito del Cliente Seleccionado en la Moneda de la Venta
+  // Información de Crédito del Cliente Seleccionado en la Moneda de la Venta / Método
   const infoCreditoCliente = useMemo(() => {
     if (!clienteSeleccionadoObj) return null;
-    const limRow = clienteSeleccionadoObj.limites_credito.find(
-      (l) => l.codigo === monedaSeleccionada
+    const mpObj = metodosPago.find(
+      (m) => String(m.id) === String(lineasPago[0]?.metodoId || metodoPagoSeleccionado)
     );
-    const deudaRow = clienteSeleccionadoObj.deuda_total.find(
-      (d) => d.codigo === monedaSeleccionada
-    );
+    const cod = !modoMixto && mpObj?.moneda_codigo ? mpObj.moneda_codigo : monedaSeleccionada;
+    const limRow = clienteSeleccionadoObj.limites_credito.find((l) => l.codigo === cod);
+    const deudaRow = clienteSeleccionadoObj.deuda_total.find((d) => d.codigo === cod);
     const limite = Number(limRow?.limite ?? 0);
     const deuda = Number(deudaRow?.monto ?? 0);
     const disponible = Math.max(0, limite - deuda);
@@ -1015,15 +1041,26 @@ export default function App() {
       limite,
       deuda,
       disponible,
+      monedaCodigo: cod,
     };
-  }, [clienteSeleccionadoObj, monedaSeleccionada]);
+  }, [
+    clienteSeleccionadoObj,
+    monedaSeleccionada,
+    modoMixto,
+    lineasPago,
+    metodoPagoSeleccionado,
+    metodosPago,
+  ]);
 
   const clienteSinCreditoSuficiente = useMemo(() => {
     if (!clienteSeleccionadoObj) return false;
     if (!infoCreditoCliente) return true;
     if (!infoCreditoCliente.recibe) return true;
-    return infoCreditoCliente.disponible < total;
-  }, [clienteSeleccionadoObj, infoCreditoCliente, total]);
+    const totalAVerificar = (!modoMixto && infoCreditoCliente.monedaCodigo)
+      ? calcularTotalEnMoneda(infoCreditoCliente.monedaCodigo)
+      : total;
+    return infoCreditoCliente.disponible < totalAVerificar;
+  }, [clienteSeleccionadoObj, infoCreditoCliente, modoMixto, calcularTotalEnMoneda, total]);
 
   // Abrir Modal de Checkout inicializando la línea de pago en la moneda del método seleccionado
   const handleOpenCheckout = useCallback(() => {
@@ -1046,7 +1083,7 @@ export default function App() {
       {
         key: 1,
         metodoId: mpDefaultId,
-        montoStr: totalEnMonedaMetodo.toFixed(dec),
+        montoStr: "",
       },
     ]);
     if (infoCreditoCliente) {
@@ -1083,7 +1120,7 @@ export default function App() {
           {
             key: 1,
             metodoId: mpId,
-            montoStr: totalEnMoneda.toFixed(dec),
+            montoStr: "",
           },
         ]);
       }
@@ -1093,26 +1130,28 @@ export default function App() {
 
   // Otorgar o ajustar límite de crédito directamente desde el Checkout
   const handleAjustarLimiteCheckout = useCallback(
-    async (nuevoLimite: number) => {
-      if (!clienteSeleccionadoObj || !activeMonedaObj) return;
+    async (nuevoLimite: number, codMonedaOverride?: string) => {
+      const cod = codMonedaOverride || monedaSeleccionada;
+      const targetMoneda = monedas.find((m) => m.codigo === cod) || activeMonedaObj;
+      if (!clienteSeleccionadoObj || !targetMoneda) return;
       setGrantingCredit(true);
       try {
         await patchClienteLimiteCloud({
           id: clienteSeleccionadoObj.id,
-          moneda_id: activeMonedaObj.id,
+          moneda_id: targetMoneda.id,
           limite: Math.max(0, nuevoLimite),
           recibe_credito: true,
         });
         await refreshLocalState(posSearch);
         setLimiteInputStr(String(Math.max(0, nuevoLimite)));
-        showToast(`Límite en ${monedaSeleccionada} actualizado a ${fmt(nuevoLimite)}`, "success");
+        showToast(`Límite en ${targetMoneda.codigo} actualizado a ${fmt(nuevoLimite, targetMoneda.codigo)}`, "success");
       } catch (e: any) {
         showToast(e?.message || "Error al actualizar límite", "error");
       } finally {
         setGrantingCredit(false);
       }
     },
-    [clienteSeleccionadoObj, activeMonedaObj, refreshLocalState, posSearch, monedaSeleccionada, fmt, showToast]
+    [clienteSeleccionadoObj, activeMonedaObj, refreshLocalState, posSearch, monedaSeleccionada, monedas, fmt, showToast]
   );
 
   // Procesar Venta (Contado, Todo a Crédito o Parcial / Mixto)
@@ -1123,33 +1162,59 @@ export default function App() {
       const isCreditoTotal = modeOverride === "credito";
       const isPagoCompleto = modeOverride === "completo";
 
+      const metodoObj =
+        metodosPago.find((m) => String(m.id) === String(metodoPagoSeleccionado)) ||
+        metodosPago[0] ||
+        null;
+
+      const codVentaFinal =
+        !modoMixto && metodoObj?.moneda_codigo ? metodoObj.moneda_codigo : monedaSeleccionada;
+      const monedaFinalObj =
+        monedas.find((m) => m.codigo === codVentaFinal) || activeMonedaObj;
+
+      const desglose = calcularDesgloseEnMoneda(codVentaFinal);
+      const totalFinal = desglose.total;
+
+      const strSimple = (lineasPago[0]?.montoStr ?? "").trim();
+      const vacioSimple = !modoMixto && strSimple === "";
+      const montoSimpleTyped = parseFloat(strSimple.replace(",", ".")) || 0;
+
       const montoPagadoFinal = isCreditoTotal
         ? 0
-        : isPagoCompleto
-        ? total
-        : Math.min(total, totalPagadoEnMonedaVenta);
+        : isPagoCompleto || vacioSimple
+        ? totalFinal
+        : Math.min(
+            totalFinal,
+            modoMixto
+              ? totalPagadoEnMonedaVenta
+              : montoSimpleTyped
+          );
 
-      const saldoACredito = Math.max(0, Math.round((total - montoPagadoFinal) * 100) / 100);
+      const saldoACredito = Math.max(0, Math.round((totalFinal - montoPagadoFinal) * 100) / 100);
       const usaCredito = isCreditoTotal || saldoACredito > 0.009;
 
       if (usaCredito && !clienteSeleccionadoObj) {
-        showToast("Selecciona un cliente para registrar una venta a crédito", "error");
+        showToast("Selecciona un cliente para registrar la venta a crédito", "error");
+        setCheckoutClientDropdownOpen(true);
+        checkoutScrollRef.current?.scrollTo({ y: 0, animated: true });
+        setTimeout(() => {
+          checkoutClientSearchRef.current?.focus();
+        }, 100);
         return;
       }
 
       if (usaCredito) {
-        if (clienteSinCreditoSuficiente) {
+        const limRow = clienteSeleccionadoObj?.limites_credito.find((l) => l.codigo === codVentaFinal);
+        const deudaRow = clienteSeleccionadoObj?.deuda_total.find((d) => d.codigo === codVentaFinal);
+        const limVal = Number(limRow?.limite ?? 0);
+        const deuVal = Number(deudaRow?.monto ?? 0);
+        const dispVal = Math.max(0, limVal - deuVal);
+        const recibeCred = clienteSeleccionadoObj?.recibe_credito === 1;
+
+        if (!recibeCred || dispVal < saldoACredito - 0.01) {
           setCreditoSolicitado(true);
           showToast(
-            `${clienteSeleccionadoObj?.nombre} no tiene crédito suficiente en ${monedaSeleccionada}. Pulsa "Otorgar Crédito Rápido".`,
-            "error"
-          );
-          return;
-        }
-        if (infoCreditoCliente && saldoACredito > infoCreditoCliente.disponible + 0.01) {
-          setCreditoSolicitado(true);
-          showToast(
-            `El monto a crédito (${fmt(saldoACredito)}) supera el disponible (${fmt(infoCreditoCliente.disponible)})`,
+            `${clienteSeleccionadoObj?.nombre} no tiene crédito suficiente en ${codVentaFinal}. Pulsa "Otorgar Crédito Rápido".`,
             "error"
           );
           return;
@@ -1158,14 +1223,9 @@ export default function App() {
 
       setSubmittingSale(true);
       try {
-        const metodoObj =
-          metodosPago.find((m) => String(m.id) === String(metodoPagoSeleccionado)) ||
-          metodosPago[0] ||
-          null;
-
         const itemsPayload = cart.map((c) => {
           const unidades = unidadesDeLinea(c);
-          const importeBruto = totalLineaEnMoneda(c, monedaSeleccionada);
+          const importeBruto = totalLineaEnMoneda(c, codVentaFinal);
           const precioExacto = importeBruto / (c.qty || 1);
           return {
             producto_id: c.product.id,
@@ -1175,12 +1235,12 @@ export default function App() {
             cantidad: unidades,
             precio_unit: precioExacto,
             subtotal: importeBruto,
-            descuento: descuentoDeLinea(c, monedaSeleccionada),
+            descuento: descuentoDeLinea(c, codVentaFinal),
             presentacion_id: c.presentacion?.id || null,
             presentacion_nombre: c.presentacion?.nombre || null,
             presentacion_unidades: c.presentacion?.unidades || null,
             cantidad_presentaciones: c.presentacion ? c.qty : null,
-            precio_presentacion: c.presentacion ? precioDeLineaEnMoneda(c, monedaSeleccionada) : null,
+            precio_presentacion: c.presentacion ? precioDeLineaEnMoneda(c, codVentaFinal) : null,
           };
         });
 
@@ -1190,28 +1250,27 @@ export default function App() {
                 .map((lp) => {
                   const m = parseFloat(lp.montoStr.replace(",", "."));
                   const mp = metodosPago.find((x) => String(x.id) === String(lp.metodoId));
-                  const mon = monedas.find((x) => x.codigo === (mp?.moneda_codigo || monedaSeleccionada));
+                  const mon = monedas.find((x) => x.codigo === (mp?.moneda_codigo || codVentaFinal));
                   return {
                     metodo_pago_id: lp.metodoId,
                     caja_id: mp?.caja_id || cajaSeleccionada || null,
-                    moneda_id: mon?.id || activeMonedaObj.id,
+                    moneda_id: mon?.id || monedaFinalObj.id,
                     monto: Number.isFinite(m) && m > 0 ? m : 0,
                   };
                 })
                 .filter((p) => p.monto > 0)
             : (() => {
                 const mp = metodoObj;
-                const mon = monedas.find((x) => x.codigo === (mp?.moneda_codigo || monedaSeleccionada));
-                const codMetodo = mp?.moneda_codigo || monedaSeleccionada;
-                const m = isPagoCompleto
-                  ? calcularTotalEnMoneda(codMetodo)
+                const mon = monedas.find((x) => x.codigo === (mp?.moneda_codigo || codVentaFinal));
+                const m = isPagoCompleto || vacioSimple
+                  ? totalFinal
                   : parseFloat((lineasPago[0]?.montoStr || "").replace(",", "."));
                 return Number.isFinite(m) && m > 0
                   ? [
                       {
                         metodo_pago_id: mp ? String(mp.id) : null,
                         caja_id: mp?.caja_id || cajaSeleccionada || null,
-                        moneda_id: mon?.id || activeMonedaObj.id,
+                        moneda_id: mon?.id || monedaFinalObj.id,
                         monto: m,
                       },
                     ]
@@ -1222,7 +1281,7 @@ export default function App() {
         const cobrosExtraPayload = cobrosExtra
           .map((ce) => {
             const m = parseFloat(ce.montoStr.replace(",", "."));
-            const mon = monedas.find((x) => x.codigo === ce.monedaCodigo) || activeMonedaObj;
+            const mon = monedas.find((x) => x.codigo === ce.monedaCodigo) || monedaFinalObj;
             return {
               descripcion: ce.concepto.trim() || "Cobro extra",
               monto: Number.isFinite(m) && m > 0 ? m : 0,
@@ -1234,14 +1293,14 @@ export default function App() {
         const ventaCreada = await createOfflineSale({
           cliente_id: clienteSeleccionadoObj?.id || null,
           cliente_nombre: clienteSeleccionadoObj?.nombre || "Consumidor Final",
-          moneda_id: activeMonedaObj.id,
+          moneda_id: monedaFinalObj.id,
           tipo_pago: usaCredito ? "Credito" : "Contado",
           metodo_pago_id: metodoObj ? String(metodoObj.id) : null,
           caja_id: metodoObj?.caja_id ? String(metodoObj.caja_id) : cajaSeleccionada || null,
-          subtotal,
-          impuesto: tax,
-          descuento: descuentoTotal,
-          total,
+          subtotal: desglose.subtotal,
+          impuesto: desglose.impuesto,
+          descuento: desglose.descuento,
+          total: totalFinal,
           monto_pagado: montoPagadoFinal,
           observaciones: observacionesVenta.trim() || undefined,
           pagos: pagosPayload,
@@ -1249,12 +1308,14 @@ export default function App() {
           items: itemsPayload,
         });
 
+        const vueltoFinal = Math.max(0, Math.round((montoPagadoFinal - totalFinal) * 100) / 100);
+
         handleCloseCheckout();
         setReceiptModal({
           numero: ventaCreada.numero,
           fecha: ventaCreada.fecha,
           cliente: ventaCreada.cliente_nombre,
-          moneda: monedaSeleccionada,
+          moneda: codVentaFinal,
           tipo_pago: usaCredito
             ? montoPagadoFinal > 0
               ? "Crédito Parcial"
@@ -1262,14 +1323,14 @@ export default function App() {
             : modoMixto
             ? "Pago Mixto"
             : metodoObj?.nombre || "Contado",
-          subtotal,
-          impuesto: tax,
-          descuento: descuentoTotal,
-          cobrosExtra: totalCobrosExtraEnMoneda(monedaSeleccionada),
-          total,
+          subtotal: desglose.subtotal,
+          impuesto: desglose.impuesto,
+          descuento: desglose.descuento,
+          cobrosExtra: desglose.cobrosExtra,
+          total: totalFinal,
           montoPagado: montoPagadoFinal,
           saldoCredito: saldoACredito,
-          vuelto: isPagoCompleto || isCreditoTotal ? 0 : vueltoEnMonedaVenta,
+          vuelto: isPagoCompleto || isCreditoTotal ? 0 : vueltoFinal,
           items: itemsPayload,
         });
 
@@ -1279,12 +1340,13 @@ export default function App() {
         setObservacionesVenta("");
         setCobrosExtra([]);
         setPosSubView("catalogo");
+        setSubmittingSale(false);
 
-        await refreshLocalState(posSearch);
+        // Actualizar en segundo plano sin congelar la UI
+        refreshLocalState(posSearch).catch((err) => console.warn("Error refreshing state:", err));
         runSilentSync();
       } catch (e: any) {
         showToast(e?.message || "No se pudo registrar la venta", "error");
-      } finally {
         setSubmittingSale(false);
       }
     },
@@ -1304,15 +1366,11 @@ export default function App() {
       lineasPago,
       monedas,
       cobrosExtra,
-      subtotal,
-      tax,
-      descuentoTotal,
+      calcularDesgloseEnMoneda,
       observacionesVenta,
       totalLineaEnMoneda,
       descuentoDeLinea,
       precioDeLineaEnMoneda,
-      totalCobrosExtraEnMoneda,
-      vueltoEnMonedaVenta,
       refreshLocalState,
       posSearch,
       runSilentSync,
@@ -2173,6 +2231,16 @@ export default function App() {
     return productos.filter((p) => String(p.categoria_id) === String(posCategoriaId));
   }, [productos, posCategoriaId]);
 
+  const cartQtyMap = useMemo(() => {
+    const map = new Map<number, number>();
+    for (let i = 0; i < cart.length; i++) {
+      const c = cart[i];
+      const pid = c.product.id;
+      map.set(pid, (map.get(pid) || 0) + unidadesDeLinea(c));
+    }
+    return map;
+  }, [cart]);
+
   const clientesFiltrados = useMemo(() => {
     const q = clientesSearch.trim().toLowerCase();
     if (!q) return clientes;
@@ -2703,17 +2771,16 @@ export default function App() {
               <FlatList
                 data={posProductosFiltrados}
                 keyExtractor={(item) => String(item.id)}
+                extraData={cartQtyMap}
                 numColumns={2}
                 columnWrapperStyle={{ gap: 10, paddingHorizontal: 12 }}
                 contentContainerStyle={{ paddingTop: 10, paddingBottom: 110, gap: 10 }}
-                initialNumToRender={8}
-                maxToRenderPerBatch={8}
+                initialNumToRender={10}
+                maxToRenderPerBatch={10}
                 windowSize={5}
                 removeClippedSubviews={Platform.OS === "android"}
                 renderItem={({ item }) => {
-                  const inCartQty = cart
-                    .filter((c) => c.product.id === item.id)
-                    .reduce((s, c) => s + unidadesDeLinea(c), 0);
+                  const inCartQty = cartQtyMap.get(item.id) || 0;
                   const sinStock = item.stock <= 0;
                   const bajoStock = item.stock > 0 && item.stock <= (item.stock_minimo || 5);
                   const precioMostrado = precioUnitarioEnMoneda(item, monedaSeleccionada);
@@ -5367,12 +5434,21 @@ export default function App() {
               const codMetodoActual = mpActualSimple?.moneda_codigo || monedaSeleccionada;
               const totalCobrarMetodo = calcularTotalEnMoneda(codMetodoActual);
               const dec = decMoneda(codMetodoActual);
-              const mRecibido = parseFloat((lineasPago[0]?.montoStr || "0").replace(",", ".")) || 0;
-              const vueltoSimple = Math.max(0, Math.round((mRecibido - totalCobrarMetodo) * 100) / 100);
-              const faltaSimple = Math.max(0, Math.round((totalCobrarMetodo - mRecibido) * 100) / 100);
+              const strVal = (lineasPago[0]?.montoStr ?? "").trim();
+              const vacioSimple = strVal === "";
+              const mRecibido = vacioSimple
+                ? totalCobrarMetodo
+                : parseFloat(strVal.replace(",", ".")) || 0;
+              const vueltoSimple = vacioSimple
+                ? 0
+                : Math.max(0, Math.round((mRecibido - totalCobrarMetodo) * 100) / 100);
+              const faltaSimple = vacioSimple
+                ? 0
+                : Math.max(0, Math.round((totalCobrarMetodo - mRecibido) * 100) / 100);
 
               return (
                 <ScrollView
+                  ref={checkoutScrollRef}
                   style={{ maxHeight: 540 }}
                   contentContainerStyle={{ gap: 12, paddingBottom: 16 }}
                   keyboardShouldPersistTaps="handled"
@@ -5443,6 +5519,7 @@ export default function App() {
                             color={checkoutClientDropdownOpen ? THEME.primary : THEME.mutedForeground}
                           />
                           <TextInput
+                            ref={checkoutClientSearchRef}
                             style={[styles.searchBoxInput, { fontSize: 13.5 }]}
                             placeholder="Buscar cliente por nombre, doc o tel..."
                             placeholderTextColor={THEME.mutedForeground}
@@ -5623,46 +5700,6 @@ export default function App() {
                       )}
                   </View>
 
-                  {/* Resumen Total a Cobrar + Botón Fiar / Todo a Crédito */}
-                  <View style={styles.checkoutTopSummary}>
-                    <View style={{ flex: 1 }}>
-                      <Text style={styles.fieldLabelSmall}>TOTAL A COBRAR ({codMetodoActual})</Text>
-                      <Text style={styles.checkoutBigTotal}>
-                        {fmt(totalCobrarMetodo, codMetodoActual)}
-                      </Text>
-                    </View>
-                    <TouchableOpacity
-                      style={[
-                        styles.primarySmallBtn,
-                        {
-                          backgroundColor: THEME.rose,
-                          borderColor: THEME.rose,
-                          paddingHorizontal: 10,
-                          paddingVertical: 7,
-                        },
-                      ]}
-                      onPress={() => {
-                        if (!clienteSeleccionadoObj) {
-                          showToast("Selecciona un cliente para registrar la venta a crédito", "error");
-                          setClientePickerSearch("");
-                          setShowClientePickerModal(true);
-                          return;
-                        }
-                        setCreditoSolicitado(true);
-                        if (clienteSinCreditoSuficiente) {
-                          showToast("Crédito insuficiente. Usa el botón Otorgar Crédito Rápido.", "info");
-                          return;
-                        }
-                        handleConfirmSale("credito");
-                      }}
-                    >
-                      <Feather name="clock" size={13} color="#fff" />
-                      <Text style={[styles.primarySmallBtnText, { color: "#fff", fontWeight: "800" }]}>
-                        Fiar / A Crédito
-                      </Text>
-                    </TouchableOpacity>
-                  </View>
-
                   {/* Cabecera Forma de Pago + Switch Pago Mixto */}
                   <View style={styles.checkoutSectionHeader}>
                     <Text style={styles.fieldLabelSmall}>
@@ -5693,19 +5730,23 @@ export default function App() {
                     /* Modo Simple: Selector compacto de Método de Pago + Monto Recibido */
                     <View style={{ gap: 10 }}>
                       <TouchableOpacity
-                        style={styles.metodoSelectTrigger}
-                        onPress={() => setShowMetodoPickerModal(true)}
+                        style={[
+                          styles.metodoSelectTrigger,
+                          checkoutMetodoDropdownOpen && { borderColor: THEME.primary },
+                        ]}
+                        activeOpacity={0.7}
+                        onPress={() => setCheckoutMetodoDropdownOpen((v) => !v)}
                       >
                         <View style={styles.metodoSelectIconWrap}>
                           <Text style={{ fontSize: 16 }}>
                             {getMetodoEmoji(mpActualSimple?.tipo, mpActualSimple?.nombre)}
                           </Text>
                         </View>
-                        <View style={{ flex: 1, minWidth: 0 }}>
-                          <Text style={styles.metodoSelectName} numberOfLines={1}>
+                        <View style={{ flex: 1, minWidth: 0, marginRight: 6 }}>
+                          <Text style={styles.metodoSelectName} numberOfLines={1} ellipsizeMode="tail">
                             {mpActualSimple?.nombre || "Seleccionar método de pago"}
                           </Text>
-                          <Text style={styles.metodoSelectSub}>
+                          <Text style={styles.metodoSelectSub} numberOfLines={1} ellipsizeMode="tail">
                             Moneda de cobro: {codMetodoActual}
                           </Text>
                         </View>
@@ -5713,12 +5754,70 @@ export default function App() {
                           <Text style={styles.metodoChipBadgeText}>{codMetodoActual}</Text>
                         </View>
                         <Feather
-                          name="chevron-down"
+                          name={checkoutMetodoDropdownOpen ? "chevron-up" : "chevron-down"}
                           size={18}
                           color={THEME.mutedForeground}
-                          style={{ marginLeft: 4 }}
+                          style={{ marginLeft: 4, flexShrink: 0 }}
                         />
                       </TouchableOpacity>
+
+                      {/* Dropdown Inline de Formas de Pago */}
+                      {checkoutMetodoDropdownOpen && (
+                        <View style={styles.checkoutMetodoDropdownList}>
+                          {metodosPago.map((mp) => {
+                            const isSel =
+                              String(lineasPago[0]?.metodoId || metodoPagoSeleccionado) === String(mp.id);
+                            return (
+                              <TouchableOpacity
+                                key={mp.id}
+                                style={[
+                                  styles.checkoutMetodoRow,
+                                  isSel && styles.checkoutMetodoRowActive,
+                                ]}
+                                activeOpacity={0.7}
+                                onPress={() => {
+                                  handleSelectMetodoCheckout(String(mp.id));
+                                  setCheckoutMetodoDropdownOpen(false);
+                                }}
+                              >
+                                <Text style={{ fontSize: 18, flexShrink: 0 }}>
+                                  {getMetodoEmoji(mp.tipo, mp.nombre)}
+                                </Text>
+                                <View style={{ flex: 1, minWidth: 0, marginHorizontal: 8 }}>
+                                  <Text
+                                    style={[
+                                      styles.checkoutMetodoName,
+                                      isSel && { color: THEME.primary600, fontWeight: "700" },
+                                    ]}
+                                    numberOfLines={1}
+                                    ellipsizeMode="tail"
+                                  >
+                                    {mp.nombre}
+                                  </Text>
+                                  {mp.moneda_codigo && (
+                                    <Text style={styles.clientCardMeta} numberOfLines={1} ellipsizeMode="tail">
+                                      Moneda: {mp.moneda_codigo}
+                                    </Text>
+                                  )}
+                                </View>
+                                {mp.moneda_codigo && (
+                                  <View style={styles.metodoChipBadge}>
+                                    <Text style={styles.metodoChipBadgeText}>{mp.moneda_codigo}</Text>
+                                  </View>
+                                )}
+                                {isSel && (
+                                  <Feather
+                                    name="check"
+                                    size={16}
+                                    color={THEME.primary}
+                                    style={{ marginLeft: 6, flexShrink: 0 }}
+                                  />
+                                )}
+                              </TouchableOpacity>
+                            );
+                          })}
+                        </View>
+                      )}
 
                       {/* Monto Recibido */}
                       <View>
@@ -5758,7 +5857,8 @@ export default function App() {
                         <TextInput
                           style={[styles.input, styles.montoIngresadoInput]}
                           keyboardType="decimal-pad"
-                          placeholder={`0.00 en ${codMetodoActual}`}
+                          placeholder={`Vacío = total (${fmt(totalCobrarMetodo, codMetodoActual)})`}
+                          placeholderTextColor={THEME.mutedForeground}
                           value={lineasPago[0]?.montoStr ?? ""}
                           onChangeText={(v) =>
                             setLineasPago([
@@ -5871,17 +5971,19 @@ export default function App() {
 
               {/* Resumen de Total Venta / Total Recibido / Falta (Crédito) / Vuelto */}
               <View style={styles.checkoutBalanceBanner}>
-                <View style={styles.summaryRow}>
-                  <Text style={[styles.summaryLabel, { fontSize: 13, fontWeight: "700" }]}>Total Venta:</Text>
-                  <Text style={[styles.summaryVal, { fontSize: 14, fontWeight: "800" }]}>
+                <View style={[styles.summaryRow, { alignItems: "baseline", marginBottom: 4 }]}>
+                  <Text style={[styles.summaryLabel, { fontSize: 15, fontWeight: "900", color: THEME.foreground }]}>
+                    Total Venta:
+                  </Text>
+                  <Text style={[styles.summaryVal, { fontSize: 24, fontWeight: "900", color: THEME.primary }]}>
                     {fmt(totalCobrarMetodo, codMetodoActual)}
                   </Text>
                 </View>
-                <View style={[styles.summaryRow, { marginTop: 3 }]}>
-                  <Text style={[styles.summaryLabel, { fontSize: 13.5, fontWeight: "800", color: THEME.foreground }]}>
+                <View style={[styles.summaryRow, { alignItems: "center", marginTop: 2 }]}>
+                  <Text style={[styles.summaryLabel, { fontSize: 12.5, fontWeight: "700", color: THEME.mutedForeground }]}>
                     Total Recibido:
                   </Text>
-                  <Text style={[styles.summaryVal, { fontSize: 17, fontWeight: "900", color: THEME.successStrong }]}>
+                  <Text style={[styles.summaryVal, { fontSize: 15, fontWeight: "800", color: THEME.successStrong }]}>
                     {fmt(
                       !modoMixto ? mRecibido : totalPagadoEnMonedaVenta,
                       !modoMixto ? codMetodoActual : monedaSeleccionada
@@ -6162,8 +6264,11 @@ export default function App() {
                     onPress={() => {
                       if (!clienteSeleccionadoObj) {
                         showToast("Selecciona un cliente para registrar la venta a crédito", "error");
-                        setClientePickerSearch("");
-                        setShowClientePickerModal(true);
+                        setCheckoutClientDropdownOpen(true);
+                        checkoutScrollRef.current?.scrollTo({ y: 0, animated: true });
+                        setTimeout(() => {
+                          checkoutClientSearchRef.current?.focus();
+                        }, 100);
                         return;
                       }
                       setCreditoSolicitado(true);
@@ -6192,6 +6297,8 @@ export default function App() {
                       <Text style={styles.checkoutActionBtnText}>
                         {(!modoMixto ? faltaSimple > 0.009 : faltaPorPagar > 0.009)
                           ? `Registrar Pago Parcial (${fmt(!modoMixto ? faltaSimple : faltaPorPagar, !modoMixto ? codMetodoActual : monedaSeleccionada)} a crédito)`
+                          : !modoMixto && vacioSimple
+                          ? "Confirmar Venta Completa"
                           : "Confirmar con Monto Ingresado"}
                       </Text>
                     </>
@@ -6203,82 +6310,6 @@ export default function App() {
           })()}
           </Animated.View>
         </View>
-      </Modal>
-
-      {/* ==================== MODAL SELECTOR DE FORMA DE PAGO EN POS ==================== */}
-      <Modal
-        visible={showMetodoPickerModal}
-        transparent
-        animationType="fade"
-        onRequestClose={() => setShowMetodoPickerModal(false)}
-      >
-        <TouchableOpacity
-          style={styles.modalBackdrop}
-          activeOpacity={1}
-          onPress={() => setShowMetodoPickerModal(false)}
-        >
-          <View style={[styles.modalSheet, { maxHeight: 460 }]}>
-            <View style={styles.modalHeader}>
-              <Text style={styles.modalTitle}>Forma de Pago</Text>
-              <TouchableOpacity onPress={() => setShowMetodoPickerModal(false)}>
-                <Feather name="x" size={20} color={THEME.mutedForeground} />
-              </TouchableOpacity>
-            </View>
-
-            <ScrollView
-              contentContainerStyle={{ gap: 8, paddingBottom: 16 }}
-              keyboardShouldPersistTaps="handled"
-            >
-              {metodosPago.map((mp) => {
-                const active =
-                  String(lineasPago[0]?.metodoId || metodoPagoSeleccionado) === String(mp.id);
-                return (
-                  <TouchableOpacity
-                    key={mp.id}
-                    style={[
-                      styles.simpleMethodRow,
-                      active && styles.simpleMethodRowActive,
-                    ]}
-                    onPress={() => {
-                      handleSelectMetodoCheckout(String(mp.id));
-                      setShowMetodoPickerModal(false);
-                    }}
-                  >
-                    <Text style={{ fontSize: 18 }}>{getMetodoEmoji(mp.tipo, mp.nombre)}</Text>
-                    <View style={{ flex: 1, minWidth: 0 }}>
-                      <Text
-                        style={[
-                          styles.simpleMethodName,
-                          active && { color: THEME.primary600, fontWeight: "700" },
-                        ]}
-                      >
-                        {mp.nombre}
-                      </Text>
-                      {mp.moneda_codigo && (
-                        <Text style={styles.clientCardMeta}>
-                          Moneda: {mp.moneda_codigo}
-                        </Text>
-                      )}
-                    </View>
-                    {mp.moneda_codigo && (
-                      <View style={styles.metodoChipBadge}>
-                        <Text style={styles.metodoChipBadgeText}>{mp.moneda_codigo}</Text>
-                      </View>
-                    )}
-                    {active && (
-                      <Feather
-                        name="check"
-                        size={18}
-                        color={THEME.primary}
-                        style={{ marginLeft: 6 }}
-                      />
-                    )}
-                  </TouchableOpacity>
-                );
-              })}
-            </ScrollView>
-          </View>
-        </TouchableOpacity>
       </Modal>
 
       {/* ==================== MODAL SELECTOR DE CLIENTE EN POS ==================== */}
@@ -9069,7 +9100,7 @@ const styles = StyleSheet.create({
     borderRadius: 8,
     paddingHorizontal: 12,
     paddingVertical: 10,
-    gap: 10,
+    minHeight: 52,
   },
   metodoSelectIconWrap: {
     width: 34,
@@ -9078,6 +9109,8 @@ const styles = StyleSheet.create({
     backgroundColor: THEME.secondary,
     alignItems: "center",
     justifyContent: "center",
+    flexShrink: 0,
+    marginRight: 10,
   },
   metodoSelectName: {
     fontSize: 14,
@@ -9089,27 +9122,32 @@ const styles = StyleSheet.create({
     color: THEME.mutedForeground,
     marginTop: 1,
   },
-  simpleMethodsList: {
-    gap: 6,
+  checkoutMetodoDropdownList: {
+    backgroundColor: THEME.card,
+    borderWidth: 1,
+    borderColor: THEME.border,
+    borderRadius: 8,
+    padding: 6,
+    gap: 4,
+    marginTop: -2,
+    marginBottom: 4,
   },
-  simpleMethodRow: {
+  checkoutMetodoRow: {
     flexDirection: "row",
     alignItems: "center",
-    gap: 8,
-    paddingHorizontal: 12,
+    paddingHorizontal: 10,
     paddingVertical: 9,
-    borderRadius: 8,
+    borderRadius: 6,
     backgroundColor: THEME.inputBg,
     borderWidth: 1,
     borderColor: THEME.border,
   },
-  simpleMethodRowActive: {
+  checkoutMetodoRowActive: {
     backgroundColor: THEME.accent,
     borderColor: THEME.primary,
     borderWidth: 1.5,
   },
-  simpleMethodName: {
-    flex: 1,
+  checkoutMetodoName: {
     fontSize: 13,
     fontWeight: "600",
     color: THEME.foreground,
