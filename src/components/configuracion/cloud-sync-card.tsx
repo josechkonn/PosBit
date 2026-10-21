@@ -48,6 +48,27 @@ interface HistorialItem {
   duracion_ms: number;
 }
 
+const STAGES_CONFIG = [
+  { id: 1, nombre: "Configuración y Finanzas Base", descripcion: "Monedas, cajas, configuraciones y métodos de pago" },
+  { id: 2, nombre: "Clasificación y Clientes", descripcion: "Categorías, marcas, proveedores, clientes y créditos" },
+  { id: 3, nombre: "Catálogo de Productos y Precios", descripcion: "Productos, presentaciones, listas de precios y costos" },
+  { id: 4, nombre: "Compras y Proveedores", descripcion: "Órdenes de compra, ítems y abonos a proveedores" },
+  { id: 5, nombre: "Ventas y Pagos", descripcion: "Ventas, detalles de venta, formas de pago y cobros extra" },
+  { id: 6, nombre: "Créditos y Abonos", descripcion: "Cuentas por cobrar y abonos de clientes" },
+  { id: 7, nombre: "Operaciones y Kardex", descripcion: "Retornos, transacciones, cierres de caja y kardex" },
+];
+
+interface StageState {
+  id: number;
+  nombre: string;
+  descripcion: string;
+  status: "idle" | "running" | "success" | "error";
+  subidos?: number;
+  bajados?: number;
+  duracion_ms?: number;
+  error?: string;
+}
+
 export function CloudSyncCard() {
   const [cfg, setCfg] = useState<SyncConfigState>({
     dispositivo_id: "",
@@ -73,6 +94,11 @@ export function CloudSyncCard() {
   const [feedback, setFeedback] = useState<{ tipo: "success" | "error"; texto: string } | null>(
     null
   );
+  const [stagedProgress, setStagedProgress] = useState<StageState[]>([]);
+  const [currentStageId, setCurrentStageId] = useState<number | null>(null);
+  const [stagedSyncActive, setStagedSyncActive] = useState(false);
+  const [failedStageId, setFailedStageId] = useState<number | null>(null);
+  const [failedAction, setFailedAction] = useState<"sync_now" | "push_all" | "pull_all" | null>(null);
 
   const loadSyncConfig = useCallback(async () => {
     try {
@@ -166,9 +192,30 @@ export function CloudSyncCard() {
     }
   };
 
-  const handleRunSync = async (action: "sync_now" | "push_all" | "pull_all") => {
+  const handleRunSync = async (
+    action: "sync_now" | "push_all" | "pull_all",
+    fromStage = 1
+  ) => {
     setSyncAction(action);
     setFeedback(null);
+    setStagedSyncActive(true);
+    setFailedStageId(null);
+    setFailedAction(null);
+
+    const stages: StageState[] = STAGES_CONFIG.map((s) => ({
+      ...s,
+      status: s.id < fromStage ? "success" : "idle",
+    }));
+    setStagedProgress(stages);
+
+    const direction =
+      action === "push_all" ? "push" : action === "pull_all" ? "pull" : "bidireccional";
+    const forceFull = action === "push_all" || action === "pull_all";
+
+    let totalSubidos = 0;
+    let totalBajados = 0;
+    let totalMs = 0;
+
     try {
       // Primero guardamos la configuración vigente para asegurarnos de usar las credenciales actuales
       await fetch("/api/sync/config", {
@@ -177,18 +224,59 @@ export function CloudSyncCard() {
         body: JSON.stringify(cfg),
       });
 
-      const res = await fetch("/api/sync", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action }),
-      });
-      const data = await res.json();
-      if (!res.ok || !data.ok) {
-        throw new Error(data.error || data.mensaje || "Error durante la sincronización");
+      for (let i = fromStage; i <= 7; i++) {
+        setCurrentStageId(i);
+        setStagedProgress((prev) =>
+          prev.map((s) => (s.id === i ? { ...s, status: "running" } : s))
+        );
+
+        const stageRes = await fetch("/api/sync", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            action: "sync_stage",
+            stage: i,
+            direction,
+            forceFull,
+          }),
+        });
+
+        const stageData = await stageRes.json();
+
+        if (!stageRes.ok || !stageData.ok) {
+          const errText = stageData.error || stageData.mensaje || `Error en etapa ${i}`;
+          setStagedProgress((prev) =>
+            prev.map((s) => (s.id === i ? { ...s, status: "error", error: errText } : s))
+          );
+          setFailedStageId(i);
+          setFailedAction(action);
+          throw new Error(
+            `Fallo en Etapa ${i} (${STAGES_CONFIG[i - 1].nombre}): ${errText}. Las etapas anteriores ya quedaron sincronizadas con éxito.`
+          );
+        }
+
+        totalSubidos += stageData.subidos ?? 0;
+        totalBajados += stageData.bajados ?? 0;
+        totalMs += stageData.duracion_ms ?? 0;
+
+        setStagedProgress((prev) =>
+          prev.map((s) =>
+            s.id === i
+              ? {
+                  ...s,
+                  status: "success",
+                  subidos: stageData.subidos,
+                  bajados: stageData.bajados,
+                  duracion_ms: stageData.duracion_ms,
+                }
+              : s
+          )
+        );
       }
+
       setFeedback({
         tipo: "success",
-        texto: `${data.mensaje} (${data.duracion_ms} ms)`,
+        texto: `Sincronización por etapas completada con éxito: ${totalSubidos} subidos, ${totalBajados} descargados en ${(totalMs / 1000).toFixed(1)}s.`,
       });
       await loadSyncConfig();
     } catch (err: any) {
@@ -198,6 +286,7 @@ export function CloudSyncCard() {
       });
       await loadSyncConfig();
     } finally {
+      setCurrentStageId(null);
       setSyncAction(null);
     }
   };
@@ -441,6 +530,108 @@ export function CloudSyncCard() {
                 Descargar Todo de la Nube
               </Button>
             </div>
+
+            {/* Panel de progreso visual de sincronización por etapas */}
+            {stagedSyncActive && stagedProgress.length > 0 && (
+              <div className="space-y-3 rounded-lg border border-primary/30 bg-primary/5 p-3.5">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2 text-xs font-semibold text-foreground">
+                    {currentStageId ? (
+                      <Loader2 size={14} className="animate-spin text-primary" />
+                    ) : failedStageId ? (
+                      <AlertTriangle size={14} className="text-danger" />
+                    ) : (
+                      <Check size={14} className="text-emerald-500" />
+                    )}
+                    <span>
+                      {currentStageId
+                        ? `Sincronizando Etapa ${currentStageId} de 7: ${STAGES_CONFIG[currentStageId - 1].nombre}`
+                        : failedStageId
+                          ? `Sincronización detenida en Etapa ${failedStageId}`
+                          : "Sincronización por etapas completada"}
+                    </span>
+                  </div>
+                  <span className="text-[11px] font-mono font-medium text-muted-foreground">
+                    {Math.round(
+                      (stagedProgress.filter((s) => s.status === "success").length / 7) * 100
+                    )}
+                    %
+                  </span>
+                </div>
+
+                {/* Barra de progreso */}
+                <div className="h-2 w-full overflow-hidden rounded-full bg-muted">
+                  <div
+                    className={cn(
+                      "h-full transition-all duration-300",
+                      failedStageId ? "bg-danger" : "bg-primary"
+                    )}
+                    style={{
+                      width: `${(stagedProgress.filter((s) => s.status === "success").length / 7) * 100}%`,
+                    }}
+                  />
+                </div>
+
+                {/* Grilla con las 7 etapas y sus métricas */}
+                <div className="grid grid-cols-1 gap-1.5 md:grid-cols-2 pt-1 text-xs">
+                  {stagedProgress.map((st) => (
+                    <div
+                      key={st.id}
+                      className={cn(
+                        "flex items-center justify-between rounded border px-2.5 py-1.5 transition-colors",
+                        st.status === "running"
+                          ? "border-primary bg-primary/10 text-primary font-medium"
+                          : st.status === "success"
+                            ? "border-emerald-500/20 bg-emerald-500/5 text-foreground"
+                            : st.status === "error"
+                              ? "border-danger/30 bg-danger/10 text-danger"
+                              : "border-border/60 bg-muted/20 text-muted-foreground"
+                      )}
+                    >
+                      <div className="flex items-center gap-2 truncate">
+                        {st.status === "running" ? (
+                          <Loader2 size={12} className="animate-spin text-primary shrink-0" />
+                        ) : st.status === "success" ? (
+                          <Check size={12} className="text-emerald-500 shrink-0" />
+                        ) : st.status === "error" ? (
+                          <AlertTriangle size={12} className="text-danger shrink-0" />
+                        ) : (
+                          <span className="h-1.5 w-1.5 rounded-full bg-muted-foreground/40 shrink-0" />
+                        )}
+                        <span className="truncate">
+                          E{st.id}: {st.nombre}
+                        </span>
+                      </div>
+
+                      <span className="text-[10px] font-mono shrink-0 ml-2 text-muted-foreground">
+                        {st.status === "success" && `↑${st.subidos ?? 0} · ↓${st.bajados ?? 0}`}
+                        {st.status === "running" && "Transfiriendo..."}
+                        {st.status === "error" && "Error"}
+                        {st.status === "idle" && "En espera"}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+
+                {/* Botón de reintento desde la etapa que falló */}
+                {failedStageId && failedAction && (
+                  <div className="flex items-center justify-between pt-2 border-t border-danger/20">
+                    <span className="text-xs text-danger">
+                      Las etapas anteriores quedaron guardadas. Puedes continuar desde la Etapa {failedStageId}.
+                    </span>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={() => handleRunSync(failedAction, failedStageId)}
+                      className="border-danger/40 text-danger hover:bg-danger/10"
+                    >
+                      <RefreshCw size={12} className="mr-1.5" />
+                      Reintentar desde Etapa {failedStageId}
+                    </Button>
+                  </div>
+                )}
+              </div>
+            )}
           </>
         )}
 

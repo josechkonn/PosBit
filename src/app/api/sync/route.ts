@@ -10,7 +10,9 @@ import {
   countPendingLocalChanges,
   ensureSyncTables,
   executeCloudSync,
+  executeStageSync,
   getSyncConfig,
+  SYNC_STAGES,
   type SyncDeltaPayload,
 } from "@/lib/sync-engine";
 
@@ -57,8 +59,23 @@ export async function GET(request: Request) {
 
     const since = searchParams.get("since") || null;
     const mode = searchParams.get("mode") === "mobile" ? "mobile" : "full";
+    const stageParam = searchParams.get("stage");
+    const tablesParam = searchParams.get("tables");
+    let targetTables: string[] | undefined;
+    if (stageParam) {
+      const stageNum = parseInt(stageParam, 10);
+      const stageDef = SYNC_STAGES.find((s) => s.id === stageNum);
+      if (stageDef) targetTables = [...stageDef.tablas];
+    } else if (tablesParam) {
+      targetTables = tablesParam.split(",").map((t) => t.trim()).filter(Boolean);
+    }
+
     const cfg = await getSyncConfig();
-    const delta = await collectDeltaFromDb(pool, since, cfg.dispositivo_id, { mode });
+    const delta = await collectDeltaFromDb(pool, since, cfg.dispositivo_id, {
+      mode,
+      tables: targetTables,
+      stage: stageParam ? parseInt(stageParam, 10) : undefined,
+    });
 
     return NextResponse.json(delta);
   } catch (error: any) {
@@ -96,11 +113,17 @@ export async function POST(request: Request) {
       const startTime = Date.now();
       const since: string | null = body.since || null;
       const mode = body.mode === "mobile" ? "mobile" : "full";
+      const stage = body.stage ? Number(body.stage) : null;
+      const tables = Array.isArray(body.tables) ? body.tables : undefined;
       const incomingPayload: SyncDeltaPayload | null = body.payload || null;
 
       // Primero recolectamos el delta del servidor desde `since` (antes de aplicar los propios cambios del cliente)
       const cfg = await getSyncConfig();
-      const serverDelta = await collectDeltaFromDb(pool, since, cfg.dispositivo_id, { mode });
+      const serverDelta = await collectDeltaFromDb(pool, since, cfg.dispositivo_id, {
+        mode,
+        stage: stage ?? undefined,
+        tables,
+      });
 
       let appliedRows = 0;
       let deletedRows = 0;
@@ -259,6 +282,18 @@ export async function POST(request: Request) {
     }
 
     // 4. Ejecutar sincronización desde esta máquina hacia la nube
+    if (action === "sync_stage") {
+      const stage = Number(body.stage);
+      const direction = body.direction || "bidireccional";
+      const forceFull = Boolean(body.forceFull);
+      const res = await executeStageSync({ stage, direction, forceFull });
+      return NextResponse.json(res, { status: res.ok ? 200 : 500 });
+    }
+
+    if (action === "stages_info") {
+      return NextResponse.json({ stages: SYNC_STAGES });
+    }
+
     if (action === "sync_now") {
       const res = await executeCloudSync({ direction: "bidireccional", forceFull: false });
       return NextResponse.json(res, { status: res.ok ? 200 : 500 });
