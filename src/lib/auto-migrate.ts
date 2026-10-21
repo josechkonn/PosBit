@@ -259,6 +259,25 @@ export async function ensureSchemaAndMigrate(customPool?: Pool | PoolClient): Pr
                 PRIMARY KEY (producto_id, proveedor_id)
               );
             END IF;
+          ELSE
+            -- Si la tabla ya existía pero le falta la clave primaria o índice único
+            BEGIN
+              IF NOT EXISTS (
+                SELECT 1 FROM pg_constraint
+                WHERE conrelid = 'producto_proveedores'::regclass
+                  AND contype IN ('p', 'u')
+              ) THEN
+                DELETE FROM producto_proveedores a
+                USING producto_proveedores b
+                WHERE a.ctid < b.ctid
+                  AND a.producto_id = b.producto_id
+                  AND a.proveedor_id = b.proveedor_id;
+
+                ALTER TABLE producto_proveedores ADD PRIMARY KEY (producto_id, proveedor_id);
+              END IF;
+            EXCEPTION WHEN OTHERS THEN
+              NULL;
+            END;
           END IF;
           INSERT INTO producto_proveedores (producto_id, proveedor_id)
           SELECT id, proveedor_id FROM productos WHERE proveedor_id IS NOT NULL

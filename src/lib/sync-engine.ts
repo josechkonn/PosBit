@@ -192,6 +192,41 @@ export async function ensureSyncTables(customClient?: Pool | PoolClient): Promis
     CREATE INDEX IF NOT EXISTS idx_ventas_estado_moneda_fecha ON ventas(estado, moneda_id, fecha DESC);
     CREATE INDEX IF NOT EXISTS idx_compras_estado_moneda_fecha ON compras(estado, moneda_id, fecha DESC);
     CREATE INDEX IF NOT EXISTS idx_productos_activo_stock ON productos(activo, stock, stock_minimo);
+
+    -- Asegurar clave única en producto_proveedores para ON CONFLICT ("producto_id", "proveedor_id")
+    DO $$
+    BEGIN
+      IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema='public' AND table_name='producto_proveedores') THEN
+        IF NOT EXISTS (
+          SELECT 1 FROM pg_constraint
+          WHERE conrelid = 'producto_proveedores'::regclass
+            AND contype IN ('p', 'u')
+        ) THEN
+          DELETE FROM producto_proveedores a
+          USING producto_proveedores b
+          WHERE a.ctid < b.ctid
+            AND a.producto_id = b.producto_id
+            AND a.proveedor_id = b.proveedor_id;
+
+          ALTER TABLE producto_proveedores ADD CONSTRAINT producto_proveedores_pkey PRIMARY KEY (producto_id, proveedor_id);
+        END IF;
+      END IF;
+    EXCEPTION WHEN OTHERS THEN
+      NULL;
+    END $$;
+
+    -- Reparar vistas para usar security_invoker y eliminar alertas de seguridad
+    DO $$
+    BEGIN
+      IF EXISTS (SELECT 1 FROM pg_views WHERE viewname = 'vista_deuda_proveedores') THEN
+        EXECUTE 'ALTER VIEW public.vista_deuda_proveedores SET (security_invoker = true)';
+      END IF;
+      IF EXISTS (SELECT 1 FROM pg_views WHERE viewname = 'vista_deuda_compras') THEN
+        EXECUTE 'ALTER VIEW public.vista_deuda_compras SET (security_invoker = true)';
+      END IF;
+    EXCEPTION WHEN OTHERS THEN
+      NULL;
+    END $$;
   `);
   if (!customClient) globalForSync.syncTablesVerified = true;
 }
@@ -879,6 +914,24 @@ export async function applyDeltaToDb(
               appliedRows += sRes.rowCount ?? 0;
             } catch (rowErr: any) {
               await client.query("ROLLBACK TO SAVEPOINT sp_sync_row");
+              if (table === "producto_proveedores" && String(rowErr?.message).includes("ON CONFLICT")) {
+                try {
+                  await client.query("SAVEPOINT sp_sync_pp");
+                  await client.query(
+                    `DELETE FROM producto_proveedores WHERE producto_id = $1 AND proveedor_id = $2`,
+                    [singleRow.producto_id, singleRow.proveedor_id]
+                  );
+                  await client.query(
+                    `INSERT INTO producto_proveedores (producto_id, proveedor_id) VALUES ($1, $2)`,
+                    [singleRow.producto_id, singleRow.proveedor_id]
+                  );
+                  await client.query("RELEASE SAVEPOINT sp_sync_pp");
+                  appliedRows += 1;
+                  continue;
+                } catch {
+                  await client.query("ROLLBACK TO SAVEPOINT sp_sync_pp");
+                }
+              }
               console.warn(`[Sync] Aviso en fila de ${table}:`, rowErr?.message);
             }
           }

@@ -18,7 +18,6 @@ import {
   PanResponder,
   Animated,
 } from "react-native";
-import { useFonts } from "expo-font";
 import Feather from "@expo/vector-icons/Feather";
 import {
   LocalMoneda,
@@ -181,8 +180,11 @@ function getMetodoEmoji(tipo?: string, nombre?: string): string {
 }
 
 export default function App() {
-  const [fontsLoaded] = useFonts(Feather.font);
   const [booting, setBooting] = useState(true);
+
+  useEffect(() => {
+    Feather.loadFont().catch((err) => console.warn("Feather font load err:", err));
+  }, []);
   const [session, setSession] = useState<{
     serverUrl: string;
     token: string;
@@ -439,24 +441,35 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    let unmounted = false;
+    const safetyTimer = setTimeout(() => {
+      if (!unmounted) setBooting(false);
+    }, 2500);
+
     (async () => {
       try {
         const stored = await getStoredSession();
-        if (stored.serverUrl) setServerUrlInput(stored.serverUrl);
-        if (stored.serverUrl && stored.token && stored.user) {
+        if (stored.serverUrl && !unmounted) setServerUrlInput(stored.serverUrl);
+        if (stored.serverUrl && stored.token && stored.user && !unmounted) {
           setSession({
             serverUrl: stored.serverUrl,
             token: stored.token,
             user: stored.user,
           });
-          await refreshLocalState();
+          await refreshLocalState().catch((err) => console.warn("refreshLocalState boot warning:", err));
         }
       } catch (e) {
         console.warn("Boot error:", e);
       } finally {
-        setBooting(false);
+        clearTimeout(safetyTimer);
+        if (!unmounted) setBooting(false);
       }
     })();
+
+    return () => {
+      unmounted = true;
+      clearTimeout(safetyTimer);
+    };
   }, [refreshLocalState]);
 
   const posSearchRef = useRef(posSearch);
@@ -2157,7 +2170,7 @@ export default function App() {
   );
 
   // ── Loading Screen ──
-  if (booting || !fontsLoaded) {
+  if (booting) {
     return (
       <View style={styles.centerScreen}>
         <StatusBar barStyle="dark-content" backgroundColor={THEME.background} />

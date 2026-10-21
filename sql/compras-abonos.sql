@@ -135,7 +135,7 @@ CREATE TRIGGER trg_compra_abonos_after_delete
   FOR EACH ROW EXECUTE FUNCTION trg_compra_abonos_recalcular_saldo();
 
 -- 7. Vista: Deuda consolidada por proveedor (en USD/base)
-CREATE OR REPLACE VIEW vista_deuda_proveedores AS
+CREATE OR REPLACE VIEW vista_deuda_proveedores WITH (security_invoker = true) AS
 SELECT
   p.id AS proveedor_id,
   p.nombre AS proveedor_nombre,
@@ -150,7 +150,7 @@ GROUP BY p.id, p.nombre, p.rif
 HAVING COALESCE(SUM(c.saldo_pendiente), 0) > 0.000001;
 
 -- 8. Vista: Detalle de deuda por compra (para UI)
-CREATE OR REPLACE VIEW vista_deuda_compras AS
+CREATE OR REPLACE VIEW vista_deuda_compras WITH (security_invoker = true) AS
 SELECT
   c.id,
   c.numero,

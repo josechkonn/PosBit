@@ -2,7 +2,7 @@
   "expo": {
     "name": "PosBit Mobile",
     "slug": "posbit-mobile",
-    "version": "0.1.23",
+    "version": "0.1.24",
     "icon": "./assets/icon.png",
     "orientation": "portrait",
     "userInterfaceStyle": "dark",
@@ -17,7 +17,7 @@
     },
     "android": {
       "package": "com.posbit.mobile",
-      "versionCode": 2,
+      "versionCode": 3,
       "permissions": [
         "CAMERA",
         "INTERNET",
@@ -40,7 +40,14 @@
         }
       ],
       "expo-asset",
-      "expo-font",
+      [
+        "expo-font",
+        {
+          "fonts": [
+            "./assets/fonts/Feather.ttf"
+          ]
+        }
+      ],
       [
         "expo-build-properties",
         {
