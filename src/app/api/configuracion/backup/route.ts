@@ -117,6 +117,14 @@ export async function POST(request: Request) {
           }
         }
 
+        // Vaciar lápidas de eliminación de sincronización para que registros anteriores
+        // no eliminen accidentalmente los datos recién importados en otros dispositivos
+        try {
+          await client.query(`DELETE FROM sync_eliminados`);
+        } catch {
+          // Tabla de sync no configurada aún
+        }
+
         // Obtener columnas válidas de la base de datos actual para ser 100% compatibles
         // con versiones anteriores o futuras de PosBit (evitar error de columna inexistente)
         const allColsRes = await client.query(
@@ -131,6 +139,8 @@ export async function POST(request: Request) {
           }
           s.add(r.column_name);
         }
+
+        const nowIso = new Date().toISOString();
 
         // 2. Insertar tablas en orden directo
         for (const table of TABLES_ORDER) {
@@ -159,7 +169,12 @@ export async function POST(request: Request) {
               for (const col of columns) {
                 rowPlaceholders.push(`$${paramIdx++}`);
                 let val = row[col];
-                if (val !== null && typeof val === "object" && !(val instanceof Date)) {
+                // Al restaurar, actualizar actualizado_en a la fecha actual para que
+                // los demás dispositivos (móvil y otras PCs) detecten y descarguen
+                // los datos importados en su próxima sincronización
+                if (col === "actualizado_en") {
+                  val = nowIso;
+                } else if (val !== null && typeof val === "object" && !(val instanceof Date)) {
                   val = JSON.stringify(val);
                 }
                 params.push(val);
@@ -173,6 +188,10 @@ export async function POST(request: Request) {
 
           restoredCounts[table] = rows.length;
         }
+
+        try {
+          await client.query(`UPDATE sync_config SET actualizado_en = NOW() WHERE id = 1`);
+        } catch {}
 
         // 3. Sincronizar secuencias seriales en PostgreSQL
         const serialTables = [
