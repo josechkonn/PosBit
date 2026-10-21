@@ -140,9 +140,13 @@ export async function POST(request: Request) {
       // Monto en moneda base (USD) para saldo_base
       const montoBase = aBase(montoAbono, tasaUsd(monedaAbono, monedasCatalogo));
 
-      const nuevoSaldo = Math.max(0, parseFloat(credito.saldo) - montoEnMonedaCredito);
-      const nuevoSaldoBase = Math.max(0, parseFloat(credito.saldo_base) - montoBase);
-      const nuevoEstado = nuevoSaldo <= 0.01 ? "Pagado" : "Parcial";
+      const restante = Math.max(0, parseFloat(credito.saldo) - montoEnMonedaCredito);
+      const nuevoEstado = restante <= 0.01 ? "Pagado" : "Parcial";
+      const nuevoSaldo = nuevoEstado === "Pagado" ? 0 : redondear(restante, Number(monedaCredito.decimales ?? 2));
+      const nuevoSaldoBase =
+        nuevoEstado === "Pagado"
+          ? 0
+          : redondear(aBase(nuevoSaldo, tasaUsd(monedaCredito, monedasCatalogo)), 6);
 
       await client.query(
         `INSERT INTO abonos (credito_id, cliente_id, retorno_id, fecha, monto, moneda_id, monto_base, metodo_pago_id, caja_id, observaciones)
@@ -151,7 +155,7 @@ export async function POST(request: Request) {
       );
 
       await client.query(
-        `UPDATE creditos SET saldo = $1, saldo_base = $2, estado = $3 WHERE id = $4`,
+        `UPDATE creditos SET saldo = $1, saldo_base = $2, estado = $3, actualizado_en = NOW() WHERE id = $4`,
         [nuevoSaldo, nuevoSaldoBase, nuevoEstado, credito.id]
       );
 

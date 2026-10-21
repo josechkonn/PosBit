@@ -193,6 +193,22 @@ export async function ensureSyncTables(customClient?: Pool | PoolClient): Promis
     CREATE INDEX IF NOT EXISTS idx_compras_estado_moneda_fecha ON compras(estado, moneda_id, fecha DESC);
     CREATE INDEX IF NOT EXISTS idx_productos_activo_stock ON productos(activo, stock, stock_minimo);
 
+    -- Trigger de timestamp compatible con sincronización: si el UPDATE trae un
+    -- actualizado_en explícito distinto (p. ej. una fila aplicada desde otro
+    -- dispositivo), se respeta. Antes siempre forzaba NOW(), lo que hacía que una
+    -- fila vieja recibida por sync pareciera "recién modificada" y rebotara entre
+    -- equipos pisando cambios más recientes (deudas saldadas que reaparecían).
+    CREATE OR REPLACE FUNCTION actualizar_actualizado_en()
+    RETURNS TRIGGER AS $fn$
+    BEGIN
+      IF TG_OP = 'UPDATE' AND NEW.actualizado_en IS DISTINCT FROM OLD.actualizado_en THEN
+        RETURN NEW;
+      END IF;
+      NEW.actualizado_en = NOW();
+      RETURN NEW;
+    END;
+    $fn$ LANGUAGE plpgsql;
+
     -- Asegurar clave única en producto_proveedores para ON CONFLICT ("producto_id", "proveedor_id")
     DO $$
     BEGIN
@@ -855,7 +871,7 @@ export async function applyDeltaToDb(
       const updateSet = updateCols.map((c) => `"${c}" = EXCLUDED."${c}"`).join(", ");
       const lwwWhere =
         validCols.has("actualizado_en") && cols.includes("actualizado_en")
-          ? ` WHERE "${table}".actualizado_en IS NULL OR EXCLUDED.actualizado_en >= "${table}".actualizado_en`
+          ? ` WHERE "${table}".actualizado_en IS NULL OR EXCLUDED.actualizado_en > "${table}".actualizado_en`
           : "";
 
       const BATCH_SIZE = 100;
