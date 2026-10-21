@@ -244,6 +244,20 @@ export async function ensureSyncTables(customClient?: Pool | PoolClient): Promis
       NULL;
     END $$;
   `);
+
+  // Reparar timestamps corridos al futuro por el antiguo bug de zona horaria en la
+  // sincronización (cada viaje sumaba +N horas). Una fila "del futuro" gana siempre
+  // el LWW y pisa cambios reales (p. ej. deudas saldadas que reaparecían).
+  for (const t of SYNC_TABLES_ORDER) {
+    try {
+      await db.query(
+        `UPDATE "${t}" SET actualizado_en = NOW() WHERE actualizado_en > NOW() + interval '10 minutes'`
+      );
+    } catch {
+      // Tabla sin columna actualizado_en o inexistente
+    }
+  }
+
   if (!customClient) globalForSync.syncTablesVerified = true;
 }
 
@@ -321,7 +335,7 @@ export async function countPendingLocalChanges(
   try {
     if (sinceIso) {
       const subqueries = tablasPrincipales.map(
-        (t) => `(SELECT COUNT(*)::int FROM "${t}" WHERE actualizado_en > $1) AS "${t}"`
+        (t) => `(SELECT COUNT(*)::int FROM "${t}" WHERE actualizado_en > $1::timestamptz) AS "${t}"`
       );
       subqueries.push(
         `(SELECT COUNT(*)::int FROM sync_eliminados WHERE eliminado_en > $1) AS "eliminados"`
@@ -388,7 +402,7 @@ export async function collectDeltaFromDb(
   if (since) {
     try {
       const checks = tableList.map(
-        (t) => `CASE WHEN EXISTS (SELECT 1 FROM "${t}" WHERE actualizado_en > $1) THEN '${t}' END`
+        (t) => `CASE WHEN EXISTS (SELECT 1 FROM "${t}" WHERE actualizado_en > $1::timestamptz) THEN '${t}' END`
       );
       const fastSql = `
         SELECT
@@ -413,7 +427,7 @@ export async function collectDeltaFromDb(
     for (const table of tablesToFetch) {
       try {
         const res = since
-          ? await targetPool.query(`SELECT * FROM "${table}" WHERE actualizado_en > $1`, [since])
+          ? await targetPool.query(`SELECT * FROM "${table}" WHERE actualizado_en > $1::timestamptz`, [since])
           : await targetPool.query(`SELECT * FROM "${table}"`);
         if (res.rows.length > 0) {
           tables[table] = res.rows;
@@ -528,9 +542,14 @@ export async function applyDeltaToDb(
 
   try {
     const allColsRes = await client.query(
-      `SELECT table_name, column_name FROM information_schema.columns WHERE table_schema = 'public'`
+      `SELECT table_name, column_name, data_type FROM information_schema.columns WHERE table_schema = 'public'`
     );
     const colsByTable = new Map<string, Set<string>>();
+    // Columnas TIMESTAMP (sin zona): los valores llegan como instantes ISO (con Z).
+    // Insertarlos tal cual hace que Postgres descarte la zona y guarde la hora UTC
+    // como si fuera hora local → en equipos con zona ≠ UTC cada viaje de sync
+    // corría el timestamp +N horas y las filas viejas "ganaban" el LWW.
+    const tsColsByTable = new Map<string, Set<string>>();
     for (const r of allColsRes.rows) {
       let set = colsByTable.get(r.table_name);
       if (!set) {
@@ -538,6 +557,14 @@ export async function applyDeltaToDb(
         colsByTable.set(r.table_name, set);
       }
       set.add(r.column_name);
+      if (r.data_type === "timestamp without time zone") {
+        let ts = tsColsByTable.get(r.table_name);
+        if (!ts) {
+          ts = new Set<string>();
+          tsColsByTable.set(r.table_name, ts);
+        }
+        ts.add(r.column_name);
+      }
     }
 
     const [
@@ -859,6 +886,7 @@ export async function applyDeltaToDb(
 
       const cols = Object.keys(normalizedRows[0]).filter((c) => validCols.has(c));
       if (cols.length === 0) continue;
+      const tsCols = tsColsByTable.get(table) ?? new Set<string>();
 
       const colNames = cols.map((c) => `"${c}"`).join(", ");
       const conflictTarget =
@@ -871,7 +899,7 @@ export async function applyDeltaToDb(
       const updateSet = updateCols.map((c) => `"${c}" = EXCLUDED."${c}"`).join(", ");
       const lwwWhere =
         validCols.has("actualizado_en") && cols.includes("actualizado_en")
-          ? ` WHERE "${table}".actualizado_en IS NULL OR EXCLUDED.actualizado_en > "${table}".actualizado_en`
+          ? ` WHERE ("${table}".actualizado_en IS NULL OR EXCLUDED.actualizado_en > "${table}".actualizado_en) AND (EXCLUDED.actualizado_en IS NULL OR EXCLUDED.actualizado_en <= NOW() + interval '10 minutes')`
           : "";
 
       const BATCH_SIZE = 100;
@@ -884,7 +912,7 @@ export async function applyDeltaToDb(
         for (const r of batch) {
           const rowPlaceholders: string[] = [];
           for (const c of cols) {
-            rowPlaceholders.push(`$${paramIdx++}`);
+            rowPlaceholders.push(tsCols.has(c) ? `$${paramIdx++}::timestamptz` : `$${paramIdx++}`);
             let val = r[c];
             if (val !== null && typeof val === "object" && !(val instanceof Date)) {
               val = JSON.stringify(val);
@@ -912,7 +940,7 @@ export async function applyDeltaToDb(
             const singleParams: any[] = [];
             let sIdx = 1;
             for (const c of cols) {
-              singlePlaceholders.push(`$${sIdx++}`);
+              singlePlaceholders.push(tsCols.has(c) ? `$${sIdx++}::timestamptz` : `$${sIdx++}`);
               let val = singleRow[c];
               if (val !== null && typeof val === "object" && !(val instanceof Date)) {
                 val = JSON.stringify(val);
