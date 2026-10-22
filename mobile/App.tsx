@@ -45,6 +45,7 @@ import {
   getLocalAbonosByCredito,
   getLocalVentasRemotas,
   getLocalVentaItemsRemotos,
+  getLocalVentaItemsByVentaId,
   getVentasLocales,
   getAbonosLocalesPendientes,
   createOfflineSale,
@@ -60,6 +61,11 @@ import {
   registrarAbonoMobile,
   pagarDeudaGlobalMobile,
   fetchClientePerfilCloud,
+  fetchKardexCloud,
+  fetchCajasCloud,
+  cerrarCajaCloud,
+  abrirCajaCloud,
+  fetchVentaDetalleCloud,
 } from "./src/lib/sync-client";
 
 const DEFAULT_CLOUD_URL = "https://pos-bit-pi.vercel.app";
@@ -105,7 +111,7 @@ const THEME = {
   sky: "#0ea5e9",
 };
 
-type AppRoute = "dashboard" | "pos" | "clientes" | "creditos" | "ventas" | "productos" | "config";
+type AppRoute = "dashboard" | "pos" | "clientes" | "creditos" | "ventas" | "productos" | "config" | "kardex" | "cajas";
 
 interface CartItem {
   product: LocalProducto;
@@ -178,6 +184,26 @@ function getMetodoEmoji(tipo?: string, nombre?: string): string {
   if (t.includes("zelle") || t.includes("binance") || t.includes("zinli")) return "⚡";
   if (t.includes("transferencia") || t.includes("banco") || t.includes("banesco")) return "🏦";
   return "💰";
+}
+
+function fmtDateTime(isoOrDate?: string | null): string {
+  if (!isoOrDate) return "-";
+  try {
+    const d = new Date(isoOrDate);
+    if (isNaN(d.getTime())) return String(isoOrDate);
+    const day = d.getDate();
+    const months = ["ene", "feb", "mar", "abr", "may", "jun", "jul", "ago", "sep", "oct", "nov", "dic"];
+    const month = months[d.getMonth()];
+    const year = d.getFullYear();
+    let hours = d.getHours();
+    const minutes = d.getMinutes().toString().padStart(2, "0");
+    const ampm = hours >= 12 ? "PM" : "AM";
+    hours = hours % 12;
+    hours = hours ? hours : 12;
+    return `${day} ${month} ${year}, ${hours.toString().padStart(2, "0")}:${minutes} ${ampm}`;
+  } catch {
+    return String(isoOrDate);
+  }
 }
 
 export default function App() {
@@ -371,6 +397,23 @@ export default function App() {
   // Productos & Ventas Search
   const [productosSearch, setProductosSearch] = useState("");
   const [ventasSearch, setVentasSearch] = useState("");
+
+  // Kardex Module State
+  const [kardexItems, setKardexItems] = useState<any[]>([]);
+  const [kardexLoading, setKardexLoading] = useState(false);
+  const [kardexSearch, setKardexSearch] = useState("");
+  const [kardexTipo, setKardexTipo] = useState<string>("todos");
+  const [kardexStats, setKardexStats] = useState({ entradas: 0, salidas: 0, ajustes: 0 });
+
+  // Cajas Module State
+  const [cajasCloud, setCajasCloud] = useState<any[]>([]);
+  const [cajasLoading, setCajasLoading] = useState(false);
+  const [cajaParaCierre, setCajaParaCierre] = useState<any | null>(null);
+  const [cierreObservaciones, setCierreObservaciones] = useState("");
+  const [submittingCierre, setSubmittingCierre] = useState(false);
+  const [cajaParaAbrir, setCajaParaAbrir] = useState<any | null>(null);
+  const [saldoAperturaInput, setSaldoAperturaInput] = useState("0");
+  const [submittingAbrir, setSubmittingAbrir] = useState(false);
 
   const showToast = useCallback((text: string, type: "success" | "error" | "info" = "success") => {
     setToastMsg({ text, type });
@@ -1886,25 +1929,252 @@ export default function App() {
     };
   }, [perfilCloudData, perfilVentas, perfilRetornos, baseMonedaSistema, convertirMonto]);
 
-  // Ver ítems de una factura en el perfil
+  // Ver ítems de una factura en el perfil o ventas
   const handleOpenVentaDetail = useCallback(
-    (v: any) => {
-      if (Array.isArray(v.local_items)) {
+    async (v: any) => {
+      // 1. Si ya tiene local_items
+      if (Array.isArray(v.local_items) && v.local_items.length > 0) {
         setVentaDetailModal({ venta: v, items: v.local_items });
         return;
       }
-      const cloudItems = Array.isArray(perfilCloudData?.ventaItems)
+      // 2. Si tiene items_json guardado en offline
+      if (v.items_json) {
+        try {
+          const parsed = typeof v.items_json === "string" ? JSON.parse(v.items_json) : v.items_json;
+          if (Array.isArray(parsed) && parsed.length > 0) {
+            setVentaDetailModal({ venta: v, items: parsed });
+            return;
+          }
+        } catch {}
+      }
+      // 3. Del perfil si está cargado
+      const cloudProfileItems = Array.isArray(perfilCloudData?.ventaItems)
         ? perfilCloudData.ventaItems.filter((i: any) => String(i.venta_id) === String(v.id))
         : [];
-      if (cloudItems.length > 0) {
-        setVentaDetailModal({ venta: v, items: cloudItems });
+      if (cloudProfileItems.length > 0) {
+        setVentaDetailModal({ venta: v, items: cloudProfileItems });
         return;
       }
+      // 4. De la base SQLite local
+      const dbItems = await getLocalVentaItemsByVentaId(String(v.id));
+      if (dbItems && dbItems.length > 0) {
+        setVentaDetailModal({ venta: v, items: dbItems });
+        return;
+      }
+      // 5. De memoria
       const localItems = ventaItemsRemotos.filter((i) => String(i.venta_id) === String(v.id));
       setVentaDetailModal({ venta: v, items: localItems });
+
+      // 6. Si está en línea, consultar el detalle enriquecido en la nube
+      fetchVentaDetalleCloud(String(v.id)).then((cloudV) => {
+        if (cloudV && Array.isArray(cloudV.items) && cloudV.items.length > 0) {
+          setVentaDetailModal((prev) => (prev?.venta?.id === v.id ? { venta: cloudV, items: cloudV.items } : prev));
+        }
+      });
     },
     [perfilCloudData, ventaItemsRemotos]
   );
+
+  // Lista unificada de ventas ordenadas estrictamente por fecha y hora (más reciente primero)
+  const todasLasVentas = useMemo(() => {
+    const list: Array<{
+      id: string | number;
+      numero: string;
+      cliente: string;
+      fecha: string;
+      creado_en?: string | null;
+      timestamp: number;
+      total: number;
+      subtotal?: number;
+      descuento?: number;
+      impuesto?: number;
+      moneda_id: string;
+      moneda_codigo?: string;
+      moneda_simbolo?: string;
+      tipo_pago: string;
+      metodo_pago_nombre?: string | null;
+      estado: string;
+      observaciones?: string | null;
+      isLocal?: boolean;
+      sincronizado?: number;
+      items_json?: string;
+    }> = [];
+
+    // Ventas locales móviles
+    for (const vl of ventasLocales) {
+      const mon = monedas.find((m) => String(m.id) === String(vl.moneda_id));
+      const iso = vl.creado_en || (vl.fecha ? `${vl.fecha}T00:00:00.000Z` : new Date().toISOString());
+      const ts = new Date(iso).getTime() || Date.now();
+      list.push({
+        id: `local_${vl.id}`,
+        numero: vl.numero,
+        cliente: vl.cliente_nombre || "Consumidor Final",
+        fecha: vl.fecha,
+        creado_en: vl.creado_en || vl.fecha,
+        timestamp: ts,
+        total: Number(vl.total) || 0,
+        subtotal: Number(vl.subtotal) || 0,
+        descuento: Number(vl.descuento) || 0,
+        impuesto: Number(vl.impuesto) || 0,
+        moneda_id: String(vl.moneda_id),
+        moneda_codigo: mon?.codigo || "COP",
+        moneda_simbolo: mon?.simbolo || "$",
+        tipo_pago: vl.tipo_pago || "Contado",
+        metodo_pago_nombre: "Móvil Local",
+        estado: "Pagada",
+        observaciones: vl.observaciones,
+        isLocal: true,
+        sincronizado: vl.sincronizado,
+        items_json: vl.items_json,
+      });
+    }
+
+    // Ventas remotas sincronizadas
+    for (const vr of ventasRemotas) {
+      const iso = vr.creado_en || (vr.fecha ? (vr.fecha.includes("T") ? vr.fecha : `${vr.fecha}T00:00:00.000Z`) : new Date().toISOString());
+      const ts = new Date(iso).getTime() || 0;
+      list.push({
+        id: vr.id,
+        numero: vr.numero,
+        cliente: vr.cliente || "Consumidor Final",
+        fecha: vr.fecha,
+        creado_en: vr.creado_en || vr.fecha,
+        timestamp: ts,
+        total: Number(vr.total) || 0,
+        subtotal: Number(vr.subtotal) || 0,
+        descuento: Number(vr.descuento) || 0,
+        impuesto: Number(vr.impuesto) || 0,
+        moneda_id: String(vr.moneda_id),
+        moneda_codigo: vr.moneda_codigo || "USD",
+        moneda_simbolo: vr.moneda_simbolo || "$",
+        tipo_pago: vr.tipo_pago || "Contado",
+        metodo_pago_nombre: vr.metodo_pago_nombre,
+        estado: vr.estado || "Pagada",
+        observaciones: vr.observaciones,
+        isLocal: false,
+      });
+    }
+
+    return list.sort((a, b) => b.timestamp - a.timestamp);
+  }, [ventasLocales, ventasRemotas, monedas]);
+
+  const ventasFiltradas = useMemo(() => {
+    const q = ventasSearch.trim().toLowerCase();
+    const seenNumeros = new Set<string>();
+    const deduplicated: typeof todasLasVentas = [];
+    for (const v of todasLasVentas) {
+      if (seenNumeros.has(v.numero)) continue;
+      seenNumeros.add(v.numero);
+      if (!q || v.numero.toLowerCase().includes(q) || v.cliente.toLowerCase().includes(q)) {
+        deduplicated.push(v);
+      }
+    }
+    return deduplicated;
+  }, [todasLasVentas, ventasSearch]);
+
+  // Carga del Kardex
+  const loadKardex = useCallback(async () => {
+    setKardexLoading(true);
+    try {
+      const res = await fetchKardexCloud({
+        search: kardexSearch,
+        tipo: kardexTipo,
+        page: 1,
+        limit: 50,
+      });
+      if (res) {
+        const list = Array.isArray((res as any).movimientos)
+          ? (res as any).movimientos
+          : (Array.isArray((res as any).data) ? (res as any).data : (Array.isArray(res) ? res : []));
+        setKardexItems(list);
+        if ((res as any).stats) {
+          setKardexStats((res as any).stats);
+        } else if (Array.isArray(list)) {
+          let ent = 0, sal = 0, aj = 0;
+          for (const m of list) {
+            if (m.tipo === "Entrada") ent++;
+            else if (m.tipo === "Salida") sal++;
+            else if (m.tipo === "Ajuste") aj++;
+          }
+          setKardexStats({ entradas: ent, salidas: sal, ajustes: aj });
+        }
+      }
+    } catch (e: any) {
+      console.warn("Error cargando kardex:", e);
+    } finally {
+      setKardexLoading(false);
+    }
+  }, [kardexSearch, kardexTipo]);
+
+  useEffect(() => {
+    if (route === "kardex") {
+      loadKardex();
+    }
+  }, [route, loadKardex]);
+
+  // Carga de Cajas
+  const loadCajas = useCallback(async () => {
+    setCajasLoading(true);
+    try {
+      const res = await fetchCajasCloud();
+      if (Array.isArray(res)) {
+        setCajasCloud(res);
+      }
+    } catch (e: any) {
+      console.warn("Error cargando cajas:", e);
+    } finally {
+      setCajasLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (route === "cajas") {
+      loadCajas();
+    }
+  }, [route, loadCajas]);
+
+  // Cierre de Caja
+  const handleCerrarCaja = useCallback(async () => {
+    if (!cajaParaCierre) return;
+    setSubmittingCierre(true);
+    try {
+      const res = await cerrarCajaCloud(cajaParaCierre.id, cierreObservaciones);
+      if (res.success) {
+        showToast("Caja cerrada exitosamente", "success");
+        setCajaParaCierre(null);
+        setCierreObservaciones("");
+        loadCajas();
+      } else {
+        showToast(res.error || "Error al cerrar caja", "error");
+      }
+    } catch (err: any) {
+      showToast(err?.message || "Error al cerrar caja", "error");
+    } finally {
+      setSubmittingCierre(false);
+    }
+  }, [cajaParaCierre, cierreObservaciones, showToast, loadCajas]);
+
+  // Apertura de Caja
+  const handleAbrirCaja = useCallback(async () => {
+    if (!cajaParaAbrir) return;
+    const saldo = parseFloat(saldoAperturaInput) || 0;
+    setSubmittingAbrir(true);
+    try {
+      const res = await abrirCajaCloud(cajaParaAbrir.id, saldo);
+      if (res.success) {
+        showToast("Turno de caja abierto", "success");
+        setCajaParaAbrir(null);
+        setSaldoAperturaInput("0");
+        loadCajas();
+      } else {
+        showToast(res.error || "Error al abrir caja", "error");
+      }
+    } catch (err: any) {
+      showToast(err?.message || "Error al abrir caja", "error");
+    } finally {
+      setSubmittingAbrir(false);
+    }
+  }, [cajaParaAbrir, saldoAperturaInput, showToast, loadCajas]);
 
   // ── Modal Ajustar Límite de Crédito (clon de CreditoLimiteModal web) ──
   const openAjustarCreditoModal = useCallback(
@@ -2420,6 +2690,8 @@ export default function App() {
     ventas: "Historial de Ventas",
     productos: "Productos",
     config: "Sincronización y Tasas",
+    kardex: "Kardex de Inventario",
+    cajas: "Cajas y Turnos",
   };
 
   return (
@@ -4723,132 +4995,405 @@ export default function App() {
                 value={ventasSearch}
                 onChangeText={setVentasSearch}
               />
+              {ventasSearch.length > 0 && (
+                <TouchableOpacity onPress={() => setVentasSearch("")}>
+                  <Feather name="x-circle" size={16} color={THEME.mutedForeground} />
+                </TouchableOpacity>
+              )}
             </View>
           </View>
 
-          <ScrollView contentContainerStyle={{ padding: 12, paddingBottom: 90, gap: 10 }}>
-            {/* Ventas creadas en este dispositivo móvil */}
-            {ventasLocales.length > 0 && (
-              <View style={{ gap: 8 }}>
-                <Text style={styles.sectionGroupHeader}>VENTAS DESDE ESTE MÓVIL</Text>
-                {ventasLocales
-                  .filter(
-                    (v) =>
-                      !ventasSearch.trim() ||
-                      v.numero.toLowerCase().includes(ventasSearch.toLowerCase()) ||
-                      v.cliente_nombre.toLowerCase().includes(ventasSearch.toLowerCase())
-                  )
-                  .map((v) => {
-                    const mon = monedas.find((m) => String(m.id) === String(v.moneda_id));
-                    return (
-                      <View key={v.id} style={styles.card}>
-                        <View style={styles.creditoCardHeader}>
-                          <View>
-                            <Text style={styles.creditoNumero}>{v.numero}</Text>
-                            <Text style={styles.creditoClienteName}>{v.cliente_nombre}</Text>
-                            <Text style={styles.clientCardMeta}>
-                              {v.fecha} · {v.tipo_pago || "Contado"}
-                            </Text>
-                          </View>
-                          <View style={{ alignItems: "flex-end" }}>
-                            <Text style={styles.posProdPrice}>
-                              {fmt(Number(v.total) || 0, mon?.codigo)}
-                            </Text>
-                            <View
+          <FlatList
+            data={ventasFiltradas}
+            keyExtractor={(v) => String(v.id || v.numero)}
+            contentContainerStyle={{ padding: 12, paddingBottom: 95, gap: 10 }}
+            renderItem={({ item: v }) => {
+              const esPagada = v.estado === "Pagada";
+              return (
+                <TouchableOpacity
+                  key={v.id}
+                  style={styles.card}
+                  activeOpacity={0.7}
+                  onPress={() => handleOpenVentaDetail(v)}
+                >
+                  <View style={styles.creditoCardHeader}>
+                    <View style={{ flex: 1, paddingRight: 8 }}>
+                      <View style={{ flexDirection: "row", alignItems: "center", gap: 6, marginBottom: 2 }}>
+                        <Text style={styles.creditoNumero}>{v.numero}</Text>
+                        {v.isLocal && (
+                          <View
+                            style={[
+                              styles.statusBadge,
+                              v.sincronizado === 1
+                                ? { backgroundColor: THEME.successSoft, borderColor: THEME.successBorder }
+                                : { backgroundColor: THEME.warningSoft, borderColor: THEME.warningBorder },
+                            ]}
+                          >
+                            <Text
                               style={[
-                                styles.statusBadge,
-                                v.sincronizado === 1
-                                  ? {
-                                      backgroundColor: THEME.successSoft,
-                                      borderColor: THEME.successBorder,
-                                    }
-                                  : {
-                                      backgroundColor: THEME.warningSoft,
-                                      borderColor: THEME.warningBorder,
-                                    },
+                                styles.statusBadgeText,
+                                {
+                                  color: v.sincronizado === 1 ? THEME.successStrong : THEME.warningStrong,
+                                  fontSize: 10,
+                                },
                               ]}
                             >
-                              <Text
-                                style={[
-                                  styles.statusBadgeText,
-                                  {
-                                    color:
-                                      v.sincronizado === 1
-                                        ? THEME.successStrong
-                                        : THEME.warningStrong,
-                                  },
-                                ]}
-                              >
-                                {v.sincronizado === 1 ? "Sincronizada" : "En cola"}
-                              </Text>
-                            </View>
+                              {v.sincronizado === 1 ? "Sincronizada" : "Local"}
+                            </Text>
                           </View>
-                        </View>
+                        )}
                       </View>
-                    );
-                  })}
-              </View>
-            )}
-
-            {/* Ventas generales sincronizadas del sistema */}
-            <Text style={styles.sectionGroupHeader}>HISTORIAL GENERAL DE VENTAS</Text>
-            {ventasRemotas
-              .filter(
-                (v) =>
-                  !ventasSearch.trim() ||
-                  v.numero.toLowerCase().includes(ventasSearch.toLowerCase()) ||
-                  (v.cliente && v.cliente.toLowerCase().includes(ventasSearch.toLowerCase()))
-              )
-              .map((v) => (
-                <View key={v.id} style={styles.card}>
-                  <View style={styles.creditoCardHeader}>
-                    <View style={{ flex: 1 }}>
-                      <Text style={styles.creditoNumero}>{v.numero}</Text>
-                      <Text style={styles.creditoClienteName}>
+                      <Text style={styles.creditoClienteName} numberOfLines={1}>
                         {v.cliente || "Consumidor Final"}
                       </Text>
-                      <Text style={styles.clientCardMeta}>
-                        {v.fecha} · {v.tipo_pago}
-                        {v.metodo_pago_nombre ? ` (${v.metodo_pago_nombre})` : ""}
+                      <Text style={[styles.clientCardMeta, { marginTop: 3 }]}>
+                        🕒 {fmtDateTime(v.creado_en || v.fecha)}
+                      </Text>
+                      <Text style={[styles.clientCardMeta, { color: THEME.foreground, fontWeight: "600" }]}>
+                        {v.tipo_pago}{v.metodo_pago_nombre ? ` · ${v.metodo_pago_nombre}` : ""}
                       </Text>
                     </View>
-                    <View style={{ alignItems: "flex-end", gap: 4 }}>
+
+                    <View style={{ alignItems: "flex-end", justifyContent: "space-between" }}>
                       <Text style={styles.posProdPrice}>
                         {fmt(Number(v.total) || 0, v.moneda_codigo)}
                       </Text>
                       <View
                         style={[
                           styles.statusBadge,
-                          v.estado === "Pagada"
-                            ? {
-                                backgroundColor: THEME.successSoft,
-                                borderColor: THEME.successBorder,
-                              }
-                            : {
-                                backgroundColor: THEME.warningSoft,
-                                borderColor: THEME.warningBorder,
-                              },
+                          esPagada
+                            ? { backgroundColor: THEME.successSoft, borderColor: THEME.successBorder }
+                            : { backgroundColor: THEME.warningSoft, borderColor: THEME.warningBorder },
+                          { marginTop: 4 },
                         ]}
                       >
                         <Text
                           style={[
                             styles.statusBadgeText,
-                            {
-                              color:
-                                v.estado === "Pagada"
-                                  ? THEME.successStrong
-                                  : THEME.warningStrong,
-                            },
+                            { color: esPagada ? THEME.successStrong : THEME.warningStrong },
                           ]}
                         >
                           {v.estado}
                         </Text>
                       </View>
+                      <View style={{ flexDirection: "row", alignItems: "center", gap: 2, marginTop: 8 }}>
+                        <Text style={{ fontSize: 11, fontWeight: "700", color: THEME.primary }}>Ver detalle</Text>
+                        <Feather name="chevron-right" size={13} color={THEME.primary} />
+                      </View>
                     </View>
                   </View>
+                </TouchableOpacity>
+              );
+            }}
+            ListEmptyComponent={
+              <View style={styles.emptyBox}>
+                <Feather name="trending-up" size={34} color={THEME.mutedForeground} />
+                <Text style={styles.emptyBoxTitle}>No se encontraron ventas</Text>
+                <Text style={styles.emptyBoxSub}>
+                  {ventasSearch.trim()
+                    ? "Intenta con otro término de búsqueda"
+                    : "Las ventas registradas aparecerán aquí ordenadas por fecha y hora"}
+                </Text>
+              </View>
+            }
+          />
+        </View>
+      )}
+
+      {/* ==================== KARDEX (/kardex) ==================== */}
+      {route === "kardex" && (
+        <View style={{ flex: 1 }}>
+          {/* Barra de Búsqueda y Botón Refrescar */}
+          <View style={styles.moduleHeaderBar}>
+            <View style={[styles.searchBox, { flex: 1 }]}>
+              <Feather name="search" size={16} color={THEME.mutedForeground} />
+              <TextInput
+                style={styles.searchBoxInput}
+                placeholder="Buscar por producto o motivo..."
+                placeholderTextColor={THEME.mutedForeground}
+                value={kardexSearch}
+                onChangeText={setKardexSearch}
+              />
+              {kardexSearch.length > 0 && (
+                <TouchableOpacity onPress={() => setKardexSearch("")}>
+                  <Feather name="x-circle" size={16} color={THEME.mutedForeground} />
+                </TouchableOpacity>
+              )}
+            </View>
+            <TouchableOpacity
+              style={[styles.outlineSmallBtn, { height: 40, paddingHorizontal: 12 }]}
+              onPress={loadKardex}
+              disabled={kardexLoading}
+            >
+              {kardexLoading ? (
+                <ActivityIndicator size="small" color={THEME.primary} />
+              ) : (
+                <Feather name="refresh-cw" size={16} color={THEME.foreground} />
+              )}
+            </TouchableOpacity>
+          </View>
+
+          {/* Filtros Tipo: Todos, Entrada, Salida, Ajuste */}
+          <View style={{ paddingHorizontal: 12, paddingBottom: 8, flexDirection: "row", gap: 8 }}>
+            {[
+              { id: "todos", label: "Todos" },
+              { id: "Entrada", label: "Entradas" },
+              { id: "Salida", label: "Salidas" },
+              { id: "Ajuste", label: "Ajustes" },
+            ].map((f) => {
+              const active = kardexTipo === f.id;
+              return (
+                <TouchableOpacity
+                  key={f.id}
+                  style={[
+                    styles.pillFilter,
+                    active && styles.pillFilterActive,
+                  ]}
+                  onPress={() => setKardexTipo(f.id)}
+                >
+                  <Text
+                    style={[
+                      styles.pillFilterText,
+                      active && styles.pillFilterTextActive,
+                    ]}
+                  >
+                    {f.label}
+                  </Text>
+                </TouchableOpacity>
+              );
+            })}
+          </View>
+
+          {/* 3 KPI Cards Kardex */}
+          <View style={[styles.creditosKpiRow, { paddingHorizontal: 12, marginBottom: 8 }]}>
+            <View style={[styles.kpiCard, { borderColor: THEME.successBorder, backgroundColor: THEME.successSoft }]}>
+              <Text style={[styles.kpiLabel, { color: THEME.successStrong }]}>ENTRADAS</Text>
+              <Text style={[styles.kpiValue, { color: THEME.successStrong }]}>{kardexStats.entradas}</Text>
+            </View>
+            <View style={[styles.kpiCard, { borderColor: THEME.dangerBorder, backgroundColor: THEME.dangerSoft }]}>
+              <Text style={[styles.kpiLabel, { color: THEME.dangerStrong }]}>SALIDAS</Text>
+              <Text style={[styles.kpiValue, { color: THEME.dangerStrong }]}>{kardexStats.salidas}</Text>
+            </View>
+            <View style={[styles.kpiCard, { borderColor: THEME.infoBorder, backgroundColor: THEME.infoSoft }]}>
+              <Text style={[styles.kpiLabel, { color: THEME.infoStrong }]}>AJUSTES</Text>
+              <Text style={[styles.kpiValue, { color: THEME.infoStrong }]}>{kardexStats.ajustes}</Text>
+            </View>
+          </View>
+
+          {/* Lista de Movimientos */}
+          <FlatList
+            data={kardexItems}
+            keyExtractor={(m, idx) => String(m.id || idx)}
+            contentContainerStyle={{ padding: 12, paddingBottom: 95, gap: 10 }}
+            renderItem={({ item: m }) => {
+              const esEntrada = m.tipo === "Entrada";
+              const esSalida = m.tipo === "Salida";
+              const badgeBg = esEntrada ? THEME.successSoft : esSalida ? THEME.dangerSoft : THEME.infoSoft;
+              const badgeBorder = esEntrada ? THEME.successBorder : esSalida ? THEME.dangerBorder : THEME.infoBorder;
+              const badgeText = esEntrada ? THEME.successStrong : esSalida ? THEME.dangerStrong : THEME.infoStrong;
+              const iconName = esEntrada ? "arrow-down" : esSalida ? "arrow-up" : "refresh-cw";
+
+              return (
+                <View key={m.id} style={styles.card}>
+                  <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "flex-start" }}>
+                    <View style={{ flex: 1, paddingRight: 8 }}>
+                      <Text style={styles.clientCardName}>{m.producto_nombre || "Producto"}</Text>
+                      <Text style={styles.clientCardMeta}>
+                        Cód: {m.producto_codigo || "-"} · 🕒 {fmtDateTime(m.fecha)}
+                      </Text>
+                      {m.motivo ? (
+                        <Text style={[styles.clientCardMeta, { color: THEME.foreground, marginTop: 2 }]}>
+                          Motivo: {m.motivo}
+                        </Text>
+                      ) : null}
+                    </View>
+
+                    <View
+                      style={[
+                        styles.statusBadge,
+                        { backgroundColor: badgeBg, borderColor: badgeBorder, flexDirection: "row", alignItems: "center", gap: 3 },
+                      ]}
+                    >
+                      <Feather name={iconName as any} size={11} color={badgeText} />
+                      <Text style={[styles.statusBadgeText, { color: badgeText }]}>{m.tipo}</Text>
+                    </View>
+                  </View>
+
+                  <View
+                    style={{
+                      flexDirection: "row",
+                      justifyContent: "space-between",
+                      alignItems: "center",
+                      marginTop: 10,
+                      paddingTop: 8,
+                      borderTopWidth: 1,
+                      borderTopColor: THEME.border,
+                    }}
+                  >
+                    <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+                      <Text style={[styles.posProdPrice, { color: badgeText }]}>
+                        {esEntrada ? `+${m.cantidad}` : esSalida ? `-${m.cantidad}` : `${m.cantidad}`} unids
+                      </Text>
+                      {m.costo_unit ? (
+                        <Text style={styles.clientCardMeta}>
+                          ({fmt(Number(m.costo_unit) || 0, m.producto_moneda_codigo || "USD")})
+                        </Text>
+                      ) : null}
+                    </View>
+                    <Text style={styles.clientCardMeta}>
+                      Saldo: {m.saldo_anterior} → <Text style={{ fontWeight: "800", color: THEME.foreground }}>{m.saldo_actual}</Text>
+                    </Text>
+                  </View>
                 </View>
-              ))}
-          </ScrollView>
+              );
+            }}
+            ListEmptyComponent={
+              <View style={styles.emptyBox}>
+                <Feather name="activity" size={34} color={THEME.mutedForeground} />
+                <Text style={styles.emptyBoxTitle}>
+                  {kardexLoading ? "Cargando movimientos..." : "No hay movimientos registrados"}
+                </Text>
+                <Text style={styles.emptyBoxSub}>
+                  {kardexLoading
+                    ? "Obteniendo datos de inventario del servidor..."
+                    : "Las entradas por compra, salidas por venta y ajustes manuales se reflejan aquí"}
+                </Text>
+              </View>
+            }
+          />
+        </View>
+      )}
+
+      {/* ==================== CAJAS Y TURNOS (/cajas) ==================== */}
+      {route === "cajas" && (
+        <View style={{ flex: 1 }}>
+          <View style={styles.moduleHeaderBar}>
+            <View style={{ flex: 1 }}>
+              <Text style={{ fontSize: 16, fontWeight: "800", color: THEME.foreground }}>
+                Cajas y Turnos de Arqueo
+              </Text>
+              <Text style={{ fontSize: 11, color: THEME.mutedForeground }}>
+                Gestión de saldos, aperturas y cierres de caja
+              </Text>
+            </View>
+            <TouchableOpacity
+              style={[styles.outlineSmallBtn, { height: 40, paddingHorizontal: 12 }]}
+              onPress={loadCajas}
+              disabled={cajasLoading}
+            >
+              {cajasLoading ? (
+                <ActivityIndicator size="small" color={THEME.primary} />
+              ) : (
+                <Feather name="refresh-cw" size={16} color={THEME.foreground} />
+              )}
+            </TouchableOpacity>
+          </View>
+
+          <FlatList
+            data={cajasCloud.length > 0 ? cajasCloud : cajas}
+            keyExtractor={(c) => String(c.id)}
+            contentContainerStyle={{ padding: 12, paddingBottom: 95, gap: 12 }}
+            renderItem={({ item: c }) => {
+              const estaAbierta = c.estado === "Abierta";
+              const mon = monedas.find((m) => String(m.id) === String(c.moneda_id)) || {
+                codigo: c.moneda_codigo || "USD",
+                simbolo: c.moneda_simbolo || "$",
+              };
+              return (
+                <View key={c.id} style={styles.card}>
+                  <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "flex-start" }}>
+                    <View style={{ flex: 1 }}>
+                      <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
+                        <Text style={styles.clientCardName}>{c.nombre}</Text>
+                        <View style={styles.monedaPill}>
+                          <Text style={styles.monedaPillText}>{mon.codigo}</Text>
+                        </View>
+                      </View>
+                      {c.fecha_apertura && (
+                        <Text style={[styles.clientCardMeta, { marginTop: 3 }]}>
+                          Apertura: {fmtDateTime(c.fecha_apertura)}
+                        </Text>
+                      )}
+                    </View>
+
+                    <View
+                      style={[
+                        styles.statusBadge,
+                        estaAbierta
+                          ? { backgroundColor: THEME.successSoft, borderColor: THEME.successBorder }
+                          : { backgroundColor: THEME.muted, borderColor: THEME.border },
+                      ]}
+                    >
+                      <Text
+                        style={[
+                          styles.statusBadgeText,
+                          { color: estaAbierta ? THEME.successStrong : THEME.mutedForeground },
+                        ]}
+                      >
+                        {estaAbierta ? "Abierta" : "Cerrada"}
+                      </Text>
+                    </View>
+                  </View>
+
+                  {/* Saldo actual */}
+                  <View style={[styles.checkoutBalanceBanner, { marginVertical: 10 }]}>
+                    <Text style={styles.summaryLabel}>Saldo actual en caja:</Text>
+                    <Text style={[styles.checkoutBigTotal, { fontSize: 22, color: THEME.foreground }]}>
+                      {fmt(Number(c.saldo_actual) || 0, mon.codigo)}
+                    </Text>
+                    {estaAbierta && (
+                      <View style={{ flexDirection: "row", justifyContent: "space-between", marginTop: 6, paddingTop: 6, borderTopWidth: 1, borderTopColor: THEME.border }}>
+                        <Text style={[styles.clientCardMeta, { color: THEME.successStrong }]}>
+                          Entradas: +{fmt(Number(c.total_entradas) || 0, mon.codigo)}
+                        </Text>
+                        <Text style={[styles.clientCardMeta, { color: THEME.dangerStrong }]}>
+                          Salidas: -{fmt(Number(c.total_salidas) || 0, mon.codigo)}
+                        </Text>
+                      </View>
+                    )}
+                  </View>
+
+                  {/* Botones de acción Cierre / Apertura */}
+                  <View style={{ flexDirection: "row", gap: 8, justifyContent: "flex-end" }}>
+                    {estaAbierta ? (
+                      <TouchableOpacity
+                        style={[styles.primarySmallBtn, { backgroundColor: THEME.danger, height: 38, paddingHorizontal: 14 }]}
+                        onPress={() => {
+                          setCajaParaCierre(c);
+                          setCierreObservaciones("");
+                        }}
+                      >
+                        <Feather name="lock" size={14} color="#fff" />
+                        <Text style={styles.primarySmallBtnText}>Cerrar Caja</Text>
+                      </TouchableOpacity>
+                    ) : (
+                      <TouchableOpacity
+                        style={[styles.primarySmallBtn, { backgroundColor: THEME.success, height: 38, paddingHorizontal: 14 }]}
+                        onPress={() => {
+                          setCajaParaAbrir(c);
+                          setSaldoAperturaInput("0");
+                        }}
+                      >
+                        <Feather name="unlock" size={14} color="#fff" />
+                        <Text style={styles.primarySmallBtnText}>Abrir Turno</Text>
+                      </TouchableOpacity>
+                    )}
+                  </View>
+                </View>
+              );
+            }}
+            ListEmptyComponent={
+              <View style={styles.emptyBox}>
+                <Feather name="inbox" size={34} color={THEME.mutedForeground} />
+                <Text style={styles.emptyBoxTitle}>
+                  {cajasLoading ? "Cargando cajas..." : "No hay cajas configuradas"}
+                </Text>
+                <Text style={styles.emptyBoxSub}>
+                  Las cajas registradoras configuradas en la nube se mostrarán aquí.
+                </Text>
+              </View>
+            }
+          />
         </View>
       )}
 
@@ -5338,13 +5883,17 @@ export default function App() {
                 },
                 {
                   group: "CATÁLOGO",
-                  items: [{ id: "productos" as AppRoute, label: "Productos", icon: "package" }],
+                  items: [
+                    { id: "productos" as AppRoute, label: "Productos", icon: "package" },
+                    { id: "kardex" as AppRoute, label: "Kardex", icon: "activity" },
+                  ],
                 },
                 {
                   group: "OPERACIONES",
                   items: [
                     { id: "pos" as AppRoute, label: "Punto de Venta", icon: "shopping-cart" },
                     { id: "ventas" as AppRoute, label: "Ventas", icon: "trending-up" },
+                    { id: "cajas" as AppRoute, label: "Cajas y Turnos", icon: "inbox" },
                   ],
                 },
                 {
@@ -7393,26 +7942,62 @@ export default function App() {
             {ventaDetailModal && (
               <>
                 <View style={styles.modalHeader}>
-                  <View>
+                  <View style={{ flex: 1, paddingRight: 8 }}>
                     <Text style={styles.modalTitle}>
                       Factura {ventaDetailModal.venta.numero}
                     </Text>
                     <Text style={styles.clientCardMeta}>
-                      {String(ventaDetailModal.venta.fecha || "").slice(0, 10)} ·{" "}
+                      🕒 {fmtDateTime(ventaDetailModal.venta.creado_en || ventaDetailModal.venta.fecha)}
+                    </Text>
+                    <Text style={[styles.clientCardName, { marginTop: 2 }]}>
                       {ventaDetailModal.venta.cliente_nombre ||
                         ventaDetailModal.venta.cliente ||
-                        "Cliente"}
+                        "Consumidor Final"}
                     </Text>
                   </View>
-                  <TouchableOpacity onPress={() => setVentaDetailModal(null)}>
+                  <TouchableOpacity onPress={() => setVentaDetailModal(null)} style={{ padding: 4 }}>
                     <Feather name="x" size={20} color={THEME.mutedForeground} />
                   </TouchableOpacity>
                 </View>
 
+                {/* Badges de Modalidad y Estado */}
+                <View style={{ flexDirection: "row", gap: 6, marginBottom: 10 }}>
+                  <View style={[styles.statusBadge, { backgroundColor: THEME.inputBg, borderColor: THEME.border }]}>
+                    <Text style={[styles.statusBadgeText, { color: THEME.foreground }]}>
+                      {ventaDetailModal.venta.tipo_pago || "Contado"}
+                      {ventaDetailModal.venta.metodo_pago_nombre ? ` (${ventaDetailModal.venta.metodo_pago_nombre})` : ""}
+                    </Text>
+                  </View>
+                  <View
+                    style={[
+                      styles.statusBadge,
+                      ventaDetailModal.venta.estado === "Pagada"
+                        ? { backgroundColor: THEME.successSoft, borderColor: THEME.successBorder }
+                        : { backgroundColor: THEME.warningSoft, borderColor: THEME.warningBorder },
+                    ]}
+                  >
+                    <Text
+                      style={[
+                        styles.statusBadgeText,
+                        {
+                          color:
+                            ventaDetailModal.venta.estado === "Pagada"
+                              ? THEME.successStrong
+                              : THEME.warningStrong,
+                        },
+                      ]}
+                    >
+                      {ventaDetailModal.venta.estado || "Pagada"}
+                    </Text>
+                  </View>
+                </View>
+
+                {/* Lista de productos */}
+                <Text style={styles.fieldLabelSmall}>PRODUCTOS ({ventaDetailModal.items.length})</Text>
                 <FlatList
                   data={ventaDetailModal.items}
                   keyExtractor={(it, idx) => String(it.id || idx)}
-                  style={{ maxHeight: 340 }}
+                  style={{ maxHeight: 260 }}
                   renderItem={({ item }) => (
                     <View style={styles.pickerRow}>
                       <View style={{ flex: 1 }}>
@@ -7445,8 +8030,42 @@ export default function App() {
                   }
                 />
 
-                <View style={[styles.checkoutBalanceBanner, { marginTop: 10 }]}>
-                  <View style={styles.summaryTotalRow}>
+                {/* Desglose Financiero */}
+                <View style={[styles.checkoutBalanceBanner, { marginTop: 10, gap: 4 }]}>
+                  {Number(ventaDetailModal.venta.subtotal) > 0 && (
+                    <View style={styles.summaryRow}>
+                      <Text style={styles.summaryLabel}>Subtotal:</Text>
+                      <Text style={styles.summaryVal}>
+                        {fmt(
+                          Number(ventaDetailModal.venta.subtotal) || 0,
+                          ventaDetailModal.venta.moneda_codigo || "USD"
+                        )}
+                      </Text>
+                    </View>
+                  )}
+                  {Number(ventaDetailModal.venta.descuento) > 0 && (
+                    <View style={styles.summaryRow}>
+                      <Text style={[styles.summaryLabel, { color: THEME.dangerStrong }]}>Descuento:</Text>
+                      <Text style={[styles.summaryVal, { color: THEME.dangerStrong }]}>
+                        -{fmt(
+                          Number(ventaDetailModal.venta.descuento) || 0,
+                          ventaDetailModal.venta.moneda_codigo || "USD"
+                        )}
+                      </Text>
+                    </View>
+                  )}
+                  {Number(ventaDetailModal.venta.impuesto) > 0 && (
+                    <View style={styles.summaryRow}>
+                      <Text style={styles.summaryLabel}>Impuesto:</Text>
+                      <Text style={styles.summaryVal}>
+                        +{fmt(
+                          Number(ventaDetailModal.venta.impuesto) || 0,
+                          ventaDetailModal.venta.moneda_codigo || "USD"
+                        )}
+                      </Text>
+                    </View>
+                  )}
+                  <View style={[styles.summaryTotalRow, { borderTopWidth: 1, borderTopColor: THEME.border, paddingTop: 4 }]}>
                     <Text style={styles.summaryTotalLabel}>Total Factura</Text>
                     <Text style={styles.summaryTotalValue}>
                       {fmt(
@@ -7455,6 +8074,141 @@ export default function App() {
                       )}
                     </Text>
                   </View>
+                </View>
+
+                {ventaDetailModal.venta.observaciones ? (
+                  <Text style={[styles.clientCardMeta, { marginTop: 6, fontStyle: "italic" }]}>
+                    Obs: {ventaDetailModal.venta.observaciones}
+                  </Text>
+                ) : null}
+              </>
+            )}
+          </View>
+        </View>
+      </Modal>
+
+      {/* ==================== MODAL CIERRE DE CAJA ==================== */}
+      <Modal
+        visible={!!cajaParaCierre}
+        transparent
+        animationType="slide"
+        onRequestClose={() => setCajaParaCierre(null)}
+      >
+        <View style={styles.modalBackdrop}>
+          <View style={styles.modalSheet}>
+            {cajaParaCierre && (
+              <>
+                <View style={styles.modalHeader}>
+                  <View>
+                    <Text style={styles.modalTitle}>Cierre de Turno / Caja</Text>
+                    <Text style={styles.clientCardMeta}>{cajaParaCierre.nombre}</Text>
+                  </View>
+                  <TouchableOpacity onPress={() => setCajaParaCierre(null)}>
+                    <Feather name="x" size={20} color={THEME.mutedForeground} />
+                  </TouchableOpacity>
+                </View>
+
+                <View style={[styles.checkoutBalanceBanner, { marginVertical: 10 }]}>
+                  <Text style={styles.summaryLabel}>Saldo en Sistema (Arqueo esperado):</Text>
+                  <Text style={[styles.checkoutBigTotal, { fontSize: 24, marginTop: 4 }]}>
+                    {fmt(Number(cajaParaCierre.saldo_actual) || 0, cajaParaCierre.moneda_codigo)}
+                  </Text>
+                </View>
+
+                <Text style={[styles.fieldLabelSmall, { marginTop: 6 }]}>
+                  OBSERVACIONES DEL ARQUEO / CIERRE (OPCIONAL)
+                </Text>
+                <TextInput
+                  style={[styles.searchBoxInput, { height: 70, textAlignVertical: "top", padding: 8, marginTop: 6 }]}
+                  multiline
+                  placeholder="Ej. Billetes contados correctamente, sin novedades..."
+                  placeholderTextColor={THEME.mutedForeground}
+                  value={cierreObservaciones}
+                  onChangeText={setCierreObservaciones}
+                />
+
+                <View style={{ flexDirection: "row", gap: 10, marginTop: 16 }}>
+                  <TouchableOpacity
+                    style={[styles.outlineSmallBtn, { flex: 1, height: 44, justifyContent: "center" }]}
+                    onPress={() => setCajaParaCierre(null)}
+                  >
+                    <Text style={styles.outlineSmallBtnText}>Cancelar</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    style={[styles.primaryBtn, { flex: 1.5, height: 44, backgroundColor: THEME.danger }]}
+                    onPress={handleCerrarCaja}
+                    disabled={submittingCierre}
+                  >
+                    {submittingCierre ? (
+                      <ActivityIndicator size="small" color="#fff" />
+                    ) : (
+                      <>
+                        <Feather name="lock" size={16} color="#fff" />
+                        <Text style={styles.primaryBtnText}>Confirmar Cierre</Text>
+                      </>
+                    )}
+                  </TouchableOpacity>
+                </View>
+              </>
+            )}
+          </View>
+        </View>
+      </Modal>
+
+      {/* ==================== MODAL APERTURA DE CAJA ==================== */}
+      <Modal
+        visible={!!cajaParaAbrir}
+        transparent
+        animationType="slide"
+        onRequestClose={() => setCajaParaAbrir(null)}
+      >
+        <View style={styles.modalBackdrop}>
+          <View style={styles.modalSheet}>
+            {cajaParaAbrir && (
+              <>
+                <View style={styles.modalHeader}>
+                  <View>
+                    <Text style={styles.modalTitle}>Apertura de Turno / Caja</Text>
+                    <Text style={styles.clientCardMeta}>{cajaParaAbrir.nombre}</Text>
+                  </View>
+                  <TouchableOpacity onPress={() => setCajaParaAbrir(null)}>
+                    <Feather name="x" size={20} color={THEME.mutedForeground} />
+                  </TouchableOpacity>
+                </View>
+
+                <Text style={[styles.fieldLabelSmall, { marginTop: 10 }]}>
+                  SALDO INICIAL / BASE DE APERTURA ({cajaParaAbrir.moneda_codigo || ""})
+                </Text>
+                <TextInput
+                  style={[styles.montoIngresadoInput, { marginTop: 6 }]}
+                  keyboardType="numeric"
+                  placeholder="0.00"
+                  placeholderTextColor={THEME.mutedForeground}
+                  value={saldoAperturaInput}
+                  onChangeText={setSaldoAperturaInput}
+                />
+
+                <View style={{ flexDirection: "row", gap: 10, marginTop: 16 }}>
+                  <TouchableOpacity
+                    style={[styles.outlineSmallBtn, { flex: 1, height: 44, justifyContent: "center" }]}
+                    onPress={() => setCajaParaAbrir(null)}
+                  >
+                    <Text style={styles.outlineSmallBtnText}>Cancelar</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    style={[styles.primaryBtn, { flex: 1.5, height: 44, backgroundColor: THEME.success }]}
+                    onPress={handleAbrirCaja}
+                    disabled={submittingAbrir}
+                  >
+                    {submittingAbrir ? (
+                      <ActivityIndicator size="small" color="#fff" />
+                    ) : (
+                      <>
+                        <Feather name="unlock" size={16} color="#fff" />
+                        <Text style={styles.primaryBtnText}>Abrir Turno</Text>
+                      </>
+                    )}
+                  </TouchableOpacity>
                 </View>
               </>
             )}
@@ -9256,6 +10010,39 @@ const styles = StyleSheet.create({
     alignItems: "center",
     gap: 8,
     paddingVertical: 6,
+  },
+  pillFilter: {
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 16,
+    backgroundColor: THEME.card,
+    borderWidth: 1,
+    borderColor: THEME.border,
+  },
+  pillFilterActive: {
+    backgroundColor: THEME.primary,
+    borderColor: THEME.primary,
+  },
+  pillFilterText: {
+    fontSize: 12,
+    fontWeight: "700",
+    color: THEME.mutedForeground,
+  },
+  pillFilterTextActive: {
+    color: "#fff",
+  },
+  monedaPill: {
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 4,
+    backgroundColor: THEME.inputBg,
+    borderWidth: 1,
+    borderColor: THEME.border,
+  },
+  monedaPillText: {
+    fontSize: 11,
+    fontWeight: "800",
+    color: THEME.foreground,
   },
   emptyBox: {
     alignItems: "center",

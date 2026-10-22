@@ -612,3 +612,132 @@ export async function fetchClientePerfilCloud(clienteId: string): Promise<{
     retornoItems: Array.isArray(retData?.items) ? retData.items : [],
   };
 }
+
+/**
+ * Obtiene los movimientos de Kardex desde la nube con paginación y filtros
+ */
+export async function fetchKardexCloud(params: {
+  search?: string;
+  tipo?: string;
+  page?: number;
+  limit?: number;
+} = {}): Promise<{
+  data: any[];
+  total: number;
+  page: number;
+  limit: number;
+  totalPages: number;
+} | null> {
+  const { serverUrl, token } = await getStoredSession();
+  if (!serverUrl || !token) return null;
+  const q = new URLSearchParams();
+  if (params.search) q.set("search", params.search);
+  if (params.tipo && params.tipo !== "todos") q.set("tipo", params.tipo);
+  q.set("page", String(params.page || 1));
+  q.set("limit", String(params.limit || 50));
+  try {
+    const res = await fetch(`${serverUrl}/api/kardex?${q.toString()}`, {
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${token}`,
+      },
+    });
+    if (!res.ok) return null;
+    return await res.json();
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Obtiene todas las cajas registradas y sus turnos desde la nube
+ */
+export async function fetchCajasCloud(): Promise<any[] | null> {
+  const { serverUrl, token } = await getStoredSession();
+  if (!serverUrl || !token) return null;
+  try {
+    const res = await fetch(`${serverUrl}/api/cajas`, {
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${token}`,
+      },
+    });
+    if (!res.ok) return null;
+    return await res.json();
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Realiza el cierre de una caja registradora
+ */
+export async function cerrarCajaCloud(
+  caja_id: string,
+  observaciones?: string
+): Promise<{ success: boolean; data?: any; error?: string }> {
+  const { serverUrl, token } = await getStoredSession();
+  if (!serverUrl || !token) return { success: false, error: "Sesión no configurada" };
+  try {
+    const res = await fetch(`${serverUrl}/api/cierres-caja`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({ caja_id, observaciones }),
+    });
+    const data = await res.json();
+    if (!res.ok) return { success: false, error: data.error || "Error al cerrar caja" };
+    return { success: true, data };
+  } catch (err: any) {
+    return { success: false, error: err?.message || "Error de conexión con el servidor" };
+  }
+}
+
+/**
+ * Abre o reabre una caja con saldo inicial
+ */
+export async function abrirCajaCloud(
+  caja_id: string,
+  saldo_apertura: number
+): Promise<{ success: boolean; data?: any; error?: string }> {
+  const { serverUrl, token } = await getStoredSession();
+  if (!serverUrl || !token) return { success: false, error: "Sesión no configurada" };
+  try {
+    const res = await fetch(`${serverUrl}/api/cajas`, {
+      method: "PUT",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({ id: caja_id, accion: "abrir", saldo_apertura }),
+    });
+    const data = await res.json();
+    if (!res.ok) return { success: false, error: data.error || "Error al abrir caja" };
+    return { success: true, data };
+  } catch (err: any) {
+    return { success: false, error: err?.message || "Error de conexión con el servidor" };
+  }
+}
+
+/**
+ * Obtiene el detalle completo de una venta desde el servidor
+ */
+export async function fetchVentaDetalleCloud(venta_id: string): Promise<any | null> {
+  const { serverUrl, token } = await getStoredSession();
+  if (!serverUrl || !token) return null;
+  try {
+    const res = await fetch(`${serverUrl}/api/ventas?id=${encodeURIComponent(venta_id)}`, {
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${token}`,
+      },
+    });
+    if (!res.ok) return null;
+    const json = await res.json();
+    return json?.venta || json;
+  } catch {
+    return null;
+  }
+}

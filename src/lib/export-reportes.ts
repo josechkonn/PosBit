@@ -29,9 +29,14 @@ function toSecciones(active: string, md: MonedaReporte): SeccionTabla[] {
         titulo: "Resumen de Ventas",
         columnas: ["Concepto", "Valor"],
         filas: [
-          ["Total Ventas", money(r.total, codigo)],
+          ["Total Ventas Facturadas", money(r.total, codigo)],
+          ["Ventas de Contado (Cobro inmediato)", money(r.ventaContado ?? r.total, codigo)],
+          ["Ventas a Crédito (Deuda generada)", money(r.ventaCredito ?? 0, codigo)],
+          ["Abonos a Deudas Recibidos", money(r.abonosCobrados ?? 0, codigo)],
+          ["Total Dinero Cobrado Real", money(r.totalCobradoReal ?? r.total, codigo)],
           ["Subtotal", money(r.subtotal, codigo)],
-          ["Impuestos (IVA 16%)", money(r.impuesto || 0, codigo)],
+          ["Descuentos", money(r.descuento || 0, codigo)],
+          ["Impuestos (IVA)", money(r.impuesto || 0, codigo)],
           ["N° Transacciones", r.count],
           ["Ticket Promedio", money(r.count > 0 ? r.total / r.count : 0, codigo)],
         ],
@@ -119,16 +124,21 @@ function toSecciones(active: string, md: MonedaReporte): SeccionTabla[] {
       });
     }
   } else if (active === "finanzas") {
-    const r = md.rentabilidad;
-    if (r) {
+    const rf = md.resumenFinanzas || md.rentabilidad;
+    if (rf) {
       secciones.push({
         titulo: "Resumen Financiero",
         columnas: ["Concepto", "Valor"],
         filas: [
-          ["Ingresos por Ventas", money(r.ingresos, codigo)],
-          ["Costo de Mercancía Vendida", money(r.costos, codigo)],
-          ["Ganancia Bruta", money(r.gananciaBruta, codigo)],
-          ["Cuentas por Cobrar", money(md.cuentasPorCobrar || 0, codigo)],
+          ["Total Ventas Facturadas", money(rf.ventasTotales ?? rf.ingresos ?? 0, codigo)],
+          ["Ingreso Real Cobrado", money(rf.ingresosReales ?? rf.ingresos ?? 0, codigo)],
+          ["Costo de Mercancía Vendida", money(rf.costoMercancia ?? rf.costos ?? 0, codigo)],
+          ["Ganancia Bruta", money(rf.gananciaBruta ?? 0, codigo)],
+          ["Margen Bruto", `${(rf.margenPct ?? 0).toFixed(1)}%`],
+          ["Compras del Período", money(rf.comprasPeriodo ?? 0, codigo)],
+          ["Flujo de Caja Operativo", money(rf.flujoCajaOperativo ?? 0, codigo)],
+          ["Cuentas por Cobrar (Clientes)", money(rf.cuentasPorCobrar ?? md.cuentasPorCobrar ?? 0, codigo)],
+          ["Cuentas por Pagar (Proveedores)", money(rf.cuentasPorPagar ?? md.cuentasPorPagar ?? 0, codigo)],
         ],
       });
     }

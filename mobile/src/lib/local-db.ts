@@ -161,6 +161,7 @@ export interface LocalVentaRemota {
   metodo_pago_nombre?: string | null;
   estado: string;
   observaciones: string | null;
+  creado_en?: string | null;
 }
 
 export interface LocalVentaItemRemoto {
@@ -385,7 +386,8 @@ export async function getMobileDb(): Promise<SQLite.SQLiteDatabase> {
       tipo_pago TEXT NOT NULL DEFAULT 'Contado',
       metodo_pago_id TEXT,
       estado TEXT NOT NULL DEFAULT 'Pagada',
-      observaciones TEXT
+      observaciones TEXT,
+      creado_en TEXT
     );
 
     CREATE TABLE IF NOT EXISTS venta_items_remotos (
@@ -467,6 +469,7 @@ export async function getMobileDb(): Promise<SQLite.SQLiteDatabase> {
     `ALTER TABLE ventas_locales ADD COLUMN pagos_json TEXT`,
     `ALTER TABLE ventas_locales ADD COLUMN cobros_extra_json TEXT`,
     `ALTER TABLE ventas_locales ADD COLUMN observaciones TEXT`,
+    `ALTER TABLE ventas_remotas ADD COLUMN creado_en TEXT`,
   ];
   for (const sql of safeAlter) {
     try {
@@ -817,8 +820,8 @@ export async function saveCatalogOffline(data: {
       for (const v of data.ventas) {
         if (!v || !v.id) continue;
         await db.runAsync(
-          `INSERT INTO ventas_remotas (id, numero, cliente_id, cliente, fecha, subtotal, impuesto, descuento, total, moneda_id, tipo_pago, metodo_pago_id, estado, observaciones)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          `INSERT INTO ventas_remotas (id, numero, cliente_id, cliente, fecha, subtotal, impuesto, descuento, total, moneda_id, tipo_pago, metodo_pago_id, estado, observaciones, creado_en)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT(id) DO UPDATE SET
              numero = excluded.numero,
              cliente_id = excluded.cliente_id,
@@ -832,7 +835,8 @@ export async function saveCatalogOffline(data: {
              tipo_pago = excluded.tipo_pago,
              metodo_pago_id = excluded.metodo_pago_id,
              estado = excluded.estado,
-             observaciones = excluded.observaciones`,
+             observaciones = excluded.observaciones,
+             creado_en = excluded.creado_en`,
           [
             String(v.id),
             String(v.numero),
@@ -848,6 +852,7 @@ export async function saveCatalogOffline(data: {
             v.metodo_pago_id ? String(v.metodo_pago_id) : null,
             String(v.estado || "Pagada"),
             v.observaciones ? String(v.observaciones) : null,
+            v.creado_en ? String(v.creado_en) : (v.fecha ? `${String(v.fecha).slice(0, 10)}T00:00:00.000Z` : new Date().toISOString()),
           ]
         );
       }
@@ -1168,8 +1173,8 @@ export async function getLocalVentasRemotas(): Promise<LocalVentaRemota[]> {
     FROM ventas_remotas v
     LEFT JOIN monedas m ON v.moneda_id = m.id
     LEFT JOIN metodos_pago mp ON v.metodo_pago_id = mp.id
-    ORDER BY v.fecha DESC, v.id DESC
-    LIMIT 150
+    ORDER BY COALESCE(v.creado_en, v.fecha || 'T00:00:00Z') DESC, v.fecha DESC, v.id DESC
+    LIMIT 200
   `);
 }
 
@@ -1181,6 +1186,17 @@ export async function getLocalVentaItemsRemotos(): Promise<LocalVentaItemRemoto[
     LEFT JOIN productos p ON vi.producto_id = p.id
     ORDER BY vi.venta_id DESC
   `);
+}
+
+export async function getLocalVentaItemsByVentaId(ventaId: string): Promise<LocalVentaItemRemoto[]> {
+  const db = await getMobileDb();
+  return await db.getAllAsync<LocalVentaItemRemoto>(`
+    SELECT vi.*, COALESCE(p.codigo, '') as producto_codigo, COALESCE(p.nombre, 'Producto') as producto_nombre
+    FROM venta_items_remotos vi
+    LEFT JOIN productos p ON vi.producto_id = p.id
+    WHERE vi.venta_id = ?
+    ORDER BY vi.id ASC
+  `, [ventaId]);
 }
 
 export async function createOfflineSale(venta: {
