@@ -66,6 +66,8 @@ import {
   cerrarCajaCloud,
   abrirCajaCloud,
   fetchVentaDetalleCloud,
+  registrarAjusteKardexCloud,
+  fetchReportesCloud,
 } from "./src/lib/sync-client";
 
 const DEFAULT_CLOUD_URL = "https://pos-bit-pi.vercel.app";
@@ -111,7 +113,7 @@ const THEME = {
   sky: "#0ea5e9",
 };
 
-type AppRoute = "dashboard" | "pos" | "clientes" | "creditos" | "ventas" | "productos" | "config" | "kardex" | "cajas";
+type AppRoute = "dashboard" | "pos" | "clientes" | "creditos" | "ventas" | "productos" | "config" | "kardex" | "cajas" | "reportes";
 
 interface CartItem {
   product: LocalProducto;
@@ -414,6 +416,24 @@ export default function App() {
   const [cajaParaAbrir, setCajaParaAbrir] = useState<any | null>(null);
   const [saldoAperturaInput, setSaldoAperturaInput] = useState("0");
   const [submittingAbrir, setSubmittingAbrir] = useState(false);
+
+  // Kardex Adjustment Modal State
+  const [modalAjusteKardexVisible, setModalAjusteKardexVisible] = useState(false);
+  const [ajusteProducto, setAjusteProducto] = useState<LocalProducto | null>(null);
+  const [ajustePresentacionId, setAjustePresentacionId] = useState<string | null>(null);
+  const [ajusteTipo, setAjusteTipo] = useState<"Entrada" | "Salida">("Entrada");
+  const [ajusteCantidad, setAjusteCantidad] = useState("1");
+  const [ajusteMotivo, setAjusteMotivo] = useState("Ajuste manual");
+  const [ajusteSearchProd, setAjusteSearchProd] = useState("");
+  const [ajusteSubmitting, setAjusteSubmitting] = useState(false);
+
+  // Reportes Module State
+  const [reportesData, setReportesData] = useState<any>(null);
+  const [reportesLoading, setReportesLoading] = useState(false);
+  const [reportesTab, setReportesTab] = useState<"ventas" | "finanzas" | "inventario">("ventas");
+  const [reportesPreset, setReportesPreset] = useState<"hoy" | "mes" | "anio" | "todo">("hoy");
+  const [reportesMonedaCod, setReportesMonedaCod] = useState<string>("");
+  const [reportesStockPage, setReportesStockPage] = useState(1);
 
   const showToast = useCallback((text: string, type: "success" | "error" | "info" = "success") => {
     setToastMsg({ text, type });
@@ -2176,6 +2196,123 @@ export default function App() {
     }
   }, [cajaParaAbrir, saldoAperturaInput, showToast, loadCajas]);
 
+  // Registro de Ajuste de Inventario (Kardex)
+  const handleRegistrarAjuste = useCallback(async () => {
+    if (!ajusteProducto) {
+      Alert.alert("Atención", "Selecciona un producto para ajustar");
+      return;
+    }
+    const qty = parseFloat(ajusteCantidad);
+    if (isNaN(qty) || qty <= 0) {
+      Alert.alert("Atención", "La cantidad debe ser mayor a 0");
+      return;
+    }
+
+    // Calcular factor de presentación si aplica
+    let factor = 1;
+    if (ajustePresentacionId && ajusteProducto.presentaciones) {
+      const pres = ajusteProducto.presentaciones.find((p) => p.id === ajustePresentacionId);
+      if (pres && pres.unidades > 1) {
+        factor = pres.unidades;
+      }
+    }
+    const unidadesTotales = Math.round(qty * factor);
+
+    if (ajusteTipo === "Salida" && unidadesTotales > ajusteProducto.stock) {
+      Alert.alert(
+        "Stock Insuficiente",
+        `No puedes registrar una salida de ${unidadesTotales} unidades porque el stock actual es de ${ajusteProducto.stock}.`
+      );
+      return;
+    }
+
+    setAjusteSubmitting(true);
+    try {
+      const res = await registrarAjusteKardexCloud([
+        {
+          producto_id: ajusteProducto.id,
+          tipo: ajusteTipo,
+          cantidad: qty,
+          motivo: ajusteMotivo.trim() || "Ajuste manual",
+          presentacion_id: ajustePresentacionId || null,
+        },
+      ]);
+
+      if (res.success) {
+        showToast("Ajuste de inventario registrado con éxito", "success");
+        setModalAjusteKardexVisible(false);
+        setAjusteProducto(null);
+        setAjustePresentacionId(null);
+        setAjusteCantidad("1");
+        setAjusteMotivo("Ajuste manual");
+        setAjusteSearchProd("");
+        loadKardex();
+        refreshLocalState();
+      } else {
+        Alert.alert("Error al registrar ajuste", res.error || "Ocurrió un error");
+      }
+    } catch (e: any) {
+      Alert.alert("Error", e?.message || "Error al conectar con el servidor");
+    } finally {
+      setAjusteSubmitting(false);
+    }
+  }, [ajusteProducto, ajusteCantidad, ajustePresentacionId, ajusteTipo, ajusteMotivo, showToast, loadKardex, refreshLocalState]);
+
+  // Carga de Reportes
+  const loadReportes = useCallback(async () => {
+    setReportesLoading(true);
+    try {
+      let fechaInicio = "";
+      let fechaFin = "";
+      const now = new Date();
+      const toIsoDate = (d: Date) => {
+        const y = d.getFullYear();
+        const m = String(d.getMonth() + 1).padStart(2, "0");
+        const day = String(d.getDate()).padStart(2, "0");
+        return `${y}-${m}-${day}`;
+      };
+
+      if (reportesPreset === "hoy") {
+        fechaInicio = toIsoDate(now);
+        fechaFin = toIsoDate(now);
+      } else if (reportesPreset === "mes") {
+        const firstDay = new Date(now.getFullYear(), now.getMonth(), 1);
+        fechaInicio = toIsoDate(firstDay);
+        fechaFin = toIsoDate(now);
+      } else if (reportesPreset === "anio") {
+        const firstDay = new Date(now.getFullYear(), 0, 1);
+        fechaInicio = toIsoDate(firstDay);
+        fechaFin = toIsoDate(now);
+      }
+
+      const res = await fetchReportesCloud({
+        tipo: reportesTab,
+        fecha_inicio: fechaInicio || undefined,
+        fecha_fin: fechaFin || undefined,
+      });
+
+      if (res) {
+        setReportesData(res);
+        if (!reportesMonedaCod) {
+          const keys = Object.keys(res).filter((k) => !k.startsWith("__"));
+          if (keys.length > 0) {
+            setReportesMonedaCod(keys[0]);
+          }
+        }
+      }
+    } catch (e: any) {
+      console.warn("Error cargando reportes:", e);
+    } finally {
+      setReportesLoading(false);
+    }
+  }, [reportesTab, reportesPreset, reportesMonedaCod]);
+
+  useEffect(() => {
+    if (route === "reportes") {
+      loadReportes();
+    }
+  }, [route, loadReportes]);
+
   // ── Modal Ajustar Límite de Crédito (clon de CreditoLimiteModal web) ──
   const openAjustarCreditoModal = useCallback(
     (cli: LocalCliente, monedaInicialId?: string, op: "add" | "remove" = "add") => {
@@ -2692,6 +2829,7 @@ export default function App() {
     config: "Sincronización y Tasas",
     kardex: "Kardex de Inventario",
     cajas: "Cajas y Turnos",
+    reportes: "Reportes y Estadísticas",
   };
 
   return (
@@ -5121,6 +5259,21 @@ export default function App() {
               )}
             </View>
             <TouchableOpacity
+              style={[styles.primaryBtn, { height: 40, paddingHorizontal: 12 }]}
+              onPress={() => {
+                setAjusteProducto(null);
+                setAjustePresentacionId(null);
+                setAjusteCantidad("1");
+                setAjusteMotivo("Ajuste manual");
+                setAjusteTipo("Entrada");
+                setAjusteSearchProd("");
+                setModalAjusteKardexVisible(true);
+              }}
+            >
+              <Feather name="plus" size={16} color="#fff" />
+              <Text style={styles.primaryBtnText}>Ajuste</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
               style={[styles.outlineSmallBtn, { height: 40, paddingHorizontal: 12 }]}
               onPress={loadKardex}
               disabled={kardexLoading}
@@ -5394,6 +5547,451 @@ export default function App() {
               </View>
             }
           />
+        </View>
+      )}
+
+      {/* ==================== REPORTES (/reportes) ==================== */}
+      {route === "reportes" && (
+        <View style={{ flex: 1 }}>
+          {/* Presets de Tiempo y Botón Refrescar */}
+          <View style={styles.moduleHeaderBar}>
+            <View style={{ flexDirection: "row", gap: 6, flex: 1 }}>
+              {[
+                { id: "hoy", label: "Hoy" },
+                { id: "mes", label: "Mes" },
+                { id: "anio", label: "Año" },
+                { id: "todo", label: "Todo" },
+              ].map((p) => {
+                const active = reportesPreset === p.id;
+                return (
+                  <TouchableOpacity
+                    key={p.id}
+                    style={[
+                      styles.pillFilter,
+                      active && styles.pillFilterActive,
+                      { paddingHorizontal: 12, paddingVertical: 6 },
+                    ]}
+                    onPress={() => setReportesPreset(p.id as any)}
+                  >
+                    <Text
+                      style={[
+                        styles.pillFilterText,
+                        active && styles.pillFilterTextActive,
+                        { fontSize: 12 },
+                      ]}
+                    >
+                      {p.label}
+                    </Text>
+                  </TouchableOpacity>
+                );
+              })}
+            </View>
+            <TouchableOpacity
+              style={[styles.outlineSmallBtn, { height: 36, paddingHorizontal: 10 }]}
+              onPress={loadReportes}
+              disabled={reportesLoading}
+            >
+              {reportesLoading ? (
+                <ActivityIndicator size="small" color={THEME.primary} />
+              ) : (
+                <Feather name="refresh-cw" size={16} color={THEME.foreground} />
+              )}
+            </TouchableOpacity>
+          </View>
+
+          {/* Subtabs de Reporte: Ventas y Cobros, Finanzas, Stock Crítico */}
+          <View style={{ paddingHorizontal: 12, paddingBottom: 8, flexDirection: "row", gap: 8 }}>
+            {[
+              { id: "ventas", label: "Ventas y Cobros" },
+              { id: "finanzas", label: "Finanzas" },
+              { id: "inventario", label: "Stock Crítico" },
+            ].map((t) => {
+              const active = reportesTab === t.id;
+              return (
+                <TouchableOpacity
+                  key={t.id}
+                  style={[
+                    styles.pillFilter,
+                    active && styles.pillFilterActive,
+                  ]}
+                  onPress={() => setReportesTab(t.id as any)}
+                >
+                  <Text
+                    style={[
+                      styles.pillFilterText,
+                      active && styles.pillFilterTextActive,
+                    ]}
+                  >
+                    {t.label}
+                  </Text>
+                </TouchableOpacity>
+              );
+            })}
+          </View>
+
+          {/* Selector de Moneda (USD, COP, VES, etc.) */}
+          {monedas.length > 1 && (
+            <ScrollView
+              horizontal
+              showsHorizontalScrollIndicator={false}
+              contentContainerStyle={{ paddingHorizontal: 12, paddingBottom: 8, gap: 6 }}
+            >
+              {monedas.map((m) => {
+                const active = reportesMonedaCod === m.codigo;
+                return (
+                  <TouchableOpacity
+                    key={m.id}
+                    style={[
+                      styles.monedaPill,
+                      active
+                        ? { backgroundColor: THEME.primary, borderColor: THEME.primary }
+                        : { backgroundColor: THEME.card, borderColor: THEME.border },
+                      { paddingHorizontal: 10, paddingVertical: 4 },
+                    ]}
+                    onPress={() => setReportesMonedaCod(m.codigo)}
+                  >
+                    <Text
+                      style={[
+                        styles.monedaPillText,
+                        active ? { color: "#fff", fontWeight: "700" } : { color: THEME.foreground },
+                      ]}
+                    >
+                      {m.codigo} ({m.simbolo})
+                    </Text>
+                  </TouchableOpacity>
+                );
+              })}
+            </ScrollView>
+          )}
+
+          {reportesLoading && !reportesData ? (
+            <View style={[styles.emptyBox, { flex: 1, justifyContent: "center" }]}>
+              <ActivityIndicator size="large" color={THEME.primary} />
+              <Text style={[styles.emptyBoxTitle, { marginTop: 12 }]}>Cargando reportes...</Text>
+            </View>
+          ) : (
+            <ScrollView contentContainerStyle={{ padding: 12, paddingBottom: 95, gap: 12 }}>
+              {/* Cobros Físicos por Moneda (Global) */}
+              {reportesTab === "ventas" && reportesData?.__cobros_globales && (
+                <View style={[styles.card, { borderColor: THEME.primary, borderWidth: 1.5 }]}>
+                  <View style={{ flexDirection: "row", alignItems: "center", gap: 6, marginBottom: 8 }}>
+                    <Feather name="dollar-sign" size={16} color={THEME.primary} />
+                    <Text style={{ fontSize: 13, fontWeight: "800", color: THEME.foreground }}>
+                      COBROS REALES RECIBIDOS (POR MONEDA)
+                    </Text>
+                  </View>
+                  <Text style={{ fontSize: 11, color: THEME.mutedForeground, marginBottom: 10 }}>
+                    Dinero efectivamente cobrado en el período (ventas de contado + abonos cobrados), separado por divisa:
+                  </Text>
+                  {reportesData.__cobros_globales.map((cg: any) => (
+                    <View
+                      key={cg.moneda_codigo}
+                      style={{
+                        padding: 10,
+                        borderRadius: 8,
+                        backgroundColor: THEME.inputBg,
+                        marginBottom: 6,
+                        borderWidth: 1,
+                        borderColor: THEME.border,
+                      }}
+                    >
+                      <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center" }}>
+                        <Text style={{ fontSize: 13, fontWeight: "700", color: THEME.foreground }}>
+                          Cobrado en {cg.moneda_codigo}
+                        </Text>
+                        <Text style={{ fontSize: 15, fontWeight: "800", color: THEME.successStrong }}>
+                          {fmt(Number(cg.total) || 0, cg.moneda_codigo)}
+                        </Text>
+                      </View>
+                      <View style={{ flexDirection: "row", justifyContent: "space-between", marginTop: 4 }}>
+                        <Text style={{ fontSize: 11, color: THEME.mutedForeground }}>
+                          Ventas de contado: {fmt(Number(cg.total_ventas) || 0, cg.moneda_codigo)}
+                        </Text>
+                        <Text style={{ fontSize: 11, color: THEME.infoStrong }}>
+                          Abonos a deudas: +{fmt(Number(cg.total_abonos) || 0, cg.moneda_codigo)}
+                        </Text>
+                      </View>
+                      {cg.metodos && cg.metodos.length > 0 && (
+                        <View style={{ marginTop: 6, paddingTop: 6, borderTopWidth: 1, borderTopColor: THEME.border }}>
+                          {cg.metodos.map((met: any, idx: number) => (
+                            <View key={idx} style={{ flexDirection: "row", justifyContent: "space-between", marginTop: 2 }}>
+                              <Text style={{ fontSize: 10, color: THEME.mutedForeground }}>• {met.nombre}</Text>
+                              <Text style={{ fontSize: 10, fontWeight: "600", color: THEME.foreground }}>
+                                {fmt(Number(met.total) || 0, cg.moneda_codigo)}
+                              </Text>
+                            </View>
+                          ))}
+                        </View>
+                      )}
+                    </View>
+                  ))}
+                </View>
+              )}
+
+              {/* KPIs de la Moneda Seleccionada */}
+              {(() => {
+                const monData = reportesData?.[reportesMonedaCod] || (reportesData && reportesData[Object.keys(reportesData).find((k) => !k.startsWith("__")) || ""]);
+                if (!monData) {
+                  return (
+                    <View style={styles.emptyBox}>
+                      <Text style={styles.emptyBoxSub}>No hay datos para esta moneda en el período seleccionado.</Text>
+                    </View>
+                  );
+                }
+
+                if (reportesTab === "ventas") {
+                  const res = monData.resumen || {};
+                  return (
+                    <>
+                      <View style={{ flexDirection: "row", gap: 8 }}>
+                        <View style={[styles.kpiCard, { flex: 1, backgroundColor: THEME.card, borderColor: THEME.border }]}>
+                          <Text style={styles.kpiLabel}>VENTA TOTAL GENERAL</Text>
+                          <Text style={[styles.kpiValue, { fontSize: 16, color: THEME.foreground }]}>
+                            {fmt(Number(res.total) || 0, reportesMonedaCod)}
+                          </Text>
+                          <Text style={{ fontSize: 10, color: THEME.mutedForeground, marginTop: 2 }}>
+                            Contado + Crédito
+                          </Text>
+                        </View>
+                        <View style={[styles.kpiCard, { flex: 1, backgroundColor: THEME.successSoft, borderColor: THEME.successBorder }]}>
+                          <Text style={[styles.kpiLabel, { color: THEME.successStrong }]}>COBRADO REAL</Text>
+                          <Text style={[styles.kpiValue, { fontSize: 16, color: THEME.successStrong }]}>
+                            {fmt(Number(res.totalCobradoReal ?? res.ventaContado) || 0, reportesMonedaCod)}
+                          </Text>
+                          <Text style={{ fontSize: 10, color: THEME.successStrong, marginTop: 2 }}>
+                            {res.countContado || 0} vtas + {res.countAbonos || 0} abonos
+                          </Text>
+                        </View>
+                      </View>
+
+                      <View style={{ flexDirection: "row", gap: 8 }}>
+                        <View style={[styles.kpiCard, { flex: 1, backgroundColor: THEME.warningSoft, borderColor: THEME.warningBorder }]}>
+                          <Text style={[styles.kpiLabel, { color: THEME.warningStrong }]}>QUEDÓ COMO DEUDA</Text>
+                          <Text style={[styles.kpiValue, { fontSize: 16, color: THEME.warningStrong }]}>
+                            {fmt(Number(res.ventaCredito) || 0, reportesMonedaCod)}
+                          </Text>
+                          <Text style={{ fontSize: 10, color: THEME.warningStrong, marginTop: 2 }}>
+                            {res.countCredito || 0} vtas a crédito
+                          </Text>
+                        </View>
+                        <View style={[styles.kpiCard, { flex: 1, backgroundColor: THEME.card, borderColor: THEME.border }]}>
+                          <Text style={styles.kpiLabel}>TICKET PROMEDIO</Text>
+                          <Text style={[styles.kpiValue, { fontSize: 16, color: THEME.foreground }]}>
+                            {fmt(res.count > 0 ? (res.total / res.count) : 0, reportesMonedaCod)}
+                          </Text>
+                          <Text style={{ fontSize: 10, color: THEME.mutedForeground, marginTop: 2 }}>
+                            {res.count || 0} transacciones
+                          </Text>
+                        </View>
+                      </View>
+
+                      {/* Ventas por Método de Pago */}
+                      {Array.isArray(monData.ventasPorMetodo) && monData.ventasPorMetodo.length > 0 && (
+                        <View style={styles.card}>
+                          <Text style={{ fontSize: 13, fontWeight: "700", color: THEME.foreground, marginBottom: 8 }}>
+                            Ventas por Método de Pago
+                          </Text>
+                          {monData.ventasPorMetodo.map((m: any, idx: number) => (
+                            <View
+                              key={idx}
+                              style={{
+                                flexDirection: "row",
+                                justifyContent: "space-between",
+                                paddingVertical: 6,
+                                borderBottomWidth: 1,
+                                borderBottomColor: THEME.border,
+                              }}
+                            >
+                              <Text style={{ fontSize: 12, color: THEME.foreground }}>{m.nombre}</Text>
+                              <View style={{ alignItems: "flex-end" }}>
+                                <Text style={{ fontSize: 12, fontWeight: "700", color: THEME.foreground }}>
+                                  {fmt(Number(m.total) || 0, reportesMonedaCod)}
+                                </Text>
+                                <Text style={{ fontSize: 10, color: THEME.mutedForeground }}>{m.count} vtas</Text>
+                              </View>
+                            </View>
+                          ))}
+                        </View>
+                      )}
+                    </>
+                  );
+                }
+
+                if (reportesTab === "finanzas") {
+                  const fin = monData.finanzas || monData.resumen || {};
+                  const ventasTot = Number(fin.totalVentas ?? fin.total) || 0;
+                  const costoTot = Number(fin.totalCosto) || 0;
+                  const ganancia = Number(fin.gananciaBruta ?? (ventasTot - costoTot)) || 0;
+                  const margen = ventasTot > 0 ? (ganancia / ventasTot) * 100 : 0;
+                  return (
+                    <>
+                      <View style={[styles.card, { borderColor: THEME.successBorder, borderWidth: 1.5 }]}>
+                        <Text style={{ fontSize: 13, fontWeight: "800", color: THEME.foreground, marginBottom: 12 }}>
+                          RESUMEN FINANCIERO Y UTILIDAD ({reportesMonedaCod})
+                        </Text>
+                        <View style={{ gap: 10 }}>
+                          <View style={{ flexDirection: "row", justifyContent: "space-between" }}>
+                            <Text style={{ fontSize: 13, color: THEME.mutedForeground }}>Ventas Totales:</Text>
+                            <Text style={{ fontSize: 14, fontWeight: "700", color: THEME.foreground }}>
+                              {fmt(ventasTot, reportesMonedaCod)}
+                            </Text>
+                          </View>
+                          <View style={{ flexDirection: "row", justifyContent: "space-between" }}>
+                            <Text style={{ fontSize: 13, color: THEME.mutedForeground }}>Costo de Mercancía Vendida:</Text>
+                            <Text style={{ fontSize: 14, fontWeight: "700", color: THEME.dangerStrong }}>
+                              {fmt(costoTot, reportesMonedaCod)}
+                            </Text>
+                          </View>
+                          <View style={{ height: 1, backgroundColor: THEME.border }} />
+                          <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center" }}>
+                            <Text style={{ fontSize: 14, fontWeight: "800", color: THEME.foreground }}>Utilidad Bruta:</Text>
+                            <Text style={{ fontSize: 18, fontWeight: "900", color: THEME.successStrong }}>
+                              {fmt(ganancia, reportesMonedaCod)}
+                            </Text>
+                          </View>
+                          <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center" }}>
+                            <Text style={{ fontSize: 13, color: THEME.mutedForeground }}>Margen de Ganancia:</Text>
+                            <View style={[styles.statusBadge, { backgroundColor: THEME.successSoft, borderColor: THEME.successBorder }]}>
+                              <Text style={[styles.statusBadgeText, { color: THEME.successStrong, fontWeight: "800" }]}>
+                                {margen.toFixed(1)}%
+                              </Text>
+                            </View>
+                          </View>
+                        </View>
+                      </View>
+                    </>
+                  );
+                }
+
+                if (reportesTab === "inventario") {
+                  const stockList = Array.isArray(monData.stockBajo)
+                    ? monData.stockBajo
+                    : productos.filter((p) => p.stock <= (p.stock_minimo || 5));
+                  const pageSize = 8;
+                  const totalPages = Math.max(1, Math.ceil(stockList.length / pageSize));
+                  const paginated = stockList.slice((reportesStockPage - 1) * pageSize, reportesStockPage * pageSize);
+
+                  return (
+                    <View style={styles.card}>
+                      <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+                        <View>
+                          <Text style={{ fontSize: 13, fontWeight: "800", color: THEME.foreground }}>
+                            Productos con Bajo Inventario
+                          </Text>
+                          <Text style={{ fontSize: 11, color: THEME.mutedForeground }}>
+                            {stockList.length} productos críticos
+                          </Text>
+                        </View>
+                        {totalPages > 1 && (
+                          <Text style={{ fontSize: 11, fontWeight: "600", color: THEME.mutedForeground }}>
+                            Pág. {reportesStockPage} de {totalPages}
+                          </Text>
+                        )}
+                      </View>
+
+                      {paginated.length === 0 ? (
+                        <View style={{ paddingVertical: 20, alignItems: "center" }}>
+                          <Feather name="check-circle" size={24} color={THEME.success} />
+                          <Text style={{ fontSize: 12, color: THEME.mutedForeground, marginTop: 6 }}>
+                            No hay productos con alertas de stock
+                          </Text>
+                        </View>
+                      ) : (
+                        paginated.map((p: any) => {
+                          const sinStock = p.stock <= 0;
+                          return (
+                            <View
+                              key={p.id}
+                              style={{
+                                flexDirection: "row",
+                                justifyContent: "space-between",
+                                alignItems: "center",
+                                paddingVertical: 8,
+                                borderBottomWidth: 1,
+                                borderBottomColor: THEME.border,
+                              }}
+                            >
+                              <View style={{ flex: 1, paddingRight: 8 }}>
+                                <Text style={{ fontSize: 12, fontWeight: "600", color: THEME.foreground }}>
+                                  {p.nombre}
+                                </Text>
+                                <Text style={{ fontSize: 10, color: THEME.mutedForeground, fontFamily: "monospace" }}>
+                                  Cód: {p.codigo}
+                                </Text>
+                              </View>
+                              <View style={{ alignItems: "flex-end", gap: 3 }}>
+                                <Text
+                                  style={{
+                                    fontSize: 13,
+                                    fontWeight: "800",
+                                    color: sinStock ? THEME.dangerStrong : THEME.warningStrong,
+                                  }}
+                                >
+                                  {p.stock} uds.
+                                </Text>
+                                <View
+                                  style={[
+                                    styles.statusBadge,
+                                    {
+                                      backgroundColor: sinStock ? THEME.dangerSoft : THEME.warningSoft,
+                                      borderColor: sinStock ? THEME.dangerBorder : THEME.warningBorder,
+                                      paddingVertical: 1,
+                                      paddingHorizontal: 6,
+                                    },
+                                  ]}
+                                >
+                                  <Text
+                                    style={[
+                                      styles.statusBadgeText,
+                                      {
+                                        fontSize: 9,
+                                        color: sinStock ? THEME.dangerStrong : THEME.warningStrong,
+                                      },
+                                    ]}
+                                  >
+                                    {sinStock ? "Sin Stock" : "Bajo Stock"}
+                                  </Text>
+                                </View>
+                              </View>
+                            </View>
+                          );
+                        })
+                      )}
+
+                      {totalPages > 1 && (
+                        <View style={{ flexDirection: "row", justifyContent: "space-between", marginTop: 12, paddingTop: 8, borderTopWidth: 1, borderTopColor: THEME.border }}>
+                          <TouchableOpacity
+                            style={[
+                              styles.outlineSmallBtn,
+                              { height: 32, paddingHorizontal: 12 },
+                              reportesStockPage <= 1 && { opacity: 0.4 },
+                            ]}
+                            disabled={reportesStockPage <= 1}
+                            onPress={() => setReportesStockPage((prev) => Math.max(1, prev - 1))}
+                          >
+                            <Text style={styles.outlineSmallBtnText}>Anterior</Text>
+                          </TouchableOpacity>
+                          <TouchableOpacity
+                            style={[
+                              styles.outlineSmallBtn,
+                              { height: 32, paddingHorizontal: 12 },
+                              reportesStockPage >= totalPages && { opacity: 0.4 },
+                            ]}
+                            disabled={reportesStockPage >= totalPages}
+                            onPress={() => setReportesStockPage((prev) => Math.min(totalPages, prev + 1))}
+                          >
+                            <Text style={styles.outlineSmallBtnText}>Siguiente</Text>
+                          </TouchableOpacity>
+                        </View>
+                      )}
+                    </View>
+                  );
+                }
+
+                return null;
+              })()}
+            </ScrollView>
+          )}
         </View>
       )}
 
@@ -5894,6 +6492,7 @@ export default function App() {
                     { id: "pos" as AppRoute, label: "Punto de Venta", icon: "shopping-cart" },
                     { id: "ventas" as AppRoute, label: "Ventas", icon: "trending-up" },
                     { id: "cajas" as AppRoute, label: "Cajas y Turnos", icon: "inbox" },
+                    { id: "reportes" as AppRoute, label: "Reportes", icon: "bar-chart-2" },
                   ],
                 },
                 {
@@ -8065,6 +8664,41 @@ export default function App() {
                       </Text>
                     </View>
                   )}
+                  {/* Cobros extra (Delivery, Envío, Propina, etc.) */}
+                  {(() => {
+                    const v = ventaDetailModal.venta;
+                    let lista: any[] = [];
+                    if (Array.isArray(v.cobros_extra) && v.cobros_extra.length > 0) {
+                      lista = v.cobros_extra;
+                    } else if (v.cobros_extra_json) {
+                      try {
+                        lista = JSON.parse(v.cobros_extra_json);
+                      } catch {}
+                    }
+                    if (lista.length > 0) {
+                      return lista.map((ce: any, idx: number) => (
+                        <View key={`ce-${idx}`} style={styles.summaryRow}>
+                          <Text style={[styles.summaryLabel, { color: THEME.primary }]}>
+                            + {ce.concepto || "Cobro extra"}:
+                          </Text>
+                          <Text style={[styles.summaryVal, { color: THEME.primary, fontWeight: "700" }]}>
+                            +{fmt(Number(ce.monto) || 0, v.moneda_codigo || "USD")}
+                          </Text>
+                        </View>
+                      ));
+                    }
+                    if (Number(v.cobros_extra) > 0.009) {
+                      return (
+                        <View style={styles.summaryRow}>
+                          <Text style={[styles.summaryLabel, { color: THEME.primary }]}>Cobros extra:</Text>
+                          <Text style={[styles.summaryVal, { color: THEME.primary, fontWeight: "700" }]}>
+                            +{fmt(Number(v.cobros_extra), v.moneda_codigo || "USD")}
+                          </Text>
+                        </View>
+                      );
+                    }
+                    return null;
+                  })()}
                   <View style={[styles.summaryTotalRow, { borderTopWidth: 1, borderTopColor: THEME.border, paddingTop: 4 }]}>
                     <Text style={styles.summaryTotalLabel}>Total Factura</Text>
                     <Text style={styles.summaryTotalValue}>
@@ -8216,6 +8850,348 @@ export default function App() {
         </View>
       </Modal>
 
+      {/* ==================== MODAL AJUSTE DE KARDEX ==================== */}
+      <Modal
+        visible={modalAjusteKardexVisible}
+        transparent
+        animationType="slide"
+        onRequestClose={() => setModalAjusteKardexVisible(false)}
+      >
+        <KeyboardAvoidingView
+          behavior={Platform.OS === "ios" ? "padding" : undefined}
+          style={styles.modalBackdrop}
+        >
+          <View style={[styles.modalSheet, { maxHeight: "90%" }]}>
+            <View style={styles.modalHeader}>
+              <View>
+                <Text style={styles.modalTitle}>Ajuste de Inventario</Text>
+                <Text style={styles.clientCardMeta}>Entrada o salida manual de existencias</Text>
+              </View>
+              <TouchableOpacity onPress={() => setModalAjusteKardexVisible(false)}>
+                <Feather name="x" size={20} color={THEME.mutedForeground} />
+              </TouchableOpacity>
+            </View>
+
+            <ScrollView contentContainerStyle={{ paddingVertical: 10, gap: 12 }}>
+              {/* Selección de Producto */}
+              {!ajusteProducto ? (
+                <View>
+                  <Text style={styles.fieldLabelSmall}>BUSCAR PRODUCTO A AJUSTAR</Text>
+                  <View style={[styles.searchBox, { marginTop: 6, marginBottom: 8 }]}>
+                    <Feather name="search" size={16} color={THEME.mutedForeground} />
+                    <TextInput
+                      style={styles.searchBoxInput}
+                      placeholder="Escanear código o nombre..."
+                      placeholderTextColor={THEME.mutedForeground}
+                      value={ajusteSearchProd}
+                      onChangeText={setAjusteSearchProd}
+                      autoFocus
+                    />
+                    {ajusteSearchProd.length > 0 && (
+                      <TouchableOpacity onPress={() => setAjusteSearchProd("")}>
+                        <Feather name="x-circle" size={16} color={THEME.mutedForeground} />
+                      </TouchableOpacity>
+                    )}
+                  </View>
+
+                  <View style={{ maxHeight: 220, borderWidth: 1, borderColor: THEME.border, borderRadius: 10, overflow: "hidden" }}>
+                    <ScrollView nestedScrollEnabled>
+                      {productos
+                        .filter((p) => {
+                          if (!ajusteSearchProd.trim()) return true;
+                          const q = ajusteSearchProd.toLowerCase().trim();
+                          return (
+                            p.nombre.toLowerCase().includes(q) ||
+                            p.codigo.toLowerCase().includes(q)
+                          );
+                        })
+                        .slice(0, 20)
+                        .map((p) => (
+                          <TouchableOpacity
+                            key={p.id}
+                            style={{
+                              padding: 10,
+                              borderBottomWidth: 1,
+                              borderBottomColor: THEME.border,
+                              flexDirection: "row",
+                              justifyContent: "space-between",
+                              alignItems: "center",
+                            }}
+                            onPress={() => {
+                              setAjusteProducto(p);
+                              setAjustePresentacionId(null);
+                            }}
+                          >
+                            <View style={{ flex: 1, paddingRight: 6 }}>
+                              <Text style={{ fontSize: 13, fontWeight: "600", color: THEME.foreground }}>
+                                {p.nombre}
+                              </Text>
+                              <Text style={{ fontSize: 11, color: THEME.mutedForeground, fontFamily: "monospace" }}>
+                                {p.codigo}
+                              </Text>
+                            </View>
+                            <View style={[styles.statusBadge, { backgroundColor: p.stock > 0 ? THEME.successSoft : THEME.dangerSoft, borderColor: p.stock > 0 ? THEME.successBorder : THEME.dangerBorder }]}>
+                              <Text style={[styles.statusBadgeText, { color: p.stock > 0 ? THEME.successStrong : THEME.dangerStrong }]}>
+                                Stock: {p.stock}
+                              </Text>
+                            </View>
+                          </TouchableOpacity>
+                        ))}
+                    </ScrollView>
+                  </View>
+                </View>
+              ) : (
+                <View>
+                  {/* Tarjeta del producto seleccionado */}
+                  <View style={[styles.checkoutBalanceBanner, { marginVertical: 4, flexDirection: "row", justifyContent: "space-between", alignItems: "center" }]}>
+                    <View style={{ flex: 1, paddingRight: 8 }}>
+                      <Text style={{ fontSize: 14, fontWeight: "800", color: THEME.foreground }}>
+                        {ajusteProducto.nombre}
+                      </Text>
+                      <Text style={{ fontSize: 11, color: THEME.mutedForeground, fontFamily: "monospace" }}>
+                        Cód: {ajusteProducto.codigo} · Stock actual: <Text style={{ fontWeight: "800", color: ajusteProducto.stock > 0 ? THEME.successStrong : THEME.dangerStrong }}>{ajusteProducto.stock} uds.</Text>
+                      </Text>
+                    </View>
+                    <TouchableOpacity
+                      style={[styles.outlineSmallBtn, { height: 30, paddingHorizontal: 8 }]}
+                      onPress={() => {
+                        setAjusteProducto(null);
+                        setAjustePresentacionId(null);
+                      }}
+                    >
+                      <Text style={[styles.outlineSmallBtnText, { fontSize: 11 }]}>Cambiar</Text>
+                    </TouchableOpacity>
+                  </View>
+
+                  {/* Selector Unidad vs Presentaciones (Cajas) */}
+                  <Text style={[styles.fieldLabelSmall, { marginTop: 10 }]}>UNIDAD O PRESENTACIÓN (CAJA)</Text>
+                  <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 6, marginTop: 4 }}>
+                    <TouchableOpacity
+                      style={[
+                        styles.pillFilter,
+                        !ajustePresentacionId && styles.pillFilterActive,
+                        { paddingHorizontal: 12, paddingVertical: 6 },
+                      ]}
+                      onPress={() => setAjustePresentacionId(null)}
+                    >
+                      <Text
+                        style={[
+                          styles.pillFilterText,
+                          !ajustePresentacionId && styles.pillFilterTextActive,
+                          { fontSize: 12 },
+                        ]}
+                      >
+                        Por Unidad ({ajusteProducto.stock} disp.)
+                      </Text>
+                    </TouchableOpacity>
+
+                    {(ajusteProducto.presentaciones || []).map((pres) => {
+                      const active = ajustePresentacionId === pres.id;
+                      const dispCajas = Math.floor(ajusteProducto.stock / (pres.unidades || 1));
+                      return (
+                        <TouchableOpacity
+                          key={pres.id}
+                          style={[
+                            styles.pillFilter,
+                            active && styles.pillFilterActive,
+                            { paddingHorizontal: 12, paddingVertical: 6 },
+                          ]}
+                          onPress={() => setAjustePresentacionId(pres.id)}
+                        >
+                          <Text
+                            style={[
+                              styles.pillFilterText,
+                              active && styles.pillFilterTextActive,
+                              { fontSize: 12 },
+                            ]}
+                          >
+                            {pres.nombre} ×{pres.unidades} ({dispCajas} disp.)
+                          </Text>
+                        </TouchableOpacity>
+                      );
+                    })}
+                  </View>
+
+                  {/* Factor informativo */}
+                  {(() => {
+                    const pres = (ajusteProducto.presentaciones || []).find((pr) => pr.id === ajustePresentacionId);
+                    if (pres && pres.unidades > 1) {
+                      const cant = parseFloat(ajusteCantidad) || 0;
+                      return (
+                        <View style={{ backgroundColor: THEME.secondary, padding: 8, borderRadius: 8, marginTop: 6, borderWidth: 1, borderColor: THEME.primary }}>
+                          <Text style={{ fontSize: 11, color: THEME.foreground }}>
+                            {cant} {pres.nombre} × {pres.unidades} = <Text style={{ fontWeight: "800", color: THEME.primary }}>{cant * pres.unidades} unidades</Text> en total
+                          </Text>
+                        </View>
+                      );
+                    }
+                    return null;
+                  })()}
+
+                  {/* Tipo de Ajuste: Entrada (+) / Salida (-) */}
+                  <Text style={[styles.fieldLabelSmall, { marginTop: 12 }]}>TIPO DE MOVIMIENTO</Text>
+                  <View style={{ flexDirection: "row", gap: 10, marginTop: 4 }}>
+                    <TouchableOpacity
+                      style={[
+                        styles.primaryBtn,
+                        {
+                          flex: 1,
+                          height: 42,
+                          backgroundColor: ajusteTipo === "Entrada" ? THEME.success : THEME.inputBg,
+                          borderWidth: 1,
+                          borderColor: ajusteTipo === "Entrada" ? THEME.successBorder : THEME.border,
+                        },
+                      ]}
+                      onPress={() => setAjusteTipo("Entrada")}
+                    >
+                      <Feather name="arrow-down" size={16} color={ajusteTipo === "Entrada" ? "#fff" : THEME.foreground} />
+                      <Text
+                        style={[
+                          styles.primaryBtnText,
+                          { color: ajusteTipo === "Entrada" ? "#fff" : THEME.foreground },
+                        ]}
+                      >
+                        Entrada (+)
+                      </Text>
+                    </TouchableOpacity>
+
+                    <TouchableOpacity
+                      style={[
+                        styles.primaryBtn,
+                        {
+                          flex: 1,
+                          height: 42,
+                          backgroundColor: ajusteTipo === "Salida" ? THEME.danger : THEME.inputBg,
+                          borderWidth: 1,
+                          borderColor: ajusteTipo === "Salida" ? THEME.dangerBorder : THEME.border,
+                        },
+                      ]}
+                      onPress={() => setAjusteTipo("Salida")}
+                    >
+                      <Feather name="arrow-up" size={16} color={ajusteTipo === "Salida" ? "#fff" : THEME.foreground} />
+                      <Text
+                        style={[
+                          styles.primaryBtnText,
+                          { color: ajusteTipo === "Salida" ? "#fff" : THEME.foreground },
+                        ]}
+                      >
+                        Salida (-)
+                      </Text>
+                    </TouchableOpacity>
+                  </View>
+
+                  {/* Cantidad con Stepper */}
+                  <Text style={[styles.fieldLabelSmall, { marginTop: 12 }]}>CANTIDAD A AJUSTAR</Text>
+                  <View style={{ flexDirection: "row", alignItems: "center", gap: 8, marginTop: 4 }}>
+                    <TouchableOpacity
+                      style={[styles.outlineSmallBtn, { width: 44, height: 44, justifyContent: "center", alignItems: "center" }]}
+                      onPress={() => {
+                        const val = Math.max(1, (parseFloat(ajusteCantidad) || 1) - 1);
+                        setAjusteCantidad(String(val));
+                      }}
+                    >
+                      <Feather name="minus" size={18} color={THEME.foreground} />
+                    </TouchableOpacity>
+                    <TextInput
+                      style={[
+                        styles.searchBoxInput,
+                        {
+                          flex: 1,
+                          height: 44,
+                          textAlign: "center",
+                          fontSize: 18,
+                          fontWeight: "800",
+                          backgroundColor: THEME.inputBg,
+                          borderRadius: 8,
+                          borderWidth: 1,
+                          borderColor: THEME.border,
+                        },
+                      ]}
+                      keyboardType="numeric"
+                      value={ajusteCantidad}
+                      onChangeText={setAjusteCantidad}
+                    />
+                    <TouchableOpacity
+                      style={[styles.outlineSmallBtn, { width: 44, height: 44, justifyContent: "center", alignItems: "center" }]}
+                      onPress={() => {
+                        const val = (parseFloat(ajusteCantidad) || 0) + 1;
+                        setAjusteCantidad(String(val));
+                      }}
+                    >
+                      <Feather name="plus" size={18} color={THEME.foreground} />
+                    </TouchableOpacity>
+                  </View>
+
+                  {/* Motivo */}
+                  <Text style={[styles.fieldLabelSmall, { marginTop: 12 }]}>MOTIVO DEL AJUSTE</Text>
+                  <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 6, marginTop: 4, marginBottom: 6 }}>
+                    {["Ajuste manual", "Merma", "Conteo físico", "Avería", "Inventario inicial"].map((m) => (
+                      <TouchableOpacity
+                        key={m}
+                        style={[
+                          styles.pillFilter,
+                          ajusteMotivo === m && styles.pillFilterActive,
+                          { paddingHorizontal: 10, paddingVertical: 4 },
+                        ]}
+                        onPress={() => setAjusteMotivo(m)}
+                      >
+                        <Text
+                          style={[
+                            styles.pillFilterText,
+                            ajusteMotivo === m && styles.pillFilterTextActive,
+                            { fontSize: 11 },
+                          ]}
+                        >
+                          {m}
+                        </Text>
+                      </TouchableOpacity>
+                    ))}
+                  </View>
+                  <TextInput
+                    style={[styles.searchBoxInput, { height: 40, backgroundColor: THEME.inputBg, borderRadius: 8, paddingHorizontal: 10, borderWidth: 1, borderColor: THEME.border }]}
+                    placeholder="Escribe el motivo..."
+                    placeholderTextColor={THEME.mutedForeground}
+                    value={ajusteMotivo}
+                    onChangeText={setAjusteMotivo}
+                  />
+
+                  {/* Botones Guardar / Cancelar */}
+                  <View style={{ flexDirection: "row", gap: 10, marginTop: 16 }}>
+                    <TouchableOpacity
+                      style={[styles.outlineSmallBtn, { flex: 1, height: 44, justifyContent: "center" }]}
+                      onPress={() => setModalAjusteKardexVisible(false)}
+                    >
+                      <Text style={styles.outlineSmallBtnText}>Cancelar</Text>
+                    </TouchableOpacity>
+                    <TouchableOpacity
+                      style={[
+                        styles.primaryBtn,
+                        {
+                          flex: 1.5,
+                          height: 44,
+                          backgroundColor: ajusteTipo === "Entrada" ? THEME.success : THEME.primary,
+                        },
+                      ]}
+                      onPress={handleRegistrarAjuste}
+                      disabled={ajusteSubmitting}
+                    >
+                      {ajusteSubmitting ? (
+                        <ActivityIndicator size="small" color="#fff" />
+                      ) : (
+                        <>
+                          <Feather name="check" size={16} color="#fff" />
+                          <Text style={styles.primaryBtnText}>Registrar Ajuste</Text>
+                        </>
+                      )}
+                    </TouchableOpacity>
+                  </View>
+                </View>
+              )}
+            </ScrollView>
+          </View>
+        </KeyboardAvoidingView>
+      </Modal>
+
       {/* ==================== MODAL RECIBO DE VENTA ==================== */}
       <Modal
         visible={!!receiptModal}
@@ -8256,6 +9232,14 @@ export default function App() {
                     <Text style={styles.summaryLabel}>Modalidad:</Text>
                     <Text style={styles.summaryVal}>{receiptModal.tipo_pago}</Text>
                   </View>
+                  {Number(receiptModal.cobrosExtra) > 0.009 && (
+                    <View style={styles.summaryRow}>
+                      <Text style={[styles.summaryLabel, { color: THEME.primary }]}>Cobros Extra:</Text>
+                      <Text style={[styles.summaryVal, { color: THEME.primary, fontWeight: "700" }]}>
+                        +{fmt(receiptModal.cobrosExtra, receiptModal.moneda)}
+                      </Text>
+                    </View>
+                  )}
                   <View style={styles.summaryTotalRow}>
                     <Text style={styles.summaryTotalLabel}>Total:</Text>
                     <Text style={styles.summaryTotalValue}>

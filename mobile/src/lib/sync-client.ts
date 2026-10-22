@@ -741,3 +741,64 @@ export async function fetchVentaDetalleCloud(venta_id: string): Promise<any | nu
     return null;
   }
 }
+
+/**
+ * Registra un ajuste de kardex manual (Entrada o Salida) en el servidor
+ */
+export async function registrarAjusteKardexCloud(items: Array<{
+  producto_id: number;
+  tipo: "Entrada" | "Salida";
+  cantidad: number;
+  motivo: string;
+  presentacion_id?: string | null;
+}>): Promise<{ success: boolean; error?: string }> {
+  const { serverUrl, token } = await getStoredSession();
+  if (!serverUrl || !token) return { success: false, error: "Sesión no configurada" };
+  try {
+    const res = await fetch(`${serverUrl}/api/kardex/ajustes`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({ items }),
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      return { success: false, error: data.error || "Error al registrar ajuste" };
+    }
+    return { success: true };
+  } catch (err: any) {
+    return { success: false, error: err?.message || "Error de conexión con el servidor" };
+  }
+}
+
+/**
+ * Obtiene los datos de Reportes desde el servidor
+ */
+export async function fetchReportesCloud(params: {
+  tipo?: string;
+  moneda_id?: string;
+  fecha_inicio?: string;
+  fecha_fin?: string;
+} = {}): Promise<any | null> {
+  const { serverUrl, token } = await getStoredSession();
+  if (!serverUrl || !token) return null;
+  const q = new URLSearchParams();
+  if (params.tipo) q.set("tipo", params.tipo);
+  if (params.moneda_id) q.set("moneda_id", params.moneda_id);
+  if (params.fecha_inicio) q.set("fecha_inicio", params.fecha_inicio);
+  if (params.fecha_fin) q.set("fecha_fin", params.fecha_fin);
+  try {
+    const res = await fetch(`${serverUrl}/api/reportes?${q.toString()}`, {
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${token}`,
+      },
+    });
+    if (!res.ok) return null;
+    return await res.json();
+  } catch {
+    return null;
+  }
+}

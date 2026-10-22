@@ -2,7 +2,7 @@ export const dynamic = 'force-dynamic';
 
 import { NextResponse } from "next/server";
 import { requireSession } from "@/lib/auth-server";
-import { query, queryOne, execute, transaction } from "@/lib/db";
+import { query, queryOne, execute, transaction, registrarEliminacionSync } from "@/lib/db";
 import { fechaLocalISO } from "@/lib/format";
 import { aBase, convertir, redondear, tasaUsd, tasaUsdDocumento, monedaDeProducto, monedaCostoDeProducto, tasaMostrada, tasaPar, desdeBase } from "@/lib/money";
 import { triggerBackgroundSync } from "@/lib/sync-engine";
@@ -866,6 +866,7 @@ export async function DELETE(request: Request) {
       await client.query(`DELETE FROM venta_pagos WHERE venta_id = $1`, [id]);
       await client.query(`DELETE FROM venta_items WHERE venta_id = $1`, [id]);
       await client.query(`DELETE FROM ventas WHERE id = $1`, [id]);
+      await registrarEliminacionSync("ventas", id, client);
     });
 
     triggerBackgroundSync();

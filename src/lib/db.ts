@@ -63,3 +63,26 @@ export async function transaction<T>(fn: (client: any) => Promise<T>): Promise<T
     client.release();
   }
 }
+
+/**
+ * Registra una eliminación en `sync_eliminados` para que el motor de sincronización
+ * y los dispositivos remotos (PC local, Móvil) sepan que el registro fue borrado
+ * intencionalmente y no lo resuciten con datos antiguos.
+ */
+export async function registrarEliminacionSync(
+  tabla: string,
+  registroId: string | number,
+  client?: any
+): Promise<void> {
+  try {
+    const runner = client ?? pool;
+    await runner.query(
+      `INSERT INTO sync_eliminados (tabla, registro_id, eliminado_en)
+       VALUES ($1, $2, NOW())
+       ON CONFLICT (tabla, registro_id) DO UPDATE SET eliminado_en = EXCLUDED.eliminado_en`,
+      [tabla, String(registroId)]
+    );
+  } catch (err) {
+    console.warn(`[registrarEliminacionSync] No se pudo registrar eliminación de ${tabla} (${registroId}):`, err);
+  }
+}

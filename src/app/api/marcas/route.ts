@@ -2,7 +2,7 @@ export const dynamic = 'force-dynamic';
 
 import { NextResponse } from "next/server";
 import { requireSession } from "@/lib/auth-server";
-import { query, queryOne, execute } from "@/lib/db";
+import { query, queryOne, execute, registrarEliminacionSync } from "@/lib/db";
 
 export async function GET() {
   try {
@@ -88,6 +88,7 @@ export async function DELETE(request: Request) {
     }
 
     await execute(`DELETE FROM marcas WHERE id = $1`, [id]);
+    await registrarEliminacionSync("marcas", id);
     return NextResponse.json({ success: true });
   } catch (error) {
     return NextResponse.json({ error: "Error al eliminar marca" }, { status: 500 });

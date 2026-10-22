@@ -2,7 +2,7 @@ export const dynamic = 'force-dynamic';
 
 import { NextResponse } from "next/server";
 import { requireSession } from "@/lib/auth-server";
-import { query, queryOne, execute } from "@/lib/db";
+import { query, queryOne, execute, registrarEliminacionSync } from "@/lib/db";
 import { triggerBackgroundSync } from "@/lib/sync-engine";
 
 export async function GET() {
@@ -105,6 +105,7 @@ export async function DELETE(request: Request) {
     }
 
     await execute(`DELETE FROM metodos_pago WHERE id = $1`, [id]);
+    await registrarEliminacionSync("metodos_pago", id);
     triggerBackgroundSync();
     return NextResponse.json({ success: true });
   } catch (error) {

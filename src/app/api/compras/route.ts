@@ -2,7 +2,7 @@ export const dynamic = 'force-dynamic';
 
 import { NextResponse } from "next/server";
 import { requireSession } from "@/lib/auth-server";
-import { query, queryOne, execute, transaction } from "@/lib/db";
+import { query, queryOne, execute, transaction, registrarEliminacionSync } from "@/lib/db";
 import { fechaLocalISO } from "@/lib/format";
 import {
   aBase,
@@ -512,6 +512,7 @@ export async function DELETE(request: Request) {
 
       await client.query(`DELETE FROM compra_items WHERE compra_id = $1`, [id]);
       await client.query(`DELETE FROM compras WHERE id = $1`, [id]);
+      await registrarEliminacionSync("compras", id, client);
     });
 
     triggerBackgroundSync();

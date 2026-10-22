@@ -2,7 +2,7 @@ export const dynamic = 'force-dynamic';
 
 import { NextResponse } from "next/server";
 import { requireSession } from "@/lib/auth-server";
-import { query, queryOne, execute, transaction } from "@/lib/db";
+import { query, queryOne, execute, transaction, registrarEliminacionSync } from "@/lib/db";
 import { redondear, monedaDeProducto, monedaCostoDeProducto, preciosDeProducto, presentacionesDeProducto, convertirConMetodo, reglasConversion } from "@/lib/money";
 import { aplicarReglasRedondeo } from "@/lib/costing";
 import { getConfiguracionGlobal } from "@/lib/global-config";
@@ -895,6 +895,7 @@ export async function DELETE(request: Request) {
       await client.query(`DELETE FROM kardex WHERE producto_id = $1`, [id]);
       // Eliminar el producto (las tablas dependientes como precios y presentaciones tienen CASCADE)
       await client.query(`DELETE FROM productos WHERE id = $1`, [id]);
+      await registrarEliminacionSync("productos", id, client);
     });
 
     if (producto.imagen) {

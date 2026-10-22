@@ -896,10 +896,21 @@ export async function saveCatalogOffline(data: {
           await db.runAsync(`DELETE FROM productos WHERE id = ?`, [Number(del.registro_id)]);
         } else if (del.tabla === "monedas") {
           await db.runAsync(`DELETE FROM monedas WHERE id = ?`, [String(del.registro_id)]);
+        } else if (del.tabla === "metodos_pago") {
+          await db.runAsync(`DELETE FROM metodos_pago WHERE id = ?`, [String(del.registro_id)]);
+        } else if (del.tabla === "cajas") {
+          await db.runAsync(`DELETE FROM cajas WHERE id = ?`, [String(del.registro_id)]);
+        } else if (del.tabla === "categorias") {
+          await db.runAsync(`DELETE FROM categorias WHERE id = ?`, [String(del.registro_id)]);
         } else if (del.tabla === "clientes") {
           await db.runAsync(`DELETE FROM clientes WHERE id = ?`, [String(del.registro_id)]);
         } else if (del.tabla === "creditos") {
           await db.runAsync(`DELETE FROM creditos WHERE id = ?`, [String(del.registro_id)]);
+        } else if (del.tabla === "abonos") {
+          await db.runAsync(`DELETE FROM abonos WHERE id = ?`, [String(del.registro_id)]);
+        } else if (del.tabla === "ventas") {
+          await db.runAsync(`DELETE FROM ventas_remotas WHERE id = ?`, [String(del.registro_id)]);
+          await db.runAsync(`DELETE FROM venta_items_remotos WHERE venta_id = ?`, [String(del.registro_id)]);
         } else if (del.tabla === "producto_presentaciones") {
           await db.runAsync(`DELETE FROM producto_presentaciones WHERE id = ?`, [String(del.registro_id)]);
         }

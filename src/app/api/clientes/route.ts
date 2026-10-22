@@ -2,7 +2,7 @@ export const dynamic = 'force-dynamic';
 
 import { NextResponse } from "next/server";
 import { requireSession } from "@/lib/auth-server";
-import { query, queryOne, execute, transaction } from "@/lib/db";
+import { query, queryOne, execute, transaction, registrarEliminacionSync } from "@/lib/db";
 import { triggerBackgroundSync } from "@/lib/sync-engine";
 
 // Un límite por moneda del cliente (0 = sin crédito en esa moneda)
@@ -301,6 +301,7 @@ export async function DELETE(request: Request) {
     }
 
     await execute(`DELETE FROM clientes WHERE id = $1`, [id]);
+    await registrarEliminacionSync("clientes", id);
     triggerBackgroundSync();
     return NextResponse.json({ success: true });
   } catch (error) {
