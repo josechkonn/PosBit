@@ -5856,7 +5856,7 @@ export default function App() {
                 />
                 <View>
                   <Text style={styles.sidebarBrandTitle}>PosBit</Text>
-                  <Text style={styles.sidebarBrandSub}>Inventario & POS v2.6</Text>
+                  <Text style={styles.sidebarBrandSub}>Inventario & POS v2.7 (0.1.30)</Text>
                 </View>
               </View>
               <TouchableOpacity onPress={() => setDrawerOpen(false)}>
