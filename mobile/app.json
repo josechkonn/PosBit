@@ -2,7 +2,7 @@
   "expo": {
     "name": "PosBit Mobile",
     "slug": "posbit-mobile",
-    "version": "0.1.31",
+    "version": "0.1.32",
     "icon": "./assets/icon.png",
     "orientation": "portrait",
     "userInterfaceStyle": "dark",
@@ -17,7 +17,7 @@
     },
     "android": {
       "package": "com.posbit.mobile",
-      "versionCode": 10,
+      "versionCode": 11,
       "permissions": [
         "CAMERA",
         "INTERNET",

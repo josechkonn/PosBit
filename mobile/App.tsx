@@ -5613,6 +5613,7 @@ export default function App() {
                   style={[
                     styles.pillFilter,
                     active && styles.pillFilterActive,
+                    { paddingHorizontal: 14, paddingVertical: 7, borderRadius: 20 },
                   ]}
                   onPress={() => setReportesTab(t.id as any)}
                 >
@@ -5620,6 +5621,7 @@ export default function App() {
                     style={[
                       styles.pillFilterText,
                       active && styles.pillFilterTextActive,
+                      { fontSize: 12, fontWeight: active ? "700" : "500" },
                     ]}
                   >
                     {t.label}
@@ -5629,39 +5631,51 @@ export default function App() {
             })}
           </View>
 
-          {/* Selector de Moneda (USD, COP, VES, etc.) */}
-          {monedas.length > 1 && (
-            <ScrollView
-              horizontal
-              showsHorizontalScrollIndicator={false}
-              contentContainerStyle={{ paddingHorizontal: 12, paddingBottom: 8, gap: 6 }}
-            >
-              {monedas.map((m) => {
-                const active = reportesMonedaCod === m.codigo;
-                return (
-                  <TouchableOpacity
-                    key={m.id}
-                    style={[
-                      styles.monedaPill,
-                      active
-                        ? { backgroundColor: THEME.primary, borderColor: THEME.primary }
-                        : { backgroundColor: THEME.card, borderColor: THEME.border },
-                      { paddingHorizontal: 10, paddingVertical: 4 },
-                    ]}
-                    onPress={() => setReportesMonedaCod(m.codigo)}
-                  >
-                    <Text
+          {/* Selector de Moneda (USD, COP, VES, etc.) - Contenedor con altura fija para evitar que se colapse o expanda */}
+          {monedas.length > 1 && reportesTab !== "inventario" && (
+            <View style={{ height: 42, flexGrow: 0, flexShrink: 0, marginBottom: 6 }}>
+              <ScrollView
+                horizontal
+                showsHorizontalScrollIndicator={false}
+                contentContainerStyle={{ paddingHorizontal: 12, alignItems: "center", gap: 8 }}
+              >
+                {monedas.map((m) => {
+                  const active = reportesMonedaCod === m.codigo;
+                  return (
+                    <TouchableOpacity
+                      key={m.id}
                       style={[
-                        styles.monedaPillText,
-                        active ? { color: "#fff", fontWeight: "700" } : { color: THEME.foreground },
+                        {
+                          flexDirection: "row",
+                          alignItems: "center",
+                          gap: 6,
+                          paddingHorizontal: 14,
+                          height: 34,
+                          borderRadius: 17,
+                          borderWidth: 1.5,
+                        },
+                        active
+                          ? { backgroundColor: THEME.primary, borderColor: THEME.primary }
+                          : { backgroundColor: THEME.card, borderColor: THEME.border },
                       ]}
+                      onPress={() => setReportesMonedaCod(m.codigo)}
                     >
-                      {m.codigo} ({m.simbolo})
-                    </Text>
-                  </TouchableOpacity>
-                );
-              })}
-            </ScrollView>
+                      <Text
+                        style={[
+                          { fontSize: 12, fontWeight: "700" },
+                          active ? { color: "#fff" } : { color: THEME.foreground },
+                        ]}
+                      >
+                        {m.codigo} ({m.simbolo})
+                      </Text>
+                      {active && (
+                        <View style={{ width: 6, height: 6, borderRadius: 3, backgroundColor: "#fff" }} />
+                      )}
+                    </TouchableOpacity>
+                  );
+                })}
+              </ScrollView>
+            </View>
           )}
 
           {reportesLoading && !reportesData ? (
@@ -5670,61 +5684,88 @@ export default function App() {
               <Text style={[styles.emptyBoxTitle, { marginTop: 12 }]}>Cargando reportes...</Text>
             </View>
           ) : (
-            <ScrollView contentContainerStyle={{ padding: 12, paddingBottom: 95, gap: 12 }}>
+            <ScrollView style={{ flex: 1 }} contentContainerStyle={{ padding: 12, paddingBottom: 110, gap: 14 }}>
               {/* Cobros Físicos por Moneda (Global) */}
               {reportesTab === "ventas" && reportesData?.__cobros_globales && (
-                <View style={[styles.card, { borderColor: THEME.primary, borderWidth: 1.5 }]}>
-                  <View style={{ flexDirection: "row", alignItems: "center", gap: 6, marginBottom: 8 }}>
-                    <Feather name="dollar-sign" size={16} color={THEME.primary} />
-                    <Text style={{ fontSize: 13, fontWeight: "800", color: THEME.foreground }}>
-                      COBROS REALES RECIBIDOS (POR MONEDA)
-                    </Text>
-                  </View>
-                  <Text style={{ fontSize: 11, color: THEME.mutedForeground, marginBottom: 10 }}>
-                    Dinero efectivamente cobrado en el período (ventas de contado + abonos cobrados), separado por divisa:
-                  </Text>
-                  {reportesData.__cobros_globales.map((cg: any) => (
-                    <View
-                      key={cg.moneda_codigo}
-                      style={{
-                        padding: 10,
-                        borderRadius: 8,
-                        backgroundColor: THEME.inputBg,
-                        marginBottom: 6,
-                        borderWidth: 1,
-                        borderColor: THEME.border,
-                      }}
-                    >
-                      <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center" }}>
-                        <Text style={{ fontSize: 13, fontWeight: "700", color: THEME.foreground }}>
-                          Cobrado en {cg.moneda_codigo}
-                        </Text>
-                        <Text style={{ fontSize: 15, fontWeight: "800", color: THEME.successStrong }}>
-                          {fmt(Number(cg.total) || 0, cg.moneda_codigo)}
-                        </Text>
-                      </View>
-                      <View style={{ flexDirection: "row", justifyContent: "space-between", marginTop: 4 }}>
-                        <Text style={{ fontSize: 11, color: THEME.mutedForeground }}>
-                          Ventas de contado: {fmt(Number(cg.total_ventas) || 0, cg.moneda_codigo)}
-                        </Text>
-                        <Text style={{ fontSize: 11, color: THEME.infoStrong }}>
-                          Abonos a deudas: +{fmt(Number(cg.total_abonos) || 0, cg.moneda_codigo)}
-                        </Text>
-                      </View>
-                      {cg.metodos && cg.metodos.length > 0 && (
-                        <View style={{ marginTop: 6, paddingTop: 6, borderTopWidth: 1, borderTopColor: THEME.border }}>
-                          {cg.metodos.map((met: any, idx: number) => (
-                            <View key={idx} style={{ flexDirection: "row", justifyContent: "space-between", marginTop: 2 }}>
-                              <Text style={{ fontSize: 10, color: THEME.mutedForeground }}>• {met.nombre}</Text>
-                              <Text style={{ fontSize: 10, fontWeight: "600", color: THEME.foreground }}>
-                                {fmt(Number(met.total) || 0, cg.moneda_codigo)}
-                              </Text>
-                            </View>
-                          ))}
-                        </View>
-                      )}
+                <View style={[styles.card, { borderColor: THEME.primary, borderWidth: 1.5, borderRadius: 14, padding: 14 }]}>
+                  <View style={{ flexDirection: "row", alignItems: "center", gap: 8, marginBottom: 4 }}>
+                    <View style={{ width: 28, height: 28, borderRadius: 14, backgroundColor: THEME.secondary, alignItems: "center", justifyContent: "center" }}>
+                      <Feather name="dollar-sign" size={16} color={THEME.primary} />
                     </View>
-                  ))}
+                    <View style={{ flex: 1 }}>
+                      <Text style={{ fontSize: 13, fontWeight: "800", color: THEME.foreground }}>
+                        COBROS REALES RECIBIDOS (POR DIVISA)
+                      </Text>
+                      <Text style={{ fontSize: 11, color: THEME.mutedForeground, marginTop: 1 }}>
+                        Dinero ingresado en caja en el período (ventas de contado + abonos cobrados):
+                      </Text>
+                    </View>
+                  </View>
+
+                  <View style={{ marginTop: 10, gap: 8 }}>
+                    {reportesData.__cobros_globales.map((cg: any) => (
+                      <View
+                        key={cg.moneda_codigo}
+                        style={{
+                          padding: 12,
+                          borderRadius: 12,
+                          backgroundColor: THEME.inputBg,
+                          borderWidth: 1,
+                          borderColor: THEME.border,
+                        }}
+                      >
+                        <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
+                          <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
+                            <View style={[styles.monedaPill, { backgroundColor: THEME.primary, borderColor: THEME.primary, paddingHorizontal: 8, paddingVertical: 2, borderRadius: 6 }]}>
+                              <Text style={[styles.monedaPillText, { color: "#fff", fontWeight: "800" }]}>{cg.moneda_codigo}</Text>
+                            </View>
+                            <Text style={{ fontSize: 12, fontWeight: "700", color: THEME.foreground }}>
+                              Total Cobrado
+                            </Text>
+                          </View>
+                          <Text style={{ fontSize: 16, fontWeight: "900", color: THEME.successStrong }}>
+                            {fmt(Number(cg.total) || 0, cg.moneda_codigo)}
+                          </Text>
+                        </View>
+
+                        <View style={{ gap: 4, paddingTop: 4, borderTopWidth: 1, borderTopColor: THEME.border }}>
+                          <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center" }}>
+                            <Text style={{ fontSize: 11, color: THEME.mutedForeground }}>
+                              🛒 Ventas al contado:
+                            </Text>
+                            <Text style={{ fontSize: 12, fontWeight: "700", color: THEME.foreground }}>
+                              {fmt(Number(cg.total_ventas) || 0, cg.moneda_codigo)}
+                            </Text>
+                          </View>
+
+                          <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center" }}>
+                            <Text style={{ fontSize: 11, color: THEME.infoStrong }}>
+                              💳 Abonos a deudas:
+                            </Text>
+                            <Text style={{ fontSize: 12, fontWeight: "700", color: THEME.infoStrong }}>
+                              +{fmt(Number(cg.total_abonos) || 0, cg.moneda_codigo)}
+                            </Text>
+                          </View>
+                        </View>
+
+                        {cg.metodos && cg.metodos.length > 0 && (
+                          <View style={{ marginTop: 6, paddingTop: 6, borderTopWidth: 1, borderTopColor: THEME.border }}>
+                            <Text style={{ fontSize: 10, fontWeight: "700", color: THEME.mutedForeground, marginBottom: 2 }}>
+                              Desglose por método:
+                            </Text>
+                            {cg.metodos.map((met: any, idx: number) => (
+                              <View key={idx} style={{ flexDirection: "row", justifyContent: "space-between", paddingVertical: 2 }}>
+                                <Text style={{ fontSize: 11, color: THEME.mutedForeground }}>• {met.nombre}</Text>
+                                <Text style={{ fontSize: 11, fontWeight: "600", color: THEME.foreground }}>
+                                  {fmt(Number(met.total) || 0, cg.moneda_codigo)}
+                                </Text>
+                              </View>
+                            ))}
+                          </View>
+                        )}
+                      </View>
+                    ))}
+                  </View>
                 </View>
               )}
 
@@ -5743,40 +5784,61 @@ export default function App() {
                   const res = monData.resumen || {};
                   return (
                     <>
-                      <View style={{ flexDirection: "row", gap: 8 }}>
-                        <View style={[styles.kpiCard, { flex: 1, backgroundColor: THEME.card, borderColor: THEME.border }]}>
-                          <Text style={styles.kpiLabel}>VENTA TOTAL GENERAL</Text>
-                          <Text style={[styles.kpiValue, { fontSize: 16, color: THEME.foreground }]}>
-                            {fmt(Number(res.total) || 0, reportesMonedaCod)}
+                      {/* Tarjeta 1: Total Ventas Facturadas (Ancho completo) */}
+                      <View style={[styles.card, { padding: 14, borderRadius: 14 }]}>
+                        <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center" }}>
+                          <Text style={{ fontSize: 11, fontWeight: "800", color: THEME.mutedForeground, letterSpacing: 0.5 }}>
+                            VENTAS TOTALES FACTURADAS
                           </Text>
-                          <Text style={{ fontSize: 10, color: THEME.mutedForeground, marginTop: 2 }}>
-                            Contado + Crédito
-                          </Text>
+                          <View style={{ width: 28, height: 28, borderRadius: 14, backgroundColor: THEME.secondary, alignItems: "center", justifyContent: "center" }}>
+                            <Feather name="trending-up" size={15} color={THEME.primary} />
+                          </View>
                         </View>
-                        <View style={[styles.kpiCard, { flex: 1, backgroundColor: THEME.successSoft, borderColor: THEME.successBorder }]}>
-                          <Text style={[styles.kpiLabel, { color: THEME.successStrong }]}>COBRADO REAL</Text>
-                          <Text style={[styles.kpiValue, { fontSize: 16, color: THEME.successStrong }]}>
-                            {fmt(Number(res.totalCobradoReal ?? res.ventaContado) || 0, reportesMonedaCod)}
-                          </Text>
-                          <Text style={{ fontSize: 10, color: THEME.successStrong, marginTop: 2 }}>
-                            {res.countContado || 0} vtas + {res.countAbonos || 0} abonos
-                          </Text>
-                        </View>
+                        <Text style={{ fontSize: 24, fontWeight: "900", color: THEME.foreground, marginVertical: 4 }}>
+                          {fmt(Number(res.total) || 0, reportesMonedaCod)}
+                        </Text>
+                        <Text style={{ fontSize: 11, color: THEME.mutedForeground }}>
+                          {res.count || 0} ventas emitidas · <Text style={{ fontWeight: "700", color: THEME.primary }}>Contado + Crédito</Text>
+                        </Text>
                       </View>
 
-                      <View style={{ flexDirection: "row", gap: 8 }}>
-                        <View style={[styles.kpiCard, { flex: 1, backgroundColor: THEME.warningSoft, borderColor: THEME.warningBorder }]}>
-                          <Text style={[styles.kpiLabel, { color: THEME.warningStrong }]}>QUEDÓ COMO DEUDA</Text>
-                          <Text style={[styles.kpiValue, { fontSize: 16, color: THEME.warningStrong }]}>
+                      {/* Tarjeta 2: Cobrado Real (Ancho completo, destacado en verde) */}
+                      <View style={[styles.card, { padding: 14, borderRadius: 14, backgroundColor: THEME.successSoft, borderColor: THEME.successBorder }]}>
+                        <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center" }}>
+                          <Text style={{ fontSize: 11, fontWeight: "800", color: THEME.successStrong, letterSpacing: 0.5 }}>
+                            TOTAL COBRADO REAL (EN CAJA)
+                          </Text>
+                          <View style={{ width: 28, height: 28, borderRadius: 14, backgroundColor: "#fff", alignItems: "center", justifyContent: "center" }}>
+                            <Feather name="check-circle" size={15} color={THEME.successStrong} />
+                          </View>
+                        </View>
+                        <Text style={{ fontSize: 24, fontWeight: "900", color: THEME.successStrong, marginVertical: 4 }}>
+                          {fmt(Number(res.totalCobradoReal ?? res.ventaContado) || 0, reportesMonedaCod)}
+                        </Text>
+                        <Text style={{ fontSize: 11, color: THEME.successStrong, fontWeight: "600" }}>
+                          {res.countContado || 0} ventas al contado + {res.countAbonos || 0} abonos recibidos
+                        </Text>
+                      </View>
+
+                      {/* Fila de 2 tarjetas: Deuda y Ticket Promedio */}
+                      <View style={{ flexDirection: "row", gap: 10 }}>
+                        <View style={[styles.kpiCard, { flex: 1, backgroundColor: THEME.warningSoft, borderColor: THEME.warningBorder, padding: 12, borderRadius: 12 }]}>
+                          <Text style={{ fontSize: 10, fontWeight: "800", color: THEME.warningStrong }}>
+                            EN DEUDA (CRÉDITO)
+                          </Text>
+                          <Text style={{ fontSize: 17, fontWeight: "900", color: THEME.warningStrong, marginTop: 4 }}>
                             {fmt(Number(res.ventaCredito) || 0, reportesMonedaCod)}
                           </Text>
                           <Text style={{ fontSize: 10, color: THEME.warningStrong, marginTop: 2 }}>
-                            {res.countCredito || 0} vtas a crédito
+                            {res.countCredito || 0} ventas a crédito
                           </Text>
                         </View>
-                        <View style={[styles.kpiCard, { flex: 1, backgroundColor: THEME.card, borderColor: THEME.border }]}>
-                          <Text style={styles.kpiLabel}>TICKET PROMEDIO</Text>
-                          <Text style={[styles.kpiValue, { fontSize: 16, color: THEME.foreground }]}>
+
+                        <View style={[styles.kpiCard, { flex: 1, backgroundColor: THEME.card, borderColor: THEME.border, padding: 12, borderRadius: 12 }]}>
+                          <Text style={{ fontSize: 10, fontWeight: "800", color: THEME.mutedForeground }}>
+                            TICKET PROMEDIO
+                          </Text>
+                          <Text style={{ fontSize: 17, fontWeight: "900", color: THEME.foreground, marginTop: 4 }}>
                             {fmt(res.count > 0 ? (res.total / res.count) : 0, reportesMonedaCod)}
                           </Text>
                           <Text style={{ fontSize: 10, color: THEME.mutedForeground, marginTop: 2 }}>
@@ -5787,8 +5849,8 @@ export default function App() {
 
                       {/* Ventas por Método de Pago */}
                       {Array.isArray(monData.ventasPorMetodo) && monData.ventasPorMetodo.length > 0 && (
-                        <View style={styles.card}>
-                          <Text style={{ fontSize: 13, fontWeight: "700", color: THEME.foreground, marginBottom: 8 }}>
+                        <View style={[styles.card, { padding: 14, borderRadius: 14 }]}>
+                          <Text style={{ fontSize: 13, fontWeight: "800", color: THEME.foreground, marginBottom: 8 }}>
                             Ventas por Método de Pago
                           </Text>
                           {monData.ventasPorMetodo.map((m: any, idx: number) => (
@@ -5797,17 +5859,18 @@ export default function App() {
                               style={{
                                 flexDirection: "row",
                                 justifyContent: "space-between",
-                                paddingVertical: 6,
+                                alignItems: "center",
+                                paddingVertical: 8,
                                 borderBottomWidth: 1,
                                 borderBottomColor: THEME.border,
                               }}
                             >
-                              <Text style={{ fontSize: 12, color: THEME.foreground }}>{m.nombre}</Text>
+                              <Text style={{ fontSize: 13, color: THEME.foreground, fontWeight: "600" }}>{m.nombre}</Text>
                               <View style={{ alignItems: "flex-end" }}>
-                                <Text style={{ fontSize: 12, fontWeight: "700", color: THEME.foreground }}>
+                                <Text style={{ fontSize: 13, fontWeight: "800", color: THEME.foreground }}>
                                   {fmt(Number(m.total) || 0, reportesMonedaCod)}
                                 </Text>
-                                <Text style={{ fontSize: 10, color: THEME.mutedForeground }}>{m.count} vtas</Text>
+                                <Text style={{ fontSize: 10, color: THEME.mutedForeground, marginTop: 1 }}>{m.count} ventas</Text>
                               </View>
                             </View>
                           ))}
@@ -5824,42 +5887,45 @@ export default function App() {
                   const ganancia = Number(fin.gananciaBruta ?? (ventasTot - costoTot)) || 0;
                   const margen = ventasTot > 0 ? (ganancia / ventasTot) * 100 : 0;
                   return (
-                    <>
-                      <View style={[styles.card, { borderColor: THEME.successBorder, borderWidth: 1.5 }]}>
-                        <Text style={{ fontSize: 13, fontWeight: "800", color: THEME.foreground, marginBottom: 12 }}>
+                    <View style={[styles.card, { borderColor: THEME.successBorder, borderWidth: 1.5, borderRadius: 16, padding: 16 }]}>
+                      <View style={{ flexDirection: "row", alignItems: "center", gap: 8, marginBottom: 14 }}>
+                        <View style={{ width: 28, height: 28, borderRadius: 14, backgroundColor: THEME.successSoft, alignItems: "center", justifyContent: "center" }}>
+                          <Feather name="pie-chart" size={16} color={THEME.successStrong} />
+                        </View>
+                        <Text style={{ fontSize: 14, fontWeight: "800", color: THEME.foreground }}>
                           RESUMEN FINANCIERO Y UTILIDAD ({reportesMonedaCod})
                         </Text>
-                        <View style={{ gap: 10 }}>
-                          <View style={{ flexDirection: "row", justifyContent: "space-between" }}>
-                            <Text style={{ fontSize: 13, color: THEME.mutedForeground }}>Ventas Totales:</Text>
-                            <Text style={{ fontSize: 14, fontWeight: "700", color: THEME.foreground }}>
-                              {fmt(ventasTot, reportesMonedaCod)}
+                      </View>
+                      <View style={{ gap: 12 }}>
+                        <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center" }}>
+                          <Text style={{ fontSize: 13, color: THEME.mutedForeground }}>Ventas Totales:</Text>
+                          <Text style={{ fontSize: 15, fontWeight: "700", color: THEME.foreground }}>
+                            {fmt(ventasTot, reportesMonedaCod)}
+                          </Text>
+                        </View>
+                        <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center" }}>
+                          <Text style={{ fontSize: 13, color: THEME.mutedForeground }}>Costo de Mercancía Vendida:</Text>
+                          <Text style={{ fontSize: 15, fontWeight: "700", color: THEME.dangerStrong }}>
+                            {fmt(costoTot, reportesMonedaCod)}
+                          </Text>
+                        </View>
+                        <View style={{ height: 1, backgroundColor: THEME.border, marginVertical: 2 }} />
+                        <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center" }}>
+                          <Text style={{ fontSize: 14, fontWeight: "800", color: THEME.foreground }}>Utilidad Bruta:</Text>
+                          <Text style={{ fontSize: 20, fontWeight: "900", color: THEME.successStrong }}>
+                            {fmt(ganancia, reportesMonedaCod)}
+                          </Text>
+                        </View>
+                        <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center" }}>
+                          <Text style={{ fontSize: 13, color: THEME.mutedForeground }}>Margen de Ganancia:</Text>
+                          <View style={[styles.statusBadge, { backgroundColor: THEME.successSoft, borderColor: THEME.successBorder, paddingHorizontal: 10, paddingVertical: 4, borderRadius: 8 }]}>
+                            <Text style={[styles.statusBadgeText, { color: THEME.successStrong, fontWeight: "800", fontSize: 12 }]}>
+                              {margen.toFixed(1)}%
                             </Text>
-                          </View>
-                          <View style={{ flexDirection: "row", justifyContent: "space-between" }}>
-                            <Text style={{ fontSize: 13, color: THEME.mutedForeground }}>Costo de Mercancía Vendida:</Text>
-                            <Text style={{ fontSize: 14, fontWeight: "700", color: THEME.dangerStrong }}>
-                              {fmt(costoTot, reportesMonedaCod)}
-                            </Text>
-                          </View>
-                          <View style={{ height: 1, backgroundColor: THEME.border }} />
-                          <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center" }}>
-                            <Text style={{ fontSize: 14, fontWeight: "800", color: THEME.foreground }}>Utilidad Bruta:</Text>
-                            <Text style={{ fontSize: 18, fontWeight: "900", color: THEME.successStrong }}>
-                              {fmt(ganancia, reportesMonedaCod)}
-                            </Text>
-                          </View>
-                          <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center" }}>
-                            <Text style={{ fontSize: 13, color: THEME.mutedForeground }}>Margen de Ganancia:</Text>
-                            <View style={[styles.statusBadge, { backgroundColor: THEME.successSoft, borderColor: THEME.successBorder }]}>
-                              <Text style={[styles.statusBadgeText, { color: THEME.successStrong, fontWeight: "800" }]}>
-                                {margen.toFixed(1)}%
-                              </Text>
-                            </View>
                           </View>
                         </View>
                       </View>
-                    </>
+                    </View>
                   );
                 }
 
@@ -5872,27 +5938,29 @@ export default function App() {
                   const paginated = stockList.slice((reportesStockPage - 1) * pageSize, reportesStockPage * pageSize);
 
                   return (
-                    <View style={styles.card}>
-                      <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+                    <View style={[styles.card, { borderRadius: 16, padding: 14 }]}>
+                      <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
                         <View>
-                          <Text style={{ fontSize: 13, fontWeight: "800", color: THEME.foreground }}>
+                          <Text style={{ fontSize: 14, fontWeight: "800", color: THEME.foreground }}>
                             Productos con Bajo Inventario
                           </Text>
-                          <Text style={{ fontSize: 11, color: THEME.mutedForeground }}>
+                          <Text style={{ fontSize: 11, color: THEME.mutedForeground, marginTop: 1 }}>
                             {stockList.length} productos críticos
                           </Text>
                         </View>
                         {totalPages > 1 && (
-                          <Text style={{ fontSize: 11, fontWeight: "600", color: THEME.mutedForeground }}>
-                            Pág. {reportesStockPage} de {totalPages}
-                          </Text>
+                          <View style={{ backgroundColor: THEME.inputBg, paddingHorizontal: 8, paddingVertical: 4, borderRadius: 6, borderWidth: 1, borderColor: THEME.border }}>
+                            <Text style={{ fontSize: 11, fontWeight: "700", color: THEME.mutedForeground }}>
+                              Pág. {reportesStockPage} de {totalPages}
+                            </Text>
+                          </View>
                         )}
                       </View>
 
                       {paginated.length === 0 ? (
-                        <View style={{ paddingVertical: 20, alignItems: "center" }}>
-                          <Feather name="check-circle" size={24} color={THEME.success} />
-                          <Text style={{ fontSize: 12, color: THEME.mutedForeground, marginTop: 6 }}>
+                        <View style={{ paddingVertical: 24, alignItems: "center" }}>
+                          <Feather name="check-circle" size={28} color={THEME.success} />
+                          <Text style={{ fontSize: 13, color: THEME.mutedForeground, marginTop: 8 }}>
                             No hay productos con alertas de stock
                           </Text>
                         </View>
@@ -5906,23 +5974,23 @@ export default function App() {
                                 flexDirection: "row",
                                 justifyContent: "space-between",
                                 alignItems: "center",
-                                paddingVertical: 8,
+                                paddingVertical: 10,
                                 borderBottomWidth: 1,
                                 borderBottomColor: THEME.border,
                               }}
                             >
-                              <View style={{ flex: 1, paddingRight: 8 }}>
-                                <Text style={{ fontSize: 12, fontWeight: "600", color: THEME.foreground }}>
+                              <View style={{ flex: 1, paddingRight: 10 }}>
+                                <Text style={{ fontSize: 13, fontWeight: "700", color: THEME.foreground }}>
                                   {p.nombre}
                                 </Text>
-                                <Text style={{ fontSize: 10, color: THEME.mutedForeground, fontFamily: "monospace" }}>
+                                <Text style={{ fontSize: 11, color: THEME.mutedForeground, fontFamily: "monospace", marginTop: 2 }}>
                                   Cód: {p.codigo}
                                 </Text>
                               </View>
-                              <View style={{ alignItems: "flex-end", gap: 3 }}>
+                              <View style={{ alignItems: "flex-end", gap: 4 }}>
                                 <Text
                                   style={{
-                                    fontSize: 13,
+                                    fontSize: 14,
                                     fontWeight: "800",
                                     color: sinStock ? THEME.dangerStrong : THEME.warningStrong,
                                   }}
@@ -5935,8 +6003,9 @@ export default function App() {
                                     {
                                       backgroundColor: sinStock ? THEME.dangerSoft : THEME.warningSoft,
                                       borderColor: sinStock ? THEME.dangerBorder : THEME.warningBorder,
-                                      paddingVertical: 1,
-                                      paddingHorizontal: 6,
+                                      paddingVertical: 2,
+                                      paddingHorizontal: 8,
+                                      borderRadius: 6,
                                     },
                                   ]}
                                 >
@@ -5944,7 +6013,8 @@ export default function App() {
                                     style={[
                                       styles.statusBadgeText,
                                       {
-                                        fontSize: 9,
+                                        fontSize: 10,
+                                        fontWeight: "800",
                                         color: sinStock ? THEME.dangerStrong : THEME.warningStrong,
                                       },
                                     ]}
@@ -5959,28 +6029,28 @@ export default function App() {
                       )}
 
                       {totalPages > 1 && (
-                        <View style={{ flexDirection: "row", justifyContent: "space-between", marginTop: 12, paddingTop: 8, borderTopWidth: 1, borderTopColor: THEME.border }}>
+                        <View style={{ flexDirection: "row", justifyContent: "space-between", marginTop: 14, paddingTop: 10, borderTopWidth: 1, borderTopColor: THEME.border }}>
                           <TouchableOpacity
                             style={[
                               styles.outlineSmallBtn,
-                              { height: 32, paddingHorizontal: 12 },
+                              { height: 36, paddingHorizontal: 14 },
                               reportesStockPage <= 1 && { opacity: 0.4 },
                             ]}
                             disabled={reportesStockPage <= 1}
                             onPress={() => setReportesStockPage((prev) => Math.max(1, prev - 1))}
                           >
-                            <Text style={styles.outlineSmallBtnText}>Anterior</Text>
+                            <Text style={[styles.outlineSmallBtnText, { fontSize: 12 }]}>Anterior</Text>
                           </TouchableOpacity>
                           <TouchableOpacity
                             style={[
                               styles.outlineSmallBtn,
-                              { height: 32, paddingHorizontal: 12 },
+                              { height: 36, paddingHorizontal: 14 },
                               reportesStockPage >= totalPages && { opacity: 0.4 },
                             ]}
                             disabled={reportesStockPage >= totalPages}
                             onPress={() => setReportesStockPage((prev) => Math.min(totalPages, prev + 1))}
                           >
-                            <Text style={styles.outlineSmallBtnText}>Siguiente</Text>
+                            <Text style={[styles.outlineSmallBtnText, { fontSize: 12 }]}>Siguiente</Text>
                           </TouchableOpacity>
                         </View>
                       )}
