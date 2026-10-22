@@ -29,6 +29,7 @@ import { DateRangeFilter } from "@/components/ui/date-range";
 import { KpiCard } from "@/components/ui/kpi-card";
 import { PageHeader } from "@/components/ui/page-header";
 import { Tabs } from "@/components/ui/tabs";
+import { Pagination } from "@/components/ui/pagination";
 import { CHART_COLORS } from "@/lib/chart-colors";
 import { exportarReporteExcel, exportarReportePDF } from "@/lib/export-reportes";
 import { fmt } from "@/lib/format";
@@ -54,6 +55,8 @@ export default function ReportesPage() {
   const [fechaInicio, setFechaInicio] = useState("");
   const [fechaFin, setFechaFin] = useState("");
   const [presetActivo, setPresetActivo] = useState<"hoy" | "mes" | "anio" | "todo" | "custom">("todo");
+  const [stockBajoPage, setStockBajoPage] = useState(1);
+  const STOCK_BAJO_PAGE_SIZE = 8;
 
   const aplicarPreset = (p: "hoy" | "mes" | "anio" | "todo") => {
     setPresetActivo(p);
@@ -855,44 +858,79 @@ export default function ReportesPage() {
                     />
                   </div>
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                    <Card>
-                      <CardHeader>
-                        <CardTitle>Productos con Bajo Existencias</CardTitle>
-                      </CardHeader>
-                      <CardContent className="space-y-3">
-                        {monedaData.stockBajo && monedaData.stockBajo.length > 0 ? (
-                          monedaData.stockBajo.map((p: any) => {
-                            const estado = p.stock === 0 ? "Sin Existencias" : "Bajo Existencias";
-                            return (
-                              <div
-                                key={p.id}
-                                className="flex items-center justify-between border-b border-border py-1.5 last:border-0"
-                              >
-                                <div>
-                                  <div className="text-sm font-medium">{p.nombre}</div>
-                                  <div className="font-mono text-xs text-muted-foreground">{p.codigo}</div>
-                                </div>
-                                <div className="text-right">
-                                  <div
-                                    className={cn(
-                                      "font-mono text-sm font-bold",
-                                      p.stock === 0 ? "text-danger" : "text-warning"
-                                    )}
-                                  >
-                                    {p.stock} uds.
-                                  </div>
-                                  <StatusBadge status={estado} />
-                                </div>
+                    {(() => {
+                      const stockBajoList = monedaData.stockBajo || [];
+                      const totalStockBajo = stockBajoList.length;
+                      const totalPagesStockBajo = Math.ceil(totalStockBajo / STOCK_BAJO_PAGE_SIZE);
+                      const paginatedStockBajo = stockBajoList.slice(
+                        (stockBajoPage - 1) * STOCK_BAJO_PAGE_SIZE,
+                        stockBajoPage * STOCK_BAJO_PAGE_SIZE
+                      );
+
+                      return (
+                        <Card>
+                          <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-3">
+                            <div>
+                              <CardTitle>Productos con Bajo Existencias</CardTitle>
+                              <p className="text-xs text-muted-foreground mt-0.5">
+                                {totalStockBajo} {totalStockBajo === 1 ? "producto" : "productos"} con inventario crítico
+                              </p>
+                            </div>
+                            {totalPagesStockBajo > 1 && (
+                              <div className="text-xs font-semibold text-muted-foreground bg-muted/60 px-2.5 py-1 rounded-md border border-border">
+                                Pág. {stockBajoPage} de {totalPagesStockBajo}
                               </div>
-                            );
-                          })
-                        ) : (
-                          <div className="py-4 text-center text-sm text-muted-foreground">
-                            Sin alertas de existencias
-                          </div>
-                        )}
-                      </CardContent>
-                    </Card>
+                            )}
+                          </CardHeader>
+                          <CardContent className="space-y-3">
+                            {paginatedStockBajo.length > 0 ? (
+                              paginatedStockBajo.map((p: any) => {
+                                const estado = p.stock === 0 ? "Sin Existencias" : "Bajo Existencias";
+                                return (
+                                  <div
+                                    key={p.id}
+                                    className="flex items-center justify-between border-b border-border py-1.5 last:border-0"
+                                  >
+                                    <div>
+                                      <div className="text-sm font-medium">{p.nombre}</div>
+                                      <div className="font-mono text-xs text-muted-foreground">{p.codigo}</div>
+                                    </div>
+                                    <div className="text-right">
+                                      <div
+                                        className={cn(
+                                          "font-mono text-sm font-bold",
+                                          p.stock === 0 ? "text-danger" : "text-warning"
+                                        )}
+                                      >
+                                        {p.stock} uds.
+                                      </div>
+                                      <StatusBadge status={estado} />
+                                    </div>
+                                  </div>
+                                );
+                              })
+                            ) : (
+                              <div className="py-4 text-center text-sm text-muted-foreground">
+                                Sin alertas de existencias
+                              </div>
+                            )}
+
+                            {totalPagesStockBajo > 1 && (
+                              <div className="pt-3 border-t border-border flex justify-center">
+                                <Pagination
+                                  currentPage={stockBajoPage}
+                                  totalPages={totalPagesStockBajo}
+                                  totalItems={totalStockBajo}
+                                  pageSize={STOCK_BAJO_PAGE_SIZE}
+                                  noun="productos"
+                                  onPageChange={setStockBajoPage}
+                                />
+                              </div>
+                            )}
+                          </CardContent>
+                        </Card>
+                      );
+                    })()}
                     <Card>
                       <CardHeader>
                         <CardTitle>Últimos Movimientos</CardTitle>

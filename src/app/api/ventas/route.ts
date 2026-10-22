@@ -841,6 +841,22 @@ export async function DELETE(request: Request) {
         );
       }
 
+      // Revertir y limpiar transacciones de caja asociadas a la venta
+      const txsVenta = await client.query(
+        `SELECT caja_id, tipo, monto FROM transacciones WHERE referencia_tipo = 'venta' AND referencia_id = $1`,
+        [id]
+      );
+      for (const tx of txsVenta.rows) {
+        if (tx.caja_id) {
+          if (tx.tipo === 'Entrada') {
+            await client.query(`UPDATE cajas SET saldo_actual = saldo_actual - $1, actualizado_en = NOW() WHERE id = $2`, [tx.monto, tx.caja_id]);
+          } else if (tx.tipo === 'Salida') {
+            await client.query(`UPDATE cajas SET saldo_actual = saldo_actual + $1, actualizado_en = NOW() WHERE id = $2`, [tx.monto, tx.caja_id]);
+          }
+        }
+      }
+      await client.query(`DELETE FROM transacciones WHERE referencia_tipo = 'venta' AND referencia_id = $1`, [id]);
+
       // Crédito y pagos de la venta: se borran explícitamente (aunque la FK ya
       // cascadea) para que anular una venta a crédito no deje al cliente
       // debiendo una deuda de una venta que ya no existe. Los abonos se
