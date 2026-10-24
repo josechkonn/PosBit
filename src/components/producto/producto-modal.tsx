@@ -1337,9 +1337,9 @@ const agregarPresentacionDesdePicker = () => {
         categoria_id: categoriaId || null,
         marca_id: marcaId || null,
         proveedor_ids: proveedorIds
-          .map((id) => parseInt(id, 10))
-          .filter((n) => Number.isInteger(n) && n > 0),
-        proveedor_id: proveedorIds[0] ? parseInt(proveedorIds[0], 10) : null,
+          .map((id) => String(id).trim())
+          .filter(Boolean),
+        proveedor_id: proveedorIds[0] ? String(proveedorIds[0]).trim() : null,
         stock,
         stock_minimo: stockMinimo,
         activo,

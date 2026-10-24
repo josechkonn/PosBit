@@ -59,9 +59,12 @@ export async function POST(request: Request) {
       cajas,
       metodosPago,
       categorias,
+      marcas,
+      proveedores,
       clientes,
       clienteLimitesCredito,
-      productos,
+      productosRaw,
+      productoProveedores,
       productoPresentaciones,
       creditos,
       abonos,
@@ -84,16 +87,25 @@ export async function POST(request: Request) {
       query(`SELECT * FROM cajas ORDER BY nombre ASC`),
       query(`SELECT * FROM metodos_pago WHERE activo = true ORDER BY nombre ASC`),
       query(`SELECT * FROM categorias ORDER BY nombre ASC`),
+      query(`SELECT * FROM marcas ORDER BY nombre ASC`),
+      query(`SELECT * FROM proveedores ORDER BY nombre ASC`),
       query(`SELECT * FROM clientes ORDER BY nombre ASC`),
       query(`SELECT * FROM cliente_limites_credito`),
       query(
-        `SELECT p.*, c.nombre as categoria_nombre, m.nombre as marca_nombre
+        `SELECT p.*, c.nombre as categoria_nombre, m.nombre as marca_nombre, pr.nombre as proveedor_nombre
          FROM productos p
          LEFT JOIN categorias c ON p.categoria_id = c.id
          LEFT JOIN marcas m ON p.marca_id = m.id
+         LEFT JOIN proveedores pr ON p.proveedor_id = pr.id
          WHERE (p.eliminado IS NULL OR p.eliminado = false)
          ORDER BY p.nombre ASC`
       ),
+      query(
+        `SELECT pp.producto_id, pr.id, pr.nombre
+         FROM producto_proveedores pp
+         JOIN proveedores pr ON pr.id = pp.proveedor_id
+         ORDER BY pr.nombre ASC`
+      ).catch(() => [] as any[]),
       query(
         `SELECT pp.*
          FROM producto_presentaciones pp
@@ -105,6 +117,18 @@ export async function POST(request: Request) {
       query(`SELECT * FROM abonos ORDER BY fecha DESC, id DESC LIMIT 500`),
       query(`SELECT * FROM ventas ORDER BY fecha DESC, id DESC LIMIT 200`),
     ]);
+
+    const provMap = new Map<number, Array<{ id: string; nombre: string }>>();
+    for (const row of (productoProveedores || []) as any[]) {
+      const pid = Number(row.producto_id);
+      const arr = provMap.get(pid) || [];
+      arr.push({ id: String(row.id), nombre: String(row.nombre) });
+      provMap.set(pid, arr);
+    }
+    const productos = ((productosRaw || []) as any[]).map((p) => ({
+      ...p,
+      proveedores: provMap.get(Number(p.id)) || [],
+    }));
 
     if (!token && latestSession?.token) {
       token = latestSession.token;
@@ -124,9 +148,12 @@ export async function POST(request: Request) {
       cajas,
       metodosPago,
       categorias,
+      marcas,
+      proveedores,
       clientes,
       clienteLimitesCredito,
       productos,
+      productoProveedores,
       productoPresentaciones,
       creditos,
       abonos,

@@ -174,19 +174,19 @@ function normalizarPresentaciones(
  * ids o un único id (compatibilidad con clientes viejos). Devuelve ids únicos
  * y válidos; `[]` si no viene nada o viene vacío.
  */
-function normalizarProveedorIds(raw: unknown): number[] {
+function normalizarProveedorIds(raw: unknown): string[] {
   if (Array.isArray(raw)) {
     return Array.from(
       new Set(
         raw
-          .map((x) => parseInt(String(x), 10))
-          .filter((n) => Number.isInteger(n) && n > 0)
+          .map((x) => (x != null ? String(x).trim() : ""))
+          .filter((s) => s.length > 0 && s !== "null" && s !== "undefined" && s !== "NaN")
       )
     );
   }
   if (raw != null && raw !== "") {
-    const n = parseInt(String(raw), 10);
-    return Number.isInteger(n) && n > 0 ? [n] : [];
+    const s = String(raw).trim();
+    return s.length > 0 && s !== "null" && s !== "undefined" && s !== "NaN" ? [s] : [];
   }
   return [];
 }
@@ -624,10 +624,15 @@ export async function PUT(request: Request) {
       const limpiarMonedaVenta = enviado("moneda_base_id") && moneda_base_id == null;
       const limpiarMonedaCosto = enviado("moneda_costo_id") && moneda_costo_id == null;
       const setMonedaVenta = limpiarMonedaVenta ? "NULL" : "COALESCE($14, moneda_base_id)";
-      const setMonedaCosto = limpiarMonedaCosto ? "NULL" : "COALESCE($15, moneda_costo_id)";
+      const setMonedaCosto = limpiarMonedaCosto ? "NULL" : (limpiarMonedaVenta ? "COALESCE($14, moneda_costo_id)" : "COALESCE($15, moneda_costo_id)");
+
+      const descFinal = enviado("descripcion") ? (descripcion || null) : productoAnterior.descripcion;
+      const catFinal = enviado("categoria_id") ? (categoria_id || null) : productoAnterior.categoria_id;
+      const marcaFinal = enviado("marca_id") ? (marca_id || null) : productoAnterior.marca_id;
+      const provFinal = enviado("proveedor_id") ? (proveedor_id || null) : productoAnterior.proveedor_id;
 
       const params: any[] = [
-        id, codigo, nombre, descripcion, categoria_id, marca_id, proveedor_id || null, stock, stock_minimo,
+        id, codigo, nombre, descFinal, catFinal, marcaFinal, provFinal, stock, stock_minimo,
         precioParam, costo_base, activo, iva_incluido,
       ];
       // Los parámetros se anexan solo si su columna los usa, para que el número
@@ -639,10 +644,10 @@ export async function PUT(request: Request) {
         `UPDATE productos 
          SET codigo = COALESCE($2, codigo), 
              nombre = COALESCE($3, nombre),
-             descripcion = COALESCE($4, descripcion),
-             categoria_id = COALESCE($5, categoria_id),
-             marca_id = COALESCE($6, marca_id),
-             proveedor_id = COALESCE($7, proveedor_id),
+             descripcion = $4,
+             categoria_id = $5,
+             marca_id = $6,
+             proveedor_id = $7,
              stock = COALESCE($8, stock),
              stock_minimo = COALESCE($9, stock_minimo),
              precio_base = COALESCE($10, precio_base),

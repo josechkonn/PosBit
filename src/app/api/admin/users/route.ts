@@ -9,7 +9,20 @@ import { hashPassword } from "@/lib/password";
 async function requireAdmin() {
   await waitForDB();
   const h = await headers();
-  const session = await auth.api.getSession({ headers: h });
+  let session = await auth.api.getSession({ headers: h });
+  if (!session) {
+    const authHeader = h.get("authorization") || "";
+    const bearer = authHeader.startsWith("Bearer ") ? authHeader.slice(7).trim() : "";
+    if (bearer) {
+      const { rows } = await pool.query(
+        'SELECT u.id, u.name, u.email, u.role FROM session s JOIN "user" u ON u.id = s."userId" WHERE s.token = $1 LIMIT 1',
+        [bearer]
+      );
+      if (rows[0]) {
+        session = { user: rows[0] } as any;
+      }
+    }
+  }
   if (!session || (session.user as { role?: string }).role !== "admin") {
     return null;
   }

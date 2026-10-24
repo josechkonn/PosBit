@@ -48,4 +48,11 @@ Thumbs.db
 # Expo Mobile
 .expo/
 mobile/.expo/
+mobile/dist/
+
+# Agent skills
+.agents/
+skills-lock.json
+
+
 

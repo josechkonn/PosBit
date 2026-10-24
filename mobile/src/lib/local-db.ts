@@ -43,6 +43,25 @@ export interface LocalMetodoPago {
 export interface LocalCategoria {
   id: string;
   nombre: string;
+  descripcion?: string | null;
+}
+
+export interface LocalMarca {
+  id: string;
+  nombre: string;
+  pais?: string | null;
+}
+
+export interface LocalProveedor {
+  id: string;
+  nombre: string;
+  rif?: string | null;
+  documento?: string | null;
+  contacto?: string | null;
+  telefono?: string | null;
+  email?: string | null;
+  ciudad?: string | null;
+  direccion?: string | null;
 }
 
 export interface LocalPresentacion {
@@ -60,13 +79,21 @@ export interface LocalProducto {
   id: number;
   codigo: string;
   nombre: string;
+  descripcion?: string | null;
   categoria_id?: string | null;
   categoria_nombre?: string | null;
+  marca_id?: string | null;
   marca_nombre?: string | null;
+  proveedor_id?: string | null;
+  proveedor_nombre?: string | null;
+  proveedores_json?: string | null;
+  proveedores?: Array<{ id: string; nombre: string }>;
   stock: number;
   stock_minimo?: number;
   precio_base: number;
   costo_base?: number;
+  margen_ganancia?: number;
+  costo_promedio_base?: number;
   moneda_base_id: string | null;
   moneda_costo_id?: string | null;
   iva_incluido?: number;
@@ -291,7 +318,25 @@ export async function getMobileDb(): Promise<SQLite.SQLiteDatabase> {
 
     CREATE TABLE IF NOT EXISTS categorias (
       id TEXT PRIMARY KEY,
-      nombre TEXT NOT NULL
+      nombre TEXT NOT NULL,
+      descripcion TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS marcas (
+      id TEXT PRIMARY KEY,
+      nombre TEXT NOT NULL,
+      pais TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS proveedores (
+      id TEXT PRIMARY KEY,
+      nombre TEXT NOT NULL,
+      rif TEXT,
+      contacto TEXT,
+      telefono TEXT,
+      email TEXT,
+      ciudad TEXT,
+      direccion TEXT
     );
 
     CREATE TABLE IF NOT EXISTS clientes (
@@ -320,13 +365,20 @@ export async function getMobileDb(): Promise<SQLite.SQLiteDatabase> {
       id INTEGER PRIMARY KEY,
       codigo TEXT NOT NULL,
       nombre TEXT NOT NULL,
+      descripcion TEXT,
       categoria_id TEXT,
       categoria_nombre TEXT,
+      marca_id TEXT,
       marca_nombre TEXT,
+      proveedor_id TEXT,
+      proveedor_nombre TEXT,
+      proveedores_json TEXT,
       stock INTEGER NOT NULL DEFAULT 0,
       stock_minimo INTEGER NOT NULL DEFAULT 5,
       precio_base REAL NOT NULL DEFAULT 0,
       costo_base REAL NOT NULL DEFAULT 0,
+      margen_ganancia REAL NOT NULL DEFAULT 0,
+      costo_promedio_base REAL NOT NULL DEFAULT 0,
       moneda_base_id TEXT,
       moneda_costo_id TEXT,
       iva_incluido INTEGER NOT NULL DEFAULT 1,
@@ -452,11 +504,19 @@ export async function getMobileDb(): Promise<SQLite.SQLiteDatabase> {
     `ALTER TABLE monedas ADD COLUMN usa_tasa_usd_directa INTEGER NOT NULL DEFAULT 0`,
     `ALTER TABLE monedas ADD COLUMN tasa_usd_directa REAL`,
     `ALTER TABLE cajas ADD COLUMN saldo_actual REAL NOT NULL DEFAULT 0`,
+    `ALTER TABLE categorias ADD COLUMN descripcion TEXT`,
+    `ALTER TABLE productos ADD COLUMN descripcion TEXT`,
     `ALTER TABLE productos ADD COLUMN categoria_id TEXT`,
     `ALTER TABLE productos ADD COLUMN categoria_nombre TEXT`,
+    `ALTER TABLE productos ADD COLUMN marca_id TEXT`,
     `ALTER TABLE productos ADD COLUMN marca_nombre TEXT`,
+    `ALTER TABLE productos ADD COLUMN proveedor_id TEXT`,
+    `ALTER TABLE productos ADD COLUMN proveedor_nombre TEXT`,
+    `ALTER TABLE productos ADD COLUMN proveedores_json TEXT`,
     `ALTER TABLE productos ADD COLUMN stock_minimo INTEGER NOT NULL DEFAULT 5`,
     `ALTER TABLE productos ADD COLUMN costo_base REAL NOT NULL DEFAULT 0`,
+    `ALTER TABLE productos ADD COLUMN margen_ganancia REAL NOT NULL DEFAULT 0`,
+    `ALTER TABLE productos ADD COLUMN costo_promedio_base REAL NOT NULL DEFAULT 0`,
     `ALTER TABLE productos ADD COLUMN moneda_costo_id TEXT`,
     `ALTER TABLE productos ADD COLUMN iva_incluido INTEGER NOT NULL DEFAULT 1`,
     `ALTER TABLE productos ADD COLUMN imagen TEXT`,
@@ -507,9 +567,12 @@ export async function saveCatalogOffline(data: {
   cajas?: any[];
   metodos_pago?: any[];
   categorias?: any[];
+  marcas?: any[];
+  proveedores?: any[];
   clientes?: any[];
   cliente_limites_credito?: any[];
   productos?: any[];
+  producto_proveedores?: any[];
   producto_presentaciones?: any[];
   creditos?: any[];
   abonos?: any[];
@@ -609,10 +672,54 @@ export async function saveCatalogOffline(data: {
       for (const cat of data.categorias) {
         if (!cat || !cat.id) continue;
         await db.runAsync(
-          `INSERT INTO categorias (id, nombre)
-           VALUES (?, ?)
-           ON CONFLICT(id) DO UPDATE SET nombre = excluded.nombre`,
-          [String(cat.id), String(cat.nombre)]
+          `INSERT INTO categorias (id, nombre, descripcion)
+           VALUES (?, ?, ?)
+           ON CONFLICT(id) DO UPDATE SET
+             nombre = excluded.nombre,
+             descripcion = COALESCE(excluded.descripcion, categorias.descripcion)`,
+          [String(cat.id), String(cat.nombre), cat.descripcion ? String(cat.descripcion) : null]
+        );
+      }
+    }
+
+    if (Array.isArray(data.marcas)) {
+      for (const mar of data.marcas) {
+        if (!mar || !mar.id) continue;
+        await db.runAsync(
+          `INSERT INTO marcas (id, nombre, pais)
+           VALUES (?, ?, ?)
+           ON CONFLICT(id) DO UPDATE SET
+             nombre = excluded.nombre,
+             pais = COALESCE(excluded.pais, marcas.pais)`,
+          [String(mar.id), String(mar.nombre), mar.pais || mar.descripcion ? String(mar.pais || mar.descripcion) : null]
+        );
+      }
+    }
+
+    if (Array.isArray(data.proveedores)) {
+      for (const prv of data.proveedores) {
+        if (!prv || !prv.id) continue;
+        await db.runAsync(
+          `INSERT INTO proveedores (id, nombre, rif, contacto, telefono, email, ciudad, direccion)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT(id) DO UPDATE SET
+             nombre = excluded.nombre,
+             rif = COALESCE(excluded.rif, proveedores.rif),
+             contacto = COALESCE(excluded.contacto, proveedores.contacto),
+             telefono = COALESCE(excluded.telefono, proveedores.telefono),
+             email = COALESCE(excluded.email, proveedores.email),
+             ciudad = COALESCE(excluded.ciudad, proveedores.ciudad),
+             direccion = COALESCE(excluded.direccion, proveedores.direccion)`,
+          [
+            String(prv.id),
+            String(prv.nombre),
+            prv.rif || prv.documento ? String(prv.rif || prv.documento) : null,
+            prv.contacto ? String(prv.contacto) : null,
+            prv.telefono ? String(prv.telefono) : null,
+            prv.email ? String(prv.email) : null,
+            prv.ciudad ? String(prv.ciudad) : null,
+            prv.direccion ? String(prv.direccion) : null,
+          ]
         );
       }
     }
@@ -679,19 +786,32 @@ export async function saveCatalogOffline(data: {
     if (Array.isArray(data.productos)) {
       for (const p of data.productos) {
         if (!p || p.id == null) continue;
+        const provArr = Array.isArray(p.proveedores)
+          ? p.proveedores.map((pr: any) => ({
+              id: String(pr?.id ?? ""),
+              nombre: String(pr?.nombre ?? ""),
+            }))
+          : null;
         await db.runAsync(
-          `INSERT INTO productos (id, codigo, nombre, categoria_id, categoria_nombre, marca_nombre, stock, stock_minimo, precio_base, costo_base, moneda_base_id, moneda_costo_id, iva_incluido, imagen, activo, actualizado_en)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          `INSERT INTO productos (id, codigo, nombre, descripcion, categoria_id, categoria_nombre, marca_id, marca_nombre, proveedor_id, proveedor_nombre, proveedores_json, stock, stock_minimo, precio_base, costo_base, margen_ganancia, costo_promedio_base, moneda_base_id, moneda_costo_id, iva_incluido, imagen, activo, actualizado_en)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT(id) DO UPDATE SET
              codigo = excluded.codigo,
              nombre = excluded.nombre,
+             descripcion = COALESCE(excluded.descripcion, productos.descripcion),
              categoria_id = COALESCE(excluded.categoria_id, productos.categoria_id),
              categoria_nombre = COALESCE(excluded.categoria_nombre, productos.categoria_nombre),
+             marca_id = COALESCE(excluded.marca_id, productos.marca_id),
              marca_nombre = COALESCE(excluded.marca_nombre, productos.marca_nombre),
+             proveedor_id = COALESCE(excluded.proveedor_id, productos.proveedor_id),
+             proveedor_nombre = COALESCE(excluded.proveedor_nombre, productos.proveedor_nombre),
+             proveedores_json = COALESCE(excluded.proveedores_json, productos.proveedores_json),
              stock = excluded.stock,
              stock_minimo = excluded.stock_minimo,
              precio_base = excluded.precio_base,
              costo_base = excluded.costo_base,
+             margen_ganancia = COALESCE(excluded.margen_ganancia, productos.margen_ganancia),
+             costo_promedio_base = COALESCE(excluded.costo_promedio_base, productos.costo_promedio_base),
              moneda_base_id = excluded.moneda_base_id,
              moneda_costo_id = excluded.moneda_costo_id,
              iva_incluido = excluded.iva_incluido,
@@ -702,13 +822,20 @@ export async function saveCatalogOffline(data: {
             Number(p.id),
             String(p.codigo),
             String(p.nombre),
+            p.descripcion != null ? String(p.descripcion) : null,
             p.categoria_id ? String(p.categoria_id) : null,
             p.categoria_nombre ? String(p.categoria_nombre) : null,
+            p.marca_id ? String(p.marca_id) : null,
             p.marca_nombre ? String(p.marca_nombre) : null,
+            p.proveedor_id ? String(p.proveedor_id) : null,
+            p.proveedor_nombre ? String(p.proveedor_nombre) : null,
+            provArr ? JSON.stringify(provArr) : null,
             Number(p.stock) || 0,
             Number(p.stock_minimo ?? 5),
             Number(p.precio_base) || 0,
             Number(p.costo_base) || 0,
+            p.margen_ganancia != null ? Number(p.margen_ganancia) : 0,
+            p.costo_promedio_base != null ? Number(p.costo_promedio_base) : 0,
             p.moneda_base_id ? String(p.moneda_base_id) : null,
             p.moneda_costo_id ? String(p.moneda_costo_id) : null,
             p.iva_incluido === false ? 0 : 1,
@@ -980,15 +1107,30 @@ export async function getLocalCategorias(): Promise<LocalCategoria[]> {
   return await db.getAllAsync<LocalCategoria>(`SELECT * FROM categorias ORDER BY nombre ASC`);
 }
 
+export async function getLocalMarcas(): Promise<LocalMarca[]> {
+  const db = await getMobileDb();
+  return await db.getAllAsync<LocalMarca>(`SELECT * FROM marcas ORDER BY nombre ASC`);
+}
+
+export async function getLocalProveedores(): Promise<LocalProveedor[]> {
+  const db = await getMobileDb();
+  return await db.getAllAsync<LocalProveedor>(`SELECT * FROM proveedores ORDER BY nombre ASC`);
+}
+
 export async function getLocalProductos(search = ""): Promise<LocalProducto[]> {
   const db = await getMobileDb();
   const q = search.trim();
   let rows: LocalProducto[];
   if (!q) {
     rows = await db.getAllAsync<LocalProducto>(
-      `SELECT p.*, COALESCE(p.categoria_nombre, c.nombre) as categoria_nombre
+      `SELECT p.*,
+              COALESCE(p.categoria_nombre, c.nombre) as categoria_nombre,
+              COALESCE(p.marca_nombre, m.nombre) as marca_nombre,
+              COALESCE(p.proveedor_nombre, pr.nombre) as proveedor_nombre
        FROM productos p
        LEFT JOIN categorias c ON p.categoria_id = c.id
+       LEFT JOIN marcas m ON p.marca_id = m.id
+       LEFT JOIN proveedores pr ON p.proveedor_id = pr.id
        WHERE p.activo = 1
        ORDER BY p.nombre ASC
        LIMIT 300`
@@ -996,13 +1138,22 @@ export async function getLocalProductos(search = ""): Promise<LocalProducto[]> {
   } else {
     const like = `%${q}%`;
     rows = await db.getAllAsync<LocalProducto>(
-      `SELECT p.*, COALESCE(p.categoria_nombre, c.nombre) as categoria_nombre
+      `SELECT p.*,
+              COALESCE(p.categoria_nombre, c.nombre) as categoria_nombre,
+              COALESCE(p.marca_nombre, m.nombre) as marca_nombre,
+              COALESCE(p.proveedor_nombre, pr.nombre) as proveedor_nombre
        FROM productos p
        LEFT JOIN categorias c ON p.categoria_id = c.id
-       WHERE p.activo = 1 AND (p.nombre LIKE ? OR p.codigo LIKE ?)
+       LEFT JOIN marcas m ON p.marca_id = m.id
+       LEFT JOIN proveedores pr ON p.proveedor_id = pr.id
+       WHERE p.activo = 1 AND (
+         p.nombre LIKE ? OR
+         p.codigo LIKE ? OR
+         EXISTS (SELECT 1 FROM producto_presentaciones pp WHERE pp.producto_id = p.id AND pp.codigo LIKE ?)
+       )
        ORDER BY p.nombre ASC
        LIMIT 150`,
-      [like, like]
+      [like, like, like]
     );
   }
 
@@ -1016,10 +1167,98 @@ export async function getLocalProductos(search = ""): Promise<LocalProducto[]> {
     presMap.set(pr.producto_id, list);
   }
 
-  return rows.map((r) => ({
-    ...r,
-    presentaciones: presMap.get(r.id) || [],
-  }));
+  return rows.map((r) => {
+    let provs: Array<{ id: string; nombre: string }> = [];
+    if (r.proveedores_json) {
+      try {
+        const parsed = JSON.parse(r.proveedores_json);
+        if (Array.isArray(parsed)) provs = parsed;
+      } catch {
+        // Ignore
+      }
+    }
+    if (provs.length === 0 && r.proveedor_id && r.proveedor_nombre) {
+      provs = [{ id: String(r.proveedor_id), nombre: String(r.proveedor_nombre) }];
+    }
+    return {
+      ...r,
+      proveedores: provs,
+      presentaciones: presMap.get(r.id) || [],
+    };
+  });
+}
+
+export async function findLocalProductoByBarcode(
+  rawCode: string
+): Promise<{ producto: LocalProducto; presentacion: LocalPresentacion | null } | null> {
+  const clean = (rawCode || "").trim();
+  if (!clean) return null;
+
+  const db = await getMobileDb();
+  const normalizedNoLeadingZeros = clean.replace(/^0+/, "");
+  const padded13 = clean.length === 12 && /^\d+$/.test(clean) ? `0${clean}` : clean;
+
+  // 1. Buscar coincidencia exacta o normalizada en producto_presentaciones
+  const presMatch = await db.getFirstAsync<LocalPresentacion>(
+    `SELECT * FROM producto_presentaciones
+     WHERE codigo IS NOT NULL AND TRIM(codigo) <> ''
+       AND (
+         LOWER(TRIM(codigo)) = LOWER(?)
+         OR LOWER(TRIM(codigo)) = LOWER(?)
+         OR (LENGTH(?) >= 6 AND LTRIM(TRIM(codigo), '0') = ?)
+       )
+     LIMIT 1`,
+    [clean, padded13, normalizedNoLeadingZeros, normalizedNoLeadingZeros]
+  );
+
+  if (presMatch) {
+    const prod = await db.getFirstAsync<LocalProducto>(
+      `SELECT p.*, COALESCE(p.categoria_nombre, c.nombre) as categoria_nombre
+       FROM productos p
+       LEFT JOIN categorias c ON p.categoria_id = c.id
+       WHERE p.id = ? AND p.activo = 1
+       LIMIT 1`,
+      [presMatch.producto_id]
+    );
+    if (prod) {
+      const allPres = await db.getAllAsync<LocalPresentacion>(
+        `SELECT * FROM producto_presentaciones WHERE producto_id = ? ORDER BY unidades ASC`,
+        [prod.id]
+      );
+      return {
+        producto: { ...prod, presentaciones: allPres },
+        presentacion: presMatch,
+      };
+    }
+  }
+
+  // 2. Buscar coincidencia exacta o normalizada (EAN-13 / UPC-A) en productos
+  const prod = await db.getFirstAsync<LocalProducto>(
+    `SELECT p.*, COALESCE(p.categoria_nombre, c.nombre) as categoria_nombre
+     FROM productos p
+     LEFT JOIN categorias c ON p.categoria_id = c.id
+     WHERE p.activo = 1
+       AND (
+         LOWER(TRIM(p.codigo)) = LOWER(?)
+         OR LOWER(TRIM(p.codigo)) = LOWER(?)
+         OR (LENGTH(?) >= 6 AND LTRIM(TRIM(p.codigo), '0') = ?)
+       )
+     ORDER BY CASE WHEN LOWER(TRIM(p.codigo)) = LOWER(?) THEN 0 ELSE 1 END
+     LIMIT 1`,
+    [clean, padded13, normalizedNoLeadingZeros, normalizedNoLeadingZeros, clean]
+  );
+
+  if (!prod) return null;
+
+  const allPres = await db.getAllAsync<LocalPresentacion>(
+    `SELECT * FROM producto_presentaciones WHERE producto_id = ? ORDER BY unidades ASC`,
+    [prod.id]
+  );
+
+  return {
+    producto: { ...prod, presentaciones: allPres },
+    presentacion: null,
+  };
 }
 
 export async function getLocalClientes(): Promise<LocalCliente[]> {

@@ -1,6 +1,6 @@
 {
   "name": "posbit",
-  "version": "0.1.23-nube.4",
+  "version": "0.1.23-nube.5",
   "private": true,
   "main": "electron/main.cjs",
   "scripts": {

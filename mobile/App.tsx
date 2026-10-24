@@ -18,7 +18,14 @@ import {
   PanResponder,
   Animated,
   Alert,
+  Vibration,
 } from "react-native";
+import {
+  CameraView,
+  useCameraPermissions,
+  BarcodeScanningResult,
+  BarcodeType,
+} from "expo-camera";
 import Feather from "./src/lib/icons";
 import {
   LocalMoneda,
@@ -39,7 +46,10 @@ import {
   getLocalCajas,
   getLocalMetodosPago,
   getLocalCategorias,
+  getLocalMarcas,
+  getLocalProveedores,
   getLocalProductos,
+  findLocalProductoByBarcode,
   getLocalClientes,
   getLocalCreditos,
   getLocalAbonosByCredito,
@@ -68,6 +78,39 @@ import {
   fetchVentaDetalleCloud,
   registrarAjusteKardexCloud,
   fetchReportesCloud,
+  saveProductoCloud,
+  deleteProductoCloud,
+  verificarCodigoProductoCloud,
+  fetchProductoFullCloud,
+  fetchCategoriasCloud,
+  saveCategoriaCloud,
+  deleteCategoriaCloud,
+  fetchMarcasCloud,
+  saveMarcaCloud,
+  deleteMarcaCloud,
+  fetchProveedoresCloud,
+  saveProveedorCloud,
+  deleteProveedorCloud,
+  fetchComprasCloud,
+  crearCompraCloud,
+  eliminarCompraCloud,
+  fetchRetornosCloud,
+  crearRetornoCloud,
+  eliminarVentaCloud,
+  fetchTransaccionesCloud,
+  crearTransaccionCloud,
+  crearCajaCloud,
+  saveMonedaCloud,
+  fetchMetodosPagoCloud,
+  saveMetodoPagoCloud,
+  deleteMetodoPagoCloud,
+  fetchConfiguracionEmpresaCloud,
+  saveConfiguracionClaveCloud,
+  saveConfiguracionGlobalCloud,
+  recalcularPreciosGlobalCloud,
+  fetchUsuariosAdminCloud,
+  saveUsuarioAdminCloud,
+  deleteUsuarioAdminCloud,
 } from "./src/lib/sync-client";
 
 const DEFAULT_CLOUD_URL = "https://pos-bit-pi.vercel.app";
@@ -113,7 +156,54 @@ const THEME = {
   sky: "#0ea5e9",
 };
 
-type AppRoute = "dashboard" | "pos" | "clientes" | "creditos" | "ventas" | "productos" | "config" | "kardex" | "cajas" | "reportes";
+type AppRoute =
+  | "dashboard"
+  | "pos"
+  | "clientes"
+  | "creditos"
+  | "ventas"
+  | "productos"
+  | "categorias"
+  | "marcas"
+  | "compras"
+  | "retornos"
+  | "kardex"
+  | "cajas"
+  | "transacciones"
+  | "proveedores"
+  | "metodos_pago"
+  | "monedas"
+  | "reportes"
+  | "usuarios"
+  | "config";
+
+const ALL_BARCODE_TYPES: BarcodeType[] = [
+  "ean13",
+  "ean8",
+  "upc_a",
+  "upc_e",
+  "code128",
+  "code39",
+  "code93",
+  "itf14",
+  "codabar",
+  "qr",
+  "datamatrix",
+  "pdf417",
+  "aztec",
+];
+
+type ScannerMode = "rafaga" | "unico" | "consulta";
+
+interface ScannedEventItem {
+  id: number;
+  rawCode: string;
+  barcodeType: string;
+  timestamp: string;
+  status: "added" | "inspected" | "out_of_stock" | "not_found";
+  producto?: LocalProducto;
+  presentacion?: LocalPresentacion | null;
+}
 
 interface CartItem {
   product: LocalProducto;
@@ -277,6 +367,33 @@ export default function App() {
   const [cartClientSearch, setCartClientSearch] = useState("");
   const [cartClientDropdownOpen, setCartClientDropdownOpen] = useState(false);
 
+  // ── Lector de Código de Barras en Tiempo Real (POS & Catálogo) ──
+  const [cameraPermission, requestCameraPermission] = useCameraPermissions();
+  const [showScannerModal, setShowScannerModal] = useState(false);
+  const [scannerMode, setScannerMode] = useState<ScannerMode>("rafaga");
+  const [scannerTorch, setScannerTorch] = useState(false);
+  const [scannerLowLightGlow, setScannerLowLightGlow] = useState(false);
+  const [scannerAntiBlurMode, setScannerAntiBlurMode] = useState(true);
+  const [scannerZoom, setScannerZoom] = useState<number>(0.12);
+  const [scannerAutoFocus, setScannerAutoFocus] = useState<"on" | "off">("on");
+  const [scannerFacing, setScannerFacing] = useState<"back" | "front">("back");
+  const [scannerPaused, setScannerPaused] = useState(false);
+  const [scannerManualInputOpen, setScannerManualInputOpen] = useState(false);
+  const [scannerManualCode, setScannerManualCode] = useState("");
+  const [lastScannedEvent, setLastScannedEvent] = useState<ScannedEventItem | null>(null);
+  const [scanHistory, setScanHistory] = useState<ScannedEventItem[]>([]);
+  const [scannerStatusRing, setScannerStatusRing] = useState<"idle" | "success" | "warning" | "error">("idle");
+  const [focusPoint, setFocusPoint] = useState<{ x: number; y: number; key: number } | null>(null);
+
+  const scannerLaserAnim = useRef(new Animated.Value(0)).current;
+  const scannerFrameScaleAnim = useRef(new Animated.Value(1)).current;
+  const scannerFocusAnim = useRef(new Animated.Value(1)).current;
+  const lastScanLockRef = useRef<{ code: string; time: number }>({ code: "", time: 0 });
+  const lastBarcodeSeenRef = useRef<{ code: string; seenAt: number }>({ code: "", seenAt: 0 });
+  const scannerCallbackRef = useRef<((code: string) => void) | null>(null);
+  const processingScanRef = useRef(false);
+  const statusRingTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
   // POS Checkout Modal State
   const [showCheckoutModal, setShowCheckoutModal] = useState(false);
   const [showMetodoPickerModal, setShowMetodoPickerModal] = useState(false);
@@ -435,6 +552,236 @@ export default function App() {
   const [reportesMonedaCod, setReportesMonedaCod] = useState<string>("");
   const [reportesStockPage, setReportesStockPage] = useState(1);
 
+  // ── NUEVOS MÓDULOS COMPLETOS (Paridad 100% Web/Desktop) ──
+  // 1. Productos CRUD + Presentaciones (Clon 1:1 de src/components/producto/producto-modal.tsx en PC)
+  const [prodModalOpen, setProdModalOpen] = useState(false);
+  const [prodModalMode, setProdModalMode] = useState<"create" | "edit" | "view">("create");
+  const [prodFormStep, setProdFormStep] = useState<1 | 2 | 3>(1);
+  const [prodFormError, setProdFormError] = useState("");
+  const [editingProd, setEditingProd] = useState<LocalProducto | null>(null);
+  const [prodFullCloud, setProdFullCloud] = useState<any | null>(null);
+  const [prodFormCodigo, setProdFormCodigo] = useState("");
+  const [prodVerifCodigo, setProdVerifCodigo] = useState<{
+    estado: "vacio" | "verificando" | "libre" | "ocupado";
+    mensaje: string;
+  }>({ estado: "vacio", mensaje: "" });
+  const [prodFormNombre, setProdFormNombre] = useState("");
+  const [prodFormDesc, setProdFormDesc] = useState("");
+  const [prodFormCatId, setProdFormCatId] = useState<string>("");
+  const [prodFormMarcaId, setProdFormMarcaId] = useState<string>("");
+  const [prodFormProvIds, setProdFormProvIds] = useState<string[]>([]);
+  const [prodFormIvaIncluido, setProdFormIvaIncluido] = useState(true);
+  const [prodFormActivo, setProdFormActivo] = useState(true);
+  const [prodFormMonedaPrecioId, setProdFormMonedaPrecioId] = useState<string>("");
+  const [prodFormMonedaCostoId, setProdFormMonedaCostoId] = useState<string>("");
+  const [prodFormPreciosPorMoneda, setProdFormPreciosPorMoneda] = useState<
+    Record<string, { precioCompra: string; precioVenta: string }>
+  >({});
+  const [prodFormGanancia, setProdFormGanancia] = useState("");
+  const [prodNuevaPresNombre, setProdNuevaPresNombre] = useState("");
+  const [prodNuevaPresUnidades, setProdNuevaPresUnidades] = useState("");
+  const [prodNuevaPresCodigo, setProdNuevaPresCodigo] = useState("");
+  const [prodVerifNuevaPres, setProdVerifNuevaPres] = useState<{
+    estado: "vacio" | "verificando" | "libre" | "ocupado";
+    mensaje: string;
+  }>({ estado: "vacio", mensaje: "" });
+  const [prodFormPresentaciones, setProdFormPresentaciones] = useState<
+    Array<{
+      key: string;
+      id?: string;
+      nombre: string;
+      unidades: string;
+      activo: boolean;
+      codigoBarras: string;
+      modo_venta: "derivado" | "fijo" | "margen";
+      precio_override: string;
+      margen_override: string;
+    }>
+  >([]);
+  const [prodVerifCajas, setProdVerifCajas] = useState<
+    Record<string, { estado: "vacio" | "verificando" | "libre" | "ocupado"; mensaje: string }>
+  >({});
+  const [prodFormStock, setProdFormStock] = useState<number>(0);
+  const [prodFormStockTexto, setProdFormStockTexto] = useState("0");
+  const [prodFormStockUnidadId, setProdFormStockUnidadId] = useState<string>("");
+  const [prodFormStockMin, setProdFormStockMin] = useState("5");
+  const [savingProd, setSavingProd] = useState(false);
+
+  // 2. Categorías CRUD
+  const [categoriasCloud, setCategoriasCloud] = useState<any[]>([]);
+  const [catSearch, setCatSearch] = useState("");
+  const [catModalOpen, setCatModalOpen] = useState(false);
+  const [editingCat, setEditingCat] = useState<any | null>(null);
+  const [catFormNombre, setCatFormNombre] = useState("");
+  const [catFormDesc, setCatFormDesc] = useState("");
+  const [savingCat, setSavingCat] = useState(false);
+
+  // 3. Marcas CRUD
+  const [marcasCloud, setMarcasCloud] = useState<any[]>([]);
+  const [marcaSearch, setMarcaSearch] = useState("");
+  const [marcaModalOpen, setMarcaModalOpen] = useState(false);
+  const [editingMarca, setEditingMarca] = useState<any | null>(null);
+  const [marcaFormNombre, setMarcaFormNombre] = useState("");
+  const [marcaFormDesc, setMarcaFormDesc] = useState("");
+  const [savingMarca, setSavingMarca] = useState(false);
+
+  // 4. Proveedores CRUD
+  const [proveedoresList, setProveedoresList] = useState<any[]>([]);
+  const [provSearch, setProvSearch] = useState("");
+  const [provLoading, setProvLoading] = useState(false);
+  const [provModalOpen, setProvModalOpen] = useState(false);
+  const [editingProv, setEditingProv] = useState<any | null>(null);
+  const [provFormNombre, setProvFormNombre] = useState("");
+  const [provFormDoc, setProvFormDoc] = useState("");
+  const [provFormContacto, setProvFormContacto] = useState("");
+  const [provFormTel, setProvFormTel] = useState("");
+  const [provFormEmail, setProvFormEmail] = useState("");
+  const [provFormCiudad, setProvFormCiudad] = useState("");
+  const [provFormDir, setProvFormDir] = useState("");
+  const [provFormNotas, setProvFormNotas] = useState("");
+  const [savingProv, setSavingProv] = useState(false);
+
+  // 5. Compras (Listado + Detalle + Nueva Compra)
+  const [comprasList, setComprasList] = useState<any[]>([]);
+  const [compraItemsList, setCompraItemsList] = useState<any[]>([]);
+  const [comprasLoading, setComprasLoading] = useState(false);
+  const [comprasSearch, setComprasSearch] = useState("");
+  const [compraDetailModal, setCompraDetailModal] = useState<{ compra: any; items: any[] } | null>(null);
+  const [nuevaCompraModalOpen, setNuevaCompraModalOpen] = useState(false);
+  const [ncProveedorId, setNcProveedorId] = useState<string>("");
+  const [ncMonedaId, setNcMonedaId] = useState<string>("");
+  const [ncTipoPago, setNcTipoPago] = useState<"contado" | "parcial" | "credito">("contado");
+  const [ncMetodoPagoId, setNcMetodoPagoId] = useState<string>("");
+  const [ncAbonoInicial, setNcAbonoInicial] = useState("");
+  const [ncReferencia, setNcReferencia] = useState("");
+  const [ncObs, setNcObs] = useState("");
+  const [ncSearchProd, setNcSearchProd] = useState("");
+  const [ncItems, setNcItems] = useState<
+    Array<{
+      producto: LocalProducto;
+      cantidadStr: string;
+      costoUnitStr: string;
+    }>
+  >([]);
+  const [savingCompra, setSavingCompra] = useState(false);
+
+  // 6. Retornos / Devoluciones
+  const [retornosList, setRetornosList] = useState<any[]>([]);
+  const [retornoItemsList, setRetornoItemsList] = useState<any[]>([]);
+  const [retornosLoading, setRetornosLoading] = useState(false);
+  const [retornosSearch, setRetornosSearch] = useState("");
+  const [nuevoRetornoModalOpen, setNuevoRetornoModalOpen] = useState(false);
+  const [nrTipo, setNrTipo] = useState<"Cliente" | "Proveedor">("Cliente");
+  const [nrClienteId, setNrClienteId] = useState<string>("");
+  const [nrProveedorId, setNrProveedorId] = useState<string>("");
+  const [nrMetodoReembolso, setNrMetodoReembolso] = useState<"efectivo" | "credito" | "cambio">("efectivo");
+  const [nrMetodoPagoId, setNrMetodoPagoId] = useState<string>("");
+  const [nrMotivo, setNrMotivo] = useState("Devolución de mercancía");
+  const [nrObs, setNrObs] = useState("");
+  const [nrSearchProd, setNrSearchProd] = useState("");
+  const [nrItems, setNrItems] = useState<
+    Array<{
+      producto: LocalProducto;
+      cantidadStr: string;
+      precioUnitStr: string;
+    }>
+  >([]);
+  const [savingRetorno, setSavingRetorno] = useState(false);
+
+  // Retorno Directo desde Factura de Venta o Compra (Clon 1:1 de RetornoDirectoModal de PC)
+  const [retornoDirectoModal, setRetornoDirectoModal] = useState<{
+    tipo: "Cliente" | "Proveedor";
+    referenciaId: string;
+    referenciaNumero: string;
+    entidadId: string | null;
+    entidadNombre: string;
+    tipoPago?: string;
+    tieneCreditoPendiente?: boolean;
+    monedaCodigo: string;
+    items: Array<{
+      producto_id: number;
+      producto_nombre: string;
+      producto_codigo?: string;
+      cantidad_original: number;
+      precio_unit: number;
+      presentacion_nombre?: string | null;
+    }>;
+  } | null>(null);
+  const [rdItemsState, setRdItemsState] = useState<
+    Array<{
+      producto_id: number;
+      cantidad: number;
+      seleccionado: boolean;
+    }>
+  >([]);
+  const [rdAbonarCredito, setRdAbonarCredito] = useState(true);
+  const [rdMotivo, setRdMotivo] = useState("Devolución de mercancía");
+  const [rdSubmitting, setRdSubmitting] = useState(false);
+
+  // 7. Transacciones de Caja + Nueva Caja
+  const [transaccionesList, setTransaccionesList] = useState<any[]>([]);
+  const [transaccionesLoading, setTransaccionesLoading] = useState(false);
+  const [transaccionesSearch, setTransaccionesSearch] = useState("");
+  const [nuevaTransModalOpen, setNuevaTransModalOpen] = useState(false);
+  const [ntCajaId, setNtCajaId] = useState<string>("");
+  const [ntTipo, setNtTipo] = useState<"Entrada" | "Salida">("Entrada");
+  const [ntMonto, setNtMonto] = useState("");
+  const [ntDesc, setNtDesc] = useState("");
+  const [savingTrans, setSavingTrans] = useState(false);
+  const [nuevaCajaModalOpen, setNuevaCajaModalOpen] = useState(false);
+  const [ncajaNombre, setNcajaNombre] = useState("");
+  const [ncajaMonedaId, setNcajaMonedaId] = useState<string>("");
+  const [savingNuevaCaja, setSavingNuevaCaja] = useState(false);
+
+  // 8. Monedas y Tasas CRUD
+  const [monedaModalOpen, setMonedaModalOpen] = useState(false);
+  const [editingMoneda, setEditingMoneda] = useState<LocalMoneda | null>(null);
+  const [monFormNombre, setMonFormNombre] = useState("");
+  const [monFormCodigo, setMonFormCodigo] = useState("");
+  const [monFormSimbolo, setMonFormSimbolo] = useState("$");
+  const [monFormTasa, setMonFormTasa] = useState("1");
+  const [monFormDecimales, setMonFormDecimales] = useState("2");
+  const [monFormUsaDirecta, setMonFormUsaDirecta] = useState(false);
+  const [monFormTasaDirecta, setMonFormTasaDirecta] = useState("");
+  const [savingMoneda, setSavingMoneda] = useState(false);
+
+  // 9. Métodos de Pago CRUD
+  const [mpModalOpen, setMpModalOpen] = useState(false);
+  const [editingMp, setEditingMp] = useState<LocalMetodoPago | null>(null);
+  const [mpFormNombre, setMpFormNombre] = useState("");
+  const [mpFormTipo, setMpFormTipo] = useState("Efectivo");
+  const [mpFormCajaId, setMpFormCajaId] = useState<string>("");
+  const [mpFormActivo, setMpFormActivo] = useState(true);
+  const [savingMp, setSavingMp] = useState(false);
+
+  // 10. Configuración Global & Empresa + Usuarios Admin
+  const [configSubTab, setConfigSubTab] = useState<"motor" | "empresa" | "sync">("motor");
+  const [empresaConfig, setEmpresaConfig] = useState<Record<string, string>>({
+    empresa_nombre: "PosBit",
+    empresa_rif: "",
+    empresa_telefono: "",
+    empresa_direccion: "",
+    empresa_email: "",
+    iva_porcentaje: "16",
+  });
+  const [cfgModoVentas, setCfgModoVentas] = useState<"directa" | "triangulacion">("directa");
+  const [cfgModoCompras, setCfgModoCompras] = useState<"directa" | "triangulacion">("directa");
+  const [cfgRedondearVentas, setCfgRedondearVentas] = useState(false);
+  const [cfgActualizarEnCompra, setCfgActualizarEnCompra] = useState(true);
+  const [cfgGananciaDefecto, setCfgGananciaDefecto] = useState("30");
+  const [savingConfigGlobal, setSavingConfigGlobal] = useState(false);
+  const [recalculandoPrecios, setRecalculandoPrecios] = useState(false);
+
+  const [usuariosList, setUsuariosList] = useState<any[]>([]);
+  const [usuariosLoading, setUsuariosLoading] = useState(false);
+  const [usuarioModalOpen, setUsuarioModalOpen] = useState(false);
+  const [editingUsuario, setEditingUsuario] = useState<any | null>(null);
+  const [usrFormName, setUsrFormName] = useState("");
+  const [usrFormEmail, setUsrFormEmail] = useState("");
+  const [usrFormRole, setUsrFormRole] = useState<"admin" | "cajero" | "usuario">("cajero");
+  const [usrFormPassword, setUsrFormPassword] = useState("");
+  const [savingUsuario, setSavingUsuario] = useState(false);
+
   const showToast = useCallback((text: string, type: "success" | "error" | "info" = "success") => {
     setToastMsg({ text, type });
     setTimeout(() => {
@@ -443,12 +790,14 @@ export default function App() {
   }, []);
 
   const refreshLocalState = useCallback(async (search = "") => {
-    const [m, cfg, c, mp, cats, p, cls, creds, vl, vr, vir, abPend, lastIso] = await Promise.all([
+    const [m, cfg, c, mp, cats, mrcs, provs, p, cls, creds, vl, vr, vir, abPend, lastIso] = await Promise.all([
       getLocalMonedas(),
       getLocalConfiguracionGlobal(),
       getLocalCajas(),
       getLocalMetodosPago(),
       getLocalCategorias(),
+      getLocalMarcas(),
+      getLocalProveedores(),
       getLocalProductos(search),
       getLocalClientes(),
       getLocalCreditos(),
@@ -464,6 +813,9 @@ export default function App() {
     setCajas(c);
     setMetodosPago(mp);
     setCategorias(cats);
+    if (cats.length > 0) setCategoriasCloud(cats);
+    if (mrcs.length > 0) setMarcasCloud(mrcs);
+    if (provs.length > 0) setProveedoresList(provs);
     setProductos(p);
     setClientes(cls);
     setCreditosData(creds);
@@ -938,6 +1290,291 @@ export default function App() {
       setPosSubView("carrito");
     },
     []
+  );
+
+  // ── Motor de Escaneo de Código de Barras en Tiempo Real (Baja Luz + Antidesenfoque) ──
+  useEffect(() => {
+    if (!showScannerModal || scannerPaused) {
+      scannerLaserAnim.setValue(0);
+      return;
+    }
+    const loop = Animated.loop(
+      Animated.sequence([
+        Animated.timing(scannerLaserAnim, {
+          toValue: 1,
+          duration: 1550,
+          useNativeDriver: true,
+        }),
+        Animated.timing(scannerLaserAnim, {
+          toValue: 0,
+          duration: 1550,
+          useNativeDriver: true,
+        }),
+      ])
+    );
+    loop.start();
+    return () => loop.stop();
+  }, [showScannerModal, scannerPaused, scannerLaserAnim]);
+
+  // Re-enfoque automático periódico cuando Modo Antidesenfoque está activo
+  useEffect(() => {
+    if (!showScannerModal || !scannerAntiBlurMode || scannerPaused) return;
+    const interval = setInterval(() => {
+      setScannerAutoFocus("off");
+      setTimeout(() => setScannerAutoFocus("on"), 75);
+    }, 3600);
+    return () => clearInterval(interval);
+  }, [showScannerModal, scannerAntiBlurMode, scannerPaused]);
+
+  const flashScannerRing = useCallback(
+    (ringStatus: "success" | "warning" | "error") => {
+      if (statusRingTimeoutRef.current) {
+        clearTimeout(statusRingTimeoutRef.current);
+      }
+      setScannerStatusRing(ringStatus);
+      scannerFrameScaleAnim.setValue(0.94);
+      Animated.spring(scannerFrameScaleAnim, {
+        toValue: 1,
+        friction: 4,
+        tension: 120,
+        useNativeDriver: true,
+      }).start();
+      statusRingTimeoutRef.current = setTimeout(() => {
+        setScannerStatusRing("idle");
+      }, 950);
+    },
+    [scannerFrameScaleAnim]
+  );
+
+  const triggerScannerFocus = useCallback(
+    (tapX?: number, tapY?: number) => {
+      setScannerAutoFocus("off");
+      setTimeout(() => setScannerAutoFocus("on"), 65);
+      if (typeof tapX === "number" && typeof tapY === "number") {
+        setFocusPoint({ x: tapX, y: tapY, key: Date.now() });
+        scannerFocusAnim.setValue(1.35);
+        Animated.spring(scannerFocusAnim, {
+          toValue: 1,
+          friction: 5,
+          tension: 110,
+          useNativeDriver: true,
+        }).start();
+        setTimeout(() => {
+          setFocusPoint((prev) => (prev && Date.now() - prev.key >= 900 ? null : prev));
+        }, 950);
+      }
+    },
+    [scannerFocusAnim]
+  );
+
+  const openBarcodeScanner = useCallback(
+    (initialMode: ScannerMode = "rafaga", onCaptureCode?: (code: string) => void) => {
+      scannerCallbackRef.current = onCaptureCode || null;
+      setScannerMode(onCaptureCode ? "unico" : initialMode);
+      setScannerPaused(false);
+      setScannerManualInputOpen(false);
+      setScannerManualCode("");
+      setScannerStatusRing("idle");
+      lastScanLockRef.current = { code: "", time: 0 };
+      lastBarcodeSeenRef.current = { code: "", seenAt: 0 };
+      setShowScannerModal(true);
+    },
+    []
+  );
+
+  const processScannedBarcode = useCallback(
+    async (rawCodeInput: string, barcodeType = "ean13") => {
+      const cleanCode = (rawCodeInput || "").trim();
+      if (!cleanCode) return;
+
+      // Si el escáner fue invocado desde un formulario (ej. Crear Producto, Presentación o Compra),
+      // devolver el código directamente al callback del formulario y cerrar el escáner.
+      if (scannerCallbackRef.current) {
+        const cb = scannerCallbackRef.current;
+        scannerCallbackRef.current = null;
+        try {
+          Vibration.vibrate(40);
+        } catch {}
+        flashScannerRing("success");
+        setShowScannerModal(false);
+        cb(cleanCode);
+        return;
+      }
+
+      const nowStr = new Date().toTimeString().slice(0, 8);
+      const normNoZero = cleanCode.replace(/^0+/, "");
+      const padded13 =
+        cleanCode.length === 12 && /^\d+$/.test(cleanCode) ? `0${cleanCode}` : cleanCode;
+
+      // 1. Búsqueda instantánea 0ms en memoria (catálogo cargado)
+      let matchedProd: LocalProducto | undefined;
+      let matchedPres: LocalPresentacion | null = null;
+
+      for (const p of productos) {
+        if (p.presentaciones && p.presentaciones.length > 0) {
+          const prHit = p.presentaciones.find((pr) => {
+            if (!pr.codigo) return false;
+            const c = pr.codigo.trim();
+            return (
+              c.toLowerCase() === cleanCode.toLowerCase() ||
+              c.toLowerCase() === padded13.toLowerCase() ||
+              (normNoZero.length >= 6 && c.replace(/^0+/, "") === normNoZero)
+            );
+          });
+          if (prHit) {
+            matchedProd = p;
+            matchedPres = prHit;
+            break;
+          }
+        }
+        const pCode = (p.codigo || "").trim();
+        if (
+          pCode.toLowerCase() === cleanCode.toLowerCase() ||
+          pCode.toLowerCase() === padded13.toLowerCase() ||
+          (normNoZero.length >= 6 && pCode.replace(/^0+/, "") === normNoZero)
+        ) {
+          matchedProd = p;
+          matchedPres = null;
+          break;
+        }
+      }
+
+      // 2. Fallback a SQLite completo (si hay >300 productos o código fuera del slice en memoria)
+      if (!matchedProd) {
+        try {
+          const dbMatch = await findLocalProductoByBarcode(cleanCode);
+          if (dbMatch) {
+            matchedProd = dbMatch.producto;
+            matchedPres = dbMatch.presentacion;
+          }
+        } catch (err) {
+          console.warn("Error buscando código en SQLite:", err);
+        }
+      }
+
+      // Caso A: Producto NO encontrado
+      if (!matchedProd) {
+        try {
+          Vibration.vibrate([0, 45, 55, 65]);
+        } catch {}
+        flashScannerRing("error");
+        const notFoundEvt: ScannedEventItem = {
+          id: Date.now(),
+          rawCode: cleanCode,
+          barcodeType,
+          timestamp: nowStr,
+          status: "not_found",
+        };
+        setLastScannedEvent(notFoundEvt);
+        setScanHistory((prev) => [notFoundEvt, ...prev].slice(0, 12));
+        return;
+      }
+
+      // Caso B: Modo Consulta / Verificador de Precios
+      if (scannerMode === "consulta") {
+        try {
+          Vibration.vibrate(35);
+        } catch {}
+        flashScannerRing("success");
+        const inspectEvt: ScannedEventItem = {
+          id: Date.now(),
+          rawCode: cleanCode,
+          barcodeType,
+          timestamp: nowStr,
+          status: "inspected",
+          producto: matchedProd,
+          presentacion: matchedPres,
+        };
+        setLastScannedEvent(inspectEvt);
+        setScanHistory((prev) => [inspectEvt, ...prev].slice(0, 12));
+        return;
+      }
+
+      // Caso C: Producto sin stock disponible
+      if (matchedProd.stock <= 0) {
+        try {
+          Vibration.vibrate([0, 40, 50, 50]);
+        } catch {}
+        flashScannerRing("warning");
+        const noStockEvt: ScannedEventItem = {
+          id: Date.now(),
+          rawCode: cleanCode,
+          barcodeType,
+          timestamp: nowStr,
+          status: "out_of_stock",
+          producto: matchedProd,
+          presentacion: matchedPres,
+        };
+        setLastScannedEvent(noStockEvt);
+        setScanHistory((prev) => [noStockEvt, ...prev].slice(0, 12));
+        showToast(`Sin existencias de ${matchedProd.nombre}`, "error");
+        return;
+      }
+
+      // Caso D: Agregar al Carrito POS en tiempo real
+      addToCart(matchedProd, matchedPres);
+      try {
+        Vibration.vibrate(40);
+      } catch {}
+      flashScannerRing("success");
+
+      const addedEvt: ScannedEventItem = {
+        id: Date.now(),
+        rawCode: cleanCode,
+        barcodeType,
+        timestamp: nowStr,
+        status: "added",
+        producto: matchedProd,
+        presentacion: matchedPres,
+      };
+      setLastScannedEvent(addedEvt);
+      setScanHistory((prev) => [addedEvt, ...prev].slice(0, 12));
+
+      if (scannerMode === "unico") {
+        setTimeout(() => {
+          setShowScannerModal(false);
+        }, 380);
+      }
+    },
+    [productos, scannerMode, addToCart, flashScannerRing, showToast]
+  );
+
+  const handleCameraBarcodeScanned = useCallback(
+    (result: BarcodeScanningResult) => {
+      if (scannerPaused || processingScanRef.current) return;
+      const code = (result?.data || "").trim();
+      if (!code) return;
+
+      const now = Date.now();
+      const prevLock = lastScanLockRef.current;
+      const prevSeen = lastBarcodeSeenRef.current;
+
+      // 1. Bloqueo Anti-Doble-Escaneo (Hold Lock):
+      // Si es el MISMO código que acabamos de escanear y el usuario dejó el producto un momento
+      // frente a la cámara, actualizamos `seenAt` en cada fotograma y bloqueamos el re-escaneo
+      // hasta que el código haya salido del encuadre por >= 1150ms Y hayan pasado >= 2700ms desde el escaneo.
+      if (prevLock.code === code) {
+        const gapSinceLastSeen = prevSeen.code === code ? now - prevSeen.seenAt : 999999;
+        lastBarcodeSeenRef.current = { code, seenAt: now };
+        if (gapSinceLastSeen < 1150 || now - prevLock.time < 2700) {
+          return;
+        }
+      } else {
+        // 2. Pausa ergonómica entre escaneos rápidos de DISTINTOS productos (750ms)
+        // para dar tiempo cómodo al cambiar de producto sin lecturas accidentales.
+        if (now - prevLock.time < 750) {
+          return;
+        }
+        lastBarcodeSeenRef.current = { code, seenAt: now };
+      }
+
+      lastScanLockRef.current = { code, time: now };
+      processingScanRef.current = true;
+      processScannedBarcode(code, result.type || "ean13").finally(() => {
+        processingScanRef.current = false;
+      });
+    },
+    [scannerPaused, processScannedBarcode]
   );
 
   // ── Totales del Carrito ──
@@ -2000,6 +2637,7 @@ export default function App() {
     const list: Array<{
       id: string | number;
       numero: string;
+      cliente_id?: string | null;
       cliente: string;
       fecha: string;
       creado_en?: string | null;
@@ -2028,6 +2666,7 @@ export default function App() {
       list.push({
         id: `local_${vl.id}`,
         numero: vl.numero,
+        cliente_id: vl.cliente_id || null,
         cliente: vl.cliente_nombre || "Consumidor Final",
         fecha: vl.fecha,
         creado_en: vl.creado_en || vl.fecha,
@@ -2056,6 +2695,7 @@ export default function App() {
       list.push({
         id: vr.id,
         numero: vr.numero,
+        cliente_id: vr.cliente_id || null,
         cliente: vr.cliente || "Consumidor Final",
         fecha: vr.fecha,
         creado_en: vr.creado_en || vr.fecha,
@@ -2313,6 +2953,2158 @@ export default function App() {
     }
   }, [route, loadReportes]);
 
+  // ── CARGADORES Y CONTROLADORES DE TODOS LOS MÓDULOS WEB/ESCRITORIO ──
+  const loadCatalogExtras = useCallback(async () => {
+    const [locCats, locMrcs, locProvs] = await Promise.all([
+      getLocalCategorias(),
+      getLocalMarcas(),
+      getLocalProveedores(),
+    ]);
+    if (locCats.length > 0) setCategoriasCloud(locCats);
+    if (locMrcs.length > 0) setMarcasCloud(locMrcs);
+    if (locProvs.length > 0) setProveedoresList(locProvs);
+
+    const [cats, mrcs, provs] = await Promise.all([
+      fetchCategoriasCloud(),
+      fetchMarcasCloud(),
+      fetchProveedoresCloud(),
+    ]);
+    if (cats.length > 0) setCategoriasCloud(cats);
+    if (mrcs.length > 0) setMarcasCloud(mrcs);
+    if (provs.length > 0) setProveedoresList(provs);
+    await refreshLocalState(posSearch);
+  }, [refreshLocalState, posSearch]);
+
+  const loadCompras = useCallback(async () => {
+    setComprasLoading(true);
+    try {
+      const [res, provs] = await Promise.all([fetchComprasCloud(), fetchProveedoresCloud()]);
+      setComprasList(res.compras);
+      setCompraItemsList(res.items);
+      if (provs.length > 0) setProveedoresList(provs);
+    } finally {
+      setComprasLoading(false);
+    }
+  }, []);
+
+  const loadRetornos = useCallback(async () => {
+    setRetornosLoading(true);
+    try {
+      const [res, provs] = await Promise.all([fetchRetornosCloud(), fetchProveedoresCloud()]);
+      setRetornosList(res.retornos);
+      setRetornoItemsList(res.items);
+      if (provs.length > 0) setProveedoresList(provs);
+    } finally {
+      setRetornosLoading(false);
+    }
+  }, []);
+
+  const loadTransacciones = useCallback(async () => {
+    setTransaccionesLoading(true);
+    try {
+      const [list, cjs] = await Promise.all([fetchTransaccionesCloud(), fetchCajasCloud()]);
+      setTransaccionesList(list);
+      if (Array.isArray(cjs)) setCajasCloud(cjs);
+    } finally {
+      setTransaccionesLoading(false);
+    }
+  }, []);
+
+  const loadProveedores = useCallback(async () => {
+    setProvLoading(true);
+    try {
+      const localProvs = await getLocalProveedores();
+      if (localProvs.length > 0 && !provSearch.trim()) {
+        setProveedoresList(localProvs);
+      }
+      const list = await fetchProveedoresCloud(provSearch);
+      if (list.length > 0 || provSearch.trim()) {
+        setProveedoresList(list);
+      }
+    } finally {
+      setProvLoading(false);
+    }
+  }, [provSearch]);
+
+  const loadConfigAndEmpresa = useCallback(async () => {
+    try {
+      const rows = await fetchConfiguracionEmpresaCloud();
+      if (Array.isArray(rows) && rows.length > 0) {
+        const map: Record<string, string> = {};
+        for (const r of rows) {
+          if (r?.clave) map[String(r.clave)] = String(r.valor ?? "");
+        }
+        setEmpresaConfig((prev) => ({ ...prev, ...map }));
+      }
+      setCfgModoVentas(
+        cfgGlobal.metodo_conversion_ventas === "triangulacion" ? "triangulacion" : "directa"
+      );
+      setCfgModoCompras(
+        cfgGlobal.metodo_conversion_compras === "triangulacion" ? "triangulacion" : "directa"
+      );
+      setCfgRedondearVentas(Boolean(cfgGlobal.redondeo_activo));
+    } catch {}
+  }, [cfgGlobal]);
+
+  const loadUsuariosAdmin = useCallback(async () => {
+    setUsuariosLoading(true);
+    try {
+      const res = await fetchUsuariosAdminCloud();
+      setUsuariosList(res.users);
+    } finally {
+      setUsuariosLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!session) return;
+    if (route === "productos" || route === "categorias" || route === "marcas") {
+      loadCatalogExtras();
+    } else if (route === "compras") {
+      loadCompras();
+    } else if (route === "retornos") {
+      loadRetornos();
+    } else if (route === "transacciones") {
+      loadTransacciones();
+    } else if (route === "proveedores") {
+      loadProveedores();
+    } else if (route === "metodos_pago") {
+      fetchMetodosPagoCloud().then(() => refreshLocalState(posSearch));
+      loadCajas();
+    } else if (route === "config" || route === "monedas") {
+      loadConfigAndEmpresa();
+    } else if (route === "usuarios") {
+      loadUsuariosAdmin();
+    }
+  }, [
+    route,
+    session,
+    loadCatalogExtras,
+    loadCompras,
+    loadRetornos,
+    loadTransacciones,
+    loadProveedores,
+    loadConfigAndEmpresa,
+    loadUsuariosAdmin,
+    loadCajas,
+    refreshLocalState,
+    posSearch,
+  ]);
+
+  // 1. PRODUCTOS CRUD (Clon 1:1 de src/components/producto/producto-modal.tsx en PC/Web)
+  const PRESENTACIONES_SUGERIDAS = useMemo(
+    () => [
+      "Caja",
+      "Bolsa",
+      "Paquete",
+      "Docena",
+      "Media docena",
+      "Fardo",
+      "Blíster",
+      "Bulto",
+      "Saco",
+      "Kilo",
+      "Litro",
+      "Galón",
+    ],
+    []
+  );
+
+  const prodCostoMoneda = useMemo(
+    () =>
+      monedas.find((m) => String(m.id) === String(prodFormMonedaCostoId)) ||
+      baseMonedaSistema ||
+      monedas[0] ||
+      null,
+    [monedas, prodFormMonedaCostoId, baseMonedaSistema]
+  );
+
+  const prodVentaMoneda = useMemo(
+    () =>
+      monedas.find((m) => String(m.id) === String(prodFormMonedaPrecioId)) ||
+      baseMonedaSistema ||
+      monedas[0] ||
+      null,
+    [monedas, prodFormMonedaPrecioId, baseMonedaSistema]
+  );
+
+  const prodDecVenta = Number(prodVentaMoneda?.decimales ?? 2);
+  const prodDecCosto = Number(prodCostoMoneda?.decimales ?? 2);
+
+  const costoEnMonedaVentaActual = useCallback(
+    (
+      preciosState: Record<string, { precioCompra: string; precioVenta: string }>,
+      cMonId: string | null = prodFormMonedaCostoId,
+      vMonId: string | null = prodFormMonedaPrecioId
+    ): number => {
+      if (!cMonId || !vMonId) return 0;
+      const cMon = monedas.find((m) => String(m.id) === String(cMonId));
+      const vMon = monedas.find((m) => String(m.id) === String(vMonId));
+      if (!cMon || !vMon) return 0;
+      const costoRaw = parseFloat(
+        (preciosState[String(cMon.id)]?.precioCompra || "").replace(",", ".")
+      );
+      if (isNaN(costoRaw) || costoRaw <= 0) return 0;
+      return convertirConRegla(costoRaw, cMon, vMon, "compras", Number(vMon.decimales ?? 2));
+    },
+    [monedas, prodFormMonedaCostoId, prodFormMonedaPrecioId, convertirConRegla]
+  );
+
+  const prodMargenReal = useMemo<number | null>(() => {
+    if (!prodVentaMoneda) return null;
+    const pv = parseFloat(
+      (prodFormPreciosPorMoneda[String(prodVentaMoneda.id)]?.precioVenta || "").replace(",", ".")
+    );
+    const costoEnVenta = costoEnMonedaVentaActual(
+      prodFormPreciosPorMoneda,
+      prodFormMonedaCostoId,
+      prodFormMonedaPrecioId
+    );
+    if (!Number.isFinite(pv) || pv <= 0 || !Number.isFinite(costoEnVenta) || costoEnVenta <= 0) {
+      return null;
+    }
+    return redondear(((pv - costoEnVenta) / costoEnVenta) * 100, 2);
+  }, [
+    prodVentaMoneda,
+    prodFormPreciosPorMoneda,
+    costoEnMonedaVentaActual,
+    prodFormMonedaCostoId,
+    prodFormMonedaPrecioId,
+    redondear,
+  ]);
+
+  const prodPrecioRedondeadoSugerido = useMemo<{ precio: number; multiplo: number } | null>(() => {
+    if (!cfgGlobal.redondeo_activo || !prodVentaMoneda) return null;
+    const mult = Number(cfgGlobal.redondeo_multiplo) || 0;
+    if (mult <= 0) return null;
+    const actual = parseFloat(
+      (prodFormPreciosPorMoneda[String(prodVentaMoneda.id)]?.precioVenta || "").replace(",", ".")
+    );
+    if (isNaN(actual) || actual <= 0) return null;
+    const cociente = actual / mult;
+    let redondeado = Math.round(cociente) * mult;
+    const costoEnVenta = costoEnMonedaVentaActual(
+      prodFormPreciosPorMoneda,
+      prodFormMonedaCostoId,
+      prodFormMonedaPrecioId
+    );
+    if (cfgGlobal.redondeo_no_bajar_de_costo !== false && costoEnVenta > 0 && redondeado < costoEnVenta) {
+      redondeado = Math.ceil(costoEnVenta / mult - 1e-9) * mult;
+    }
+    redondeado = redondear(redondeado, prodDecVenta);
+    if (Math.abs(redondeado - actual) < 1e-9) return null;
+    return { precio: redondeado, multiplo: mult };
+  }, [
+    cfgGlobal,
+    prodVentaMoneda,
+    prodFormPreciosPorMoneda,
+    costoEnMonedaVentaActual,
+    prodFormMonedaCostoId,
+    prodFormMonedaPrecioId,
+    redondear,
+    prodDecVenta,
+  ]);
+
+  const handleProdPrecioVentaChange = useCallback(
+    (monedaId: string, val: string) => {
+      const changedMoneda = monedas.find((m) => String(m.id) === String(monedaId));
+      if (!changedMoneda) return;
+      const numVal = parseFloat(val.replace(",", "."));
+      setProdFormPreciosPorMoneda((prev) => {
+        const next = { ...prev };
+        next[String(monedaId)] = {
+          ...(next[String(monedaId)] || { precioCompra: "", precioVenta: "" }),
+          precioVenta: val,
+        };
+        if (!isNaN(numVal) && numVal >= 0) {
+          for (const m of monedas) {
+            if (String(m.id) === String(monedaId)) continue;
+            const dec = Number(m.decimales ?? 2);
+            const conv = convertirConRegla(numVal, changedMoneda, m, "ventas", dec);
+            next[String(m.id)] = {
+              ...(next[String(m.id)] || { precioCompra: "", precioVenta: "" }),
+              precioVenta: String(conv),
+            };
+          }
+        } else if (val === "") {
+          for (const m of monedas) {
+            if (String(m.id) === String(monedaId)) continue;
+            next[String(m.id)] = {
+              ...(next[String(m.id)] || { precioCompra: "", precioVenta: "" }),
+              precioVenta: "",
+            };
+          }
+        }
+        if (String(monedaId) === String(prodFormMonedaPrecioId)) {
+          const costoEnVenta = costoEnMonedaVentaActual(
+            next,
+            prodFormMonedaCostoId,
+            prodFormMonedaPrecioId
+          );
+          if (numVal > 0 && costoEnVenta > 0) {
+            const mCalc = redondear(((numVal - costoEnVenta) / costoEnVenta) * 100, 2);
+            setProdFormGanancia(String(Math.max(0, mCalc)));
+          }
+        }
+        return next;
+      });
+    },
+    [
+      monedas,
+      convertirConRegla,
+      prodFormMonedaPrecioId,
+      prodFormMonedaCostoId,
+      costoEnMonedaVentaActual,
+      redondear,
+    ]
+  );
+
+  const handleProdPrecioCompraChange = useCallback(
+    (monedaId: string, val: string) => {
+      const changedMoneda = monedas.find((m) => String(m.id) === String(monedaId));
+      if (!changedMoneda) return;
+      const numVal = parseFloat(val.replace(",", "."));
+      setProdFormPreciosPorMoneda((prev) => {
+        const next = { ...prev };
+        next[String(monedaId)] = {
+          ...(next[String(monedaId)] || { precioCompra: "", precioVenta: "" }),
+          precioCompra: val,
+        };
+        if (!isNaN(numVal) && numVal >= 0) {
+          for (const m of monedas) {
+            if (String(m.id) === String(monedaId)) continue;
+            const dec = Number(m.decimales ?? 2);
+            const conv = convertirConRegla(numVal, changedMoneda, m, "compras", dec);
+            next[String(m.id)] = {
+              ...(next[String(m.id)] || { precioCompra: "", precioVenta: "" }),
+              precioCompra: String(conv),
+            };
+          }
+        } else if (val === "") {
+          for (const m of monedas) {
+            if (String(m.id) === String(monedaId)) continue;
+            next[String(m.id)] = {
+              ...(next[String(m.id)] || { precioCompra: "", precioVenta: "" }),
+              precioCompra: "",
+            };
+          }
+        }
+
+        // Si hay margen configurado, recalcular el precio de venta desde el nuevo costo
+        const mNum = parseFloat(prodFormGanancia.replace(",", "."));
+        if (
+          String(monedaId) === String(prodFormMonedaCostoId) &&
+          prodFormMonedaPrecioId &&
+          prodFormGanancia.trim() !== "" &&
+          !isNaN(mNum) &&
+          mNum >= 0
+        ) {
+          const vMon = monedas.find((m) => String(m.id) === String(prodFormMonedaPrecioId));
+          if (vMon && !isNaN(numVal) && numVal > 0) {
+            const decV = Number(vMon.decimales ?? 2);
+            const costoEnVenta = convertirConRegla(numVal, changedMoneda, vMon, "compras", decV);
+            const nuevoPv = redondear(costoEnVenta * (1 + mNum / 100), decV);
+            next[String(vMon.id)] = {
+              ...(next[String(vMon.id)] || { precioCompra: "", precioVenta: "" }),
+              precioVenta: String(nuevoPv),
+            };
+            for (const m of monedas) {
+              if (String(m.id) === String(vMon.id)) continue;
+              const dec = Number(m.decimales ?? 2);
+              const convV = convertirConRegla(nuevoPv, vMon, m, "ventas", dec);
+              next[String(m.id)] = {
+                ...(next[String(m.id)] || { precioCompra: "", precioVenta: "" }),
+                precioVenta: String(convV),
+              };
+            }
+          }
+        }
+        return next;
+      });
+    },
+    [
+      monedas,
+      convertirConRegla,
+      prodFormGanancia,
+      prodFormMonedaCostoId,
+      prodFormMonedaPrecioId,
+      redondear,
+    ]
+  );
+
+  const handleProdMargenChange = useCallback(
+    (val: string) => {
+      setProdFormGanancia(val);
+      const m = parseFloat(val.replace(",", "."));
+      if (isNaN(m) || m < 0 || !prodFormMonedaPrecioId) return;
+      const vMon = monedas.find((x) => String(x.id) === String(prodFormMonedaPrecioId));
+      if (!vMon) return;
+      const costoEnVenta = costoEnMonedaVentaActual(
+        prodFormPreciosPorMoneda,
+        prodFormMonedaCostoId,
+        prodFormMonedaPrecioId
+      );
+      if (costoEnVenta <= 0) return;
+      const decV = Number(vMon.decimales ?? 2);
+      const nuevoPrecio = redondear(costoEnVenta * (1 + m / 100), decV);
+      setProdFormPreciosPorMoneda((prev) => {
+        const next = { ...prev };
+        next[String(vMon.id)] = {
+          ...(next[String(vMon.id)] || { precioCompra: "", precioVenta: "" }),
+          precioVenta: String(nuevoPrecio),
+        };
+        for (const mon of monedas) {
+          if (String(mon.id) === String(vMon.id)) continue;
+          const dec = Number(mon.decimales ?? 2);
+          const conv = convertirConRegla(nuevoPrecio, vMon, mon, "ventas", dec);
+          next[String(mon.id)] = {
+            ...(next[String(mon.id)] || { precioCompra: "", precioVenta: "" }),
+            precioVenta: String(conv),
+          };
+        }
+        return next;
+      });
+    },
+    [
+      prodFormMonedaPrecioId,
+      prodFormMonedaCostoId,
+      monedas,
+      costoEnMonedaVentaActual,
+      prodFormPreciosPorMoneda,
+      redondear,
+      convertirConRegla,
+    ]
+  );
+
+  const handleSelectProdCostoMoneda = useCallback(
+    (monedaId: string) => {
+      setProdFormMonedaCostoId(monedaId);
+      const currentVal = prodFormPreciosPorMoneda[monedaId]?.precioCompra;
+      if (currentVal && parseFloat(currentVal.replace(",", ".")) > 0) {
+        handleProdPrecioCompraChange(monedaId, currentVal);
+      }
+    },
+    [prodFormPreciosPorMoneda, handleProdPrecioCompraChange]
+  );
+
+  const handleSelectProdVentaMoneda = useCallback(
+    (monedaId: string) => {
+      setProdFormMonedaPrecioId(monedaId);
+      const currentVal = prodFormPreciosPorMoneda[monedaId]?.precioVenta;
+      if (currentVal && parseFloat(currentVal.replace(",", ".")) > 0) {
+        handleProdPrecioVentaChange(monedaId, currentVal);
+      }
+    },
+    [prodFormPreciosPorMoneda, handleProdPrecioVentaChange]
+  );
+
+  // Funciones de Presentaciones (Cajas, Bolsas, Paquetes...) idénticas a PC
+  const prodPrecioUnidadVenta = useCallback((): number => {
+    if (!prodVentaMoneda) return 0;
+    const raw = prodFormPreciosPorMoneda[String(prodVentaMoneda.id)]?.precioVenta ?? "";
+    const n = parseFloat(raw.replace(",", "."));
+    return Number.isFinite(n) && n > 0 ? n : 0;
+  }, [prodVentaMoneda, prodFormPreciosPorMoneda]);
+
+  const prodPrecioUnidadCosto = useCallback((): number => {
+    if (!prodCostoMoneda) return 0;
+    const raw = prodFormPreciosPorMoneda[String(prodCostoMoneda.id)]?.precioCompra ?? "";
+    const n = parseFloat(raw.replace(",", "."));
+    return Number.isFinite(n) && n > 0 ? n : 0;
+  }, [prodCostoMoneda, prodFormPreciosPorMoneda]);
+
+  const prodCostoCppUnidadEnMonedaVenta = useCallback((): number => {
+    if (!prodVentaMoneda) return 0;
+    const cppBase = Number(prodFullCloud?.costo_promedio_base);
+    if (Number.isFinite(cppBase) && cppBase > 0 && baseMonedaSistema) {
+      return convertirConRegla(cppBase, baseMonedaSistema, prodVentaMoneda, "compras", 6);
+    }
+    return costoEnMonedaVentaActual(
+      prodFormPreciosPorMoneda,
+      prodFormMonedaCostoId,
+      prodFormMonedaPrecioId
+    );
+  }, [
+    prodVentaMoneda,
+    prodFullCloud,
+    baseMonedaSistema,
+    convertirConRegla,
+    costoEnMonedaVentaActual,
+    prodFormPreciosPorMoneda,
+    prodFormMonedaCostoId,
+    prodFormMonedaPrecioId,
+  ]);
+
+  const precioSegunModoProd = useCallback(
+    (
+      p: {
+        modo_venta: "derivado" | "fijo" | "margen";
+        precio_override: string;
+        margen_override: string;
+      },
+      unidades: number
+    ) => {
+      const u = prodPrecioUnidadVenta();
+      const derivado = redondear(u * unidades, prodDecVenta);
+      const costoCaja = redondear(prodCostoCppUnidadEnMonedaVenta() * unidades, prodDecVenta);
+      let precio = derivado;
+
+      if (p.modo_venta === "fijo") {
+        const f = parseFloat((p.precio_override || "").replace(",", "."));
+        precio = Number.isFinite(f) && f >= 0 ? redondear(f, prodDecVenta) : 0;
+      } else if (p.modo_venta === "margen") {
+        const m = parseFloat((p.margen_override || "").replace(",", "."));
+        precio =
+          Number.isFinite(m) && m >= 0 && costoCaja > 0
+            ? redondear(costoCaja * (1 + m / 100), prodDecVenta)
+            : 0;
+      }
+
+      const precioUnitario = unidades > 0 ? redondear(precio / unidades, prodDecVenta) : 0;
+      const margen =
+        precio > 0 && costoCaja > 0
+          ? redondear(((precio - costoCaja) / costoCaja) * 100, 2)
+          : null;
+      const bajoCosto = costoCaja > 0 && precio > 0 && precio < costoCaja;
+      return { precio, precioUnitario, costo: costoCaja, margen, bajoCosto };
+    },
+    [prodPrecioUnidadVenta, prodCostoCppUnidadEnMonedaVenta, redondear, prodDecVenta]
+  );
+
+  const cambiarPrecioPresentacionVenta = useCallback(
+    (valor: string, unidades: number) => {
+      if (!prodVentaMoneda || !(Number.isInteger(unidades) && unidades > 1)) return;
+      const n = parseFloat(valor.replace(",", "."));
+      if (!Number.isFinite(n) || n <= 0) {
+        handleProdPrecioVentaChange(String(prodVentaMoneda.id), "");
+        return;
+      }
+      const unitario = redondear(n / unidades, prodDecVenta);
+      handleProdPrecioVentaChange(String(prodVentaMoneda.id), String(unitario));
+    },
+    [prodVentaMoneda, handleProdPrecioVentaChange, redondear, prodDecVenta]
+  );
+
+  const cambiarPrecioPresentacionCosto = useCallback(
+    (valor: string, unidades: number) => {
+      if (!prodCostoMoneda || !(Number.isInteger(unidades) && unidades > 1)) return;
+      const n = parseFloat(valor.replace(",", "."));
+      if (!Number.isFinite(n) || n <= 0) {
+        handleProdPrecioCompraChange(String(prodCostoMoneda.id), "");
+        return;
+      }
+      const unitario = redondear(n / unidades, prodDecCosto);
+      handleProdPrecioCompraChange(String(prodCostoMoneda.id), String(unitario));
+    },
+    [prodCostoMoneda, handleProdPrecioCompraChange, redondear, prodDecCosto]
+  );
+
+  const agregarPresentacionDesdePicker = useCallback(() => {
+    const n = prodNuevaPresNombre.trim();
+    const u = parseInt(prodNuevaPresUnidades, 10);
+    if (!n) {
+      setProdFormError("Elige o escribe el nombre de la presentación (ej: Caja, Bolsa)");
+      return;
+    }
+    if (!Number.isInteger(u) || u <= 1) {
+      setProdFormError(`Indica cuántas unidades trae "${n}" (entero mayor a 1)`);
+      return;
+    }
+    if (prodFormPresentaciones.some((p) => p.nombre.trim().toLowerCase() === n.toLowerCase())) {
+      setProdFormError(`La presentación "${n}" ya está en la lista`);
+      return;
+    }
+    const cod = prodNuevaPresCodigo.trim();
+    if (cod && prodVerifNuevaPres.estado === "ocupado") {
+      setProdFormError(
+        prodVerifNuevaPres.mensaje || "Ese código de barras ya está en uso en el catálogo"
+      );
+      return;
+    }
+    setProdFormError("");
+    setProdFormPresentaciones((prev) => [
+      ...prev,
+      {
+        key: `pres-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+        nombre: n,
+        unidades: String(u),
+        activo: true,
+        codigoBarras: cod,
+        modo_venta: "derivado",
+        precio_override: "",
+        margen_override: "",
+      },
+    ]);
+    setProdNuevaPresNombre("");
+    setProdNuevaPresUnidades("");
+    setProdNuevaPresCodigo("");
+  }, [
+    prodNuevaPresNombre,
+    prodNuevaPresUnidades,
+    prodNuevaPresCodigo,
+    prodFormPresentaciones,
+    prodVerifNuevaPres,
+  ]);
+
+  const actualizarPresentacionProd = useCallback(
+    (
+      key: string,
+      patch: Partial<{
+        nombre: string;
+        unidades: string;
+        activo: boolean;
+        codigoBarras: string;
+        modo_venta: "derivado" | "fijo" | "margen";
+        precio_override: string;
+        margen_override: string;
+      }>
+    ) => {
+      setProdFormPresentaciones((prev) => {
+        const next = prev.map((p) => (p.key === key ? { ...p, ...patch } : p));
+        if (patch.unidades !== undefined && key === prodFormStockUnidadId) {
+          const f = parseInt(patch.unidades, 10);
+          const factor = Number.isInteger(f) && f > 1 ? f : 1;
+          const cant = parseFloat(prodFormStockTexto.replace(",", "."));
+          setProdFormStock(
+            Number.isFinite(cant) && cant >= 0 ? Math.round(cant * factor) : 0
+          );
+        }
+        return next;
+      });
+    },
+    [prodFormStockUnidadId, prodFormStockTexto]
+  );
+
+  const eliminarPresentacionProd = useCallback(
+    (key: string) => {
+      setProdFormPresentaciones((prev) => prev.filter((p) => p.key !== key));
+      if (prodFormStockUnidadId === key) {
+        setProdFormStockUnidadId("");
+        setProdFormStockTexto(String(prodFormStock));
+      }
+    },
+    [prodFormStockUnidadId, prodFormStock]
+  );
+
+  // Stock con Presentaciones (Unidades vs Cajas/Paquetes) idéntico a PC
+  const factorDeStockProd = useCallback(
+    (unidadId: string): number => {
+      if (!unidadId) return 1;
+      const p = prodFormPresentaciones.find((x) => x.key === unidadId);
+      const u = p ? parseInt(p.unidades, 10) : NaN;
+      return Number.isInteger(u) && u > 1 ? u : 1;
+    },
+    [prodFormPresentaciones]
+  );
+
+  const teclearStockProd = useCallback(
+    (txt: string) => {
+      setProdFormStockTexto(txt);
+      const factor = factorDeStockProd(prodFormStockUnidadId);
+      const n = parseFloat(txt.replace(",", "."));
+      setProdFormStock(Number.isFinite(n) && n >= 0 ? Math.round(n * factor) : 0);
+    },
+    [factorDeStockProd, prodFormStockUnidadId]
+  );
+
+  const cambiarUnidadStockProd = useCallback(
+    (nuevoId: string) => {
+      const nuevoFactor = factorDeStockProd(nuevoId);
+      setProdFormStockUnidadId(nuevoId);
+      if (prodFormStock <= 0) {
+        setProdFormStockTexto("0");
+        return;
+      }
+      const convertido = prodFormStock / nuevoFactor;
+      setProdFormStockTexto(
+        Number.isInteger(convertido) ? String(convertido) : String(redondear(convertido, 2))
+      );
+    },
+    [factorDeStockProd, prodFormStock, redondear]
+  );
+
+  // Verificación en vivo de códigos de barras (Producto + Cajas) igual que en PC
+  useEffect(() => {
+    if (!prodModalOpen || prodModalMode === "view") return;
+    const limpio = prodFormCodigo.trim();
+    if (!limpio) {
+      setProdVerifCodigo({ estado: "vacio", mensaje: "" });
+      return;
+    }
+    setProdVerifCodigo({ estado: "verificando", mensaje: "" });
+    const t = setTimeout(async () => {
+      const res = await verificarCodigoProductoCloud({
+        tipo: "producto",
+        codigos: [limpio],
+        excluirProductoId: editingProd?.id ?? null,
+      });
+      const r = res[limpio];
+      if (!r) {
+        setProdVerifCodigo({ estado: "vacio", mensaje: "" });
+      } else if (r.disponible) {
+        setProdVerifCodigo({ estado: "libre", mensaje: "Código disponible" });
+      } else {
+        setProdVerifCodigo({
+          estado: "ocupado",
+          mensaje: r.mensaje || "Este código ya está en uso",
+        });
+      }
+    }, 250);
+    return () => clearTimeout(t);
+  }, [prodFormCodigo, prodModalOpen, prodModalMode, editingProd?.id]);
+
+  useEffect(() => {
+    if (!prodModalOpen || prodModalMode === "view") return;
+    const limpio = prodNuevaPresCodigo.trim();
+    if (!limpio) {
+      setProdVerifNuevaPres({ estado: "vacio", mensaje: "" });
+      return;
+    }
+    if (
+      prodFormCodigo.trim() &&
+      limpio.toLowerCase() === prodFormCodigo.trim().toLowerCase()
+    ) {
+      setProdVerifNuevaPres({
+        estado: "ocupado",
+        mensaje: "Es el mismo código del producto",
+      });
+      return;
+    }
+    const repetida = prodFormPresentaciones.find(
+      (p) => p.codigoBarras.trim().toLowerCase() === limpio.toLowerCase()
+    );
+    if (repetida) {
+      setProdVerifNuevaPres({
+        estado: "ocupado",
+        mensaje: `Ya lo pusiste en "${repetida.nombre || "otra presentación"}"`,
+      });
+      return;
+    }
+    setProdVerifNuevaPres({ estado: "verificando", mensaje: "" });
+    const t = setTimeout(async () => {
+      const res = await verificarCodigoProductoCloud({
+        tipo: "caja",
+        codigos: [limpio],
+        excluirProductoId: editingProd?.id ?? null,
+      });
+      const r = res[limpio];
+      if (!r) {
+        setProdVerifNuevaPres({ estado: "vacio", mensaje: "" });
+      } else if (r.disponible) {
+        setProdVerifNuevaPres({ estado: "libre", mensaje: "Código disponible" });
+      } else {
+        setProdVerifNuevaPres({
+          estado: "ocupado",
+          mensaje: r.mensaje || "Este código ya está en uso",
+        });
+      }
+    }, 250);
+    return () => clearTimeout(t);
+  }, [
+    prodNuevaPresCodigo,
+    prodFormCodigo,
+    prodFormPresentaciones,
+    prodModalOpen,
+    prodModalMode,
+    editingProd?.id,
+  ]);
+
+  const applyProductoDataToForm = useCallback(
+    (prodObj: any, baseM: LocalMoneda | undefined) => {
+      const defMonId = String(baseM?.id || monedas[0]?.id || "1");
+      const vId = prodObj.moneda_base_id ? String(prodObj.moneda_base_id) : defMonId;
+      const cId = prodObj.moneda_costo_id
+        ? String(prodObj.moneda_costo_id)
+        : vId;
+      setProdFormCodigo(prodObj.codigo || "");
+      setProdFormNombre(prodObj.nombre || "");
+      setProdFormDesc(prodObj.descripcion || "");
+      setProdFormCatId(prodObj.categoria_id ? String(prodObj.categoria_id) : "");
+      setProdFormMarcaId(prodObj.marca_id ? String(prodObj.marca_id) : "");
+
+      const provIdsArr: string[] =
+        Array.isArray(prodObj.proveedores) && prodObj.proveedores.length > 0
+          ? prodObj.proveedores.map((pv: any) => String(pv.id))
+          : prodObj.proveedor_id
+          ? [String(prodObj.proveedor_id)]
+          : [];
+      setProdFormProvIds(provIdsArr);
+
+      const st = Number(prodObj.stock ?? 0);
+      setProdFormStock(st);
+      setProdFormStockTexto(String(st));
+      setProdFormStockUnidadId("");
+      setProdFormStockMin(String(prodObj.stock_minimo ?? 5));
+      setProdFormActivo(prodObj.activo !== false && prodObj.activo !== 0);
+      setProdFormIvaIncluido(prodObj.iva_incluido !== false && prodObj.iva_incluido !== 0);
+      setProdFormMonedaPrecioId(vId);
+      setProdFormMonedaCostoId(cId);
+
+      // Construir diccionario preciosPorMoneda
+      const mapPrecios: Record<string, { precioCompra: string; precioVenta: string }> = {};
+      const vMonObj = monedas.find((m) => String(m.id) === vId) || baseM || monedas[0];
+      const cMonObj = monedas.find((m) => String(m.id) === cId) || vMonObj;
+      const pvBase = Number(prodObj.precio_base) || 0;
+      const pcBase = Number(prodObj.costo_base) || 0;
+
+      for (const m of monedas) {
+        const fromServer = Array.isArray(prodObj.precios)
+          ? prodObj.precios.find((pr: any) => String(pr.moneda_id) === String(m.id))
+          : null;
+        if (fromServer) {
+          mapPrecios[String(m.id)] = {
+            precioCompra: String(fromServer.costo ?? 0),
+            precioVenta: String(fromServer.precio ?? 0),
+          };
+        } else {
+          const dec = Number(m.decimales ?? 2);
+          const pvConv = vMonObj
+            ? convertirConRegla(pvBase, vMonObj, m, "ventas", dec)
+            : pvBase;
+          const pcConv = cMonObj
+            ? convertirConRegla(pcBase, cMonObj, m, "compras", dec)
+            : pcBase;
+          mapPrecios[String(m.id)] = {
+            precioCompra: String(pcConv),
+            precioVenta: String(pvConv),
+          };
+        }
+      }
+      setProdFormPreciosPorMoneda(mapPrecios);
+
+      const margenGuardado = Number(prodObj.margen_ganancia);
+      if (Number.isFinite(margenGuardado) && margenGuardado > 0) {
+        setProdFormGanancia(String(margenGuardado));
+      } else {
+        const costoEnV =
+          vMonObj && cMonObj
+            ? convertirConRegla(pcBase, cMonObj, vMonObj, "compras", Number(vMonObj.decimales ?? 2))
+            : pcBase;
+        const mCalc =
+          pvBase > 0 && costoEnV > 0
+            ? redondear(((pvBase - costoEnV) / costoEnV) * 100, 2)
+            : null;
+        setProdFormGanancia(mCalc !== null && mCalc > 0 ? String(mCalc) : "");
+      }
+
+      setProdFormPresentaciones(
+        (prodObj.presentaciones || []).map((pr: any, idx: number) => ({
+          key: pr.id ? String(pr.id) : `pres-${idx}-${Date.now()}`,
+          id: pr.id ? String(pr.id) : undefined,
+          nombre: pr.nombre || "Caja",
+          unidades: String(pr.unidades ?? pr.unidades_por_venta ?? 2),
+          activo: pr.activo !== false,
+          codigoBarras: pr.codigo ?? "",
+          modo_venta:
+            pr.modo_venta === "fijo" || pr.modo_venta === "margen"
+              ? pr.modo_venta
+              : "derivado",
+          precio_override: pr.precio_override != null ? String(pr.precio_override) : "",
+          margen_override: pr.margen_override != null ? String(pr.margen_override) : "",
+        }))
+      );
+    },
+    [monedas, convertirConRegla, redondear]
+  );
+
+  const openProductoModal = useCallback(
+    (
+      prod: LocalProducto | null = null,
+      codigoInicial = "",
+      modeOverride?: "create" | "edit" | "view"
+    ) => {
+      const targetMode = modeOverride || (prod ? "edit" : "create");
+      setProdModalMode(targetMode);
+      setProdFormStep(1);
+      setProdFormError("");
+      setEditingProd(prod);
+      setProdFullCloud(prod || null);
+      setProdNuevaPresNombre("");
+      setProdNuevaPresUnidades("");
+      setProdNuevaPresCodigo("");
+      setProdVerifCodigo({ estado: "vacio", mensaje: "" });
+      setProdVerifNuevaPres({ estado: "vacio", mensaje: "" });
+      setProdVerifCajas({});
+
+      // Asegurar que categorías, marcas y proveedores estén cargados
+      if (categoriasCloud.length === 0 || marcasCloud.length === 0 || proveedoresList.length === 0) {
+        loadCatalogExtras();
+      }
+
+      const baseM = monedas.find((m) => m.es_base === 1) || monedas[0];
+      const defMonId = String(baseM?.id || "1");
+
+      if (prod) {
+        applyProductoDataToForm(prod, baseM);
+        // En segundo plano consultar el detalle enriquecido del servidor (descripción, marca_id, proveedores N:M, margen_ganancia, presentaciones completas)
+        fetchProductoFullCloud({ id: prod.id, codigo: prod.codigo }).then((full) => {
+          if (full) {
+            const merged = {
+              ...prod,
+              ...full,
+              descripcion: full.descripcion ?? prod.descripcion ?? null,
+              categoria_id: full.categoria_id ?? prod.categoria_id ?? null,
+              categoria_nombre: full.categoria_nombre || prod.categoria_nombre || null,
+              marca_id: full.marca_id ?? prod.marca_id ?? null,
+              marca_nombre: full.marca_nombre || prod.marca_nombre || null,
+              proveedor_id: full.proveedor_id ?? prod.proveedor_id ?? null,
+              proveedor_nombre: full.proveedor_nombre || prod.proveedor_nombre || null,
+              proveedores:
+                Array.isArray(full.proveedores) && full.proveedores.length > 0
+                  ? full.proveedores
+                  : prod.proveedores || [],
+            };
+            setProdFullCloud(merged);
+            applyProductoDataToForm(merged, baseM);
+          }
+        });
+      } else {
+        setProdFormCodigo(codigoInicial || "");
+        setProdFormNombre("");
+        setProdFormDesc("");
+        setProdFormCatId("");
+        setProdFormMarcaId("");
+        setProdFormProvIds([]);
+        setProdFormStock(0);
+        setProdFormStockTexto("0");
+        setProdFormStockUnidadId("");
+        setProdFormStockMin("5");
+        setProdFormActivo(true);
+        setProdFormIvaIncluido(true);
+        setProdFormMonedaPrecioId(defMonId);
+        setProdFormMonedaCostoId(defMonId);
+        setProdFormGanancia("");
+        const emptyMap: Record<string, { precioCompra: string; precioVenta: string }> = {};
+        for (const m of monedas) {
+          emptyMap[String(m.id)] = { precioCompra: "", precioVenta: "" };
+        }
+        setProdFormPreciosPorMoneda(emptyMap);
+        setProdFormPresentaciones([]);
+      }
+      setProdModalOpen(true);
+    },
+    [
+      monedas,
+      categoriasCloud.length,
+      marcasCloud.length,
+      proveedoresList.length,
+      loadCatalogExtras,
+      applyProductoDataToForm,
+    ]
+  );
+
+  const validateStep1Prod = useCallback((): boolean => {
+    if (!prodFormCodigo.trim()) {
+      setProdFormError("El código es requerido");
+      return false;
+    }
+    if (prodVerifCodigo.estado === "ocupado") {
+      setProdFormError(prodVerifCodigo.mensaje || "Ese código ya está en uso");
+      return false;
+    }
+    if (!prodFormNombre.trim()) {
+      setProdFormError("El nombre es requerido");
+      return false;
+    }
+    setProdFormError("");
+    return true;
+  }, [prodFormCodigo, prodVerifCodigo, prodFormNombre]);
+
+  const validateStep2Prod = useCallback((): boolean => {
+    if (!prodFormMonedaCostoId) {
+      setProdFormError("Debes elegir una moneda de compra");
+      return false;
+    }
+    if (!prodFormMonedaPrecioId) {
+      setProdFormError("Debes elegir una moneda de venta");
+      return false;
+    }
+    const pcVal = parseFloat(
+      (prodFormPreciosPorMoneda[prodFormMonedaCostoId]?.precioCompra || "").replace(",", ".")
+    );
+    if (isNaN(pcVal) || pcVal < 0) {
+      setProdFormError("Ingresa un precio de compra válido en la moneda de compra");
+      return false;
+    }
+    const pvVal = parseFloat(
+      (prodFormPreciosPorMoneda[prodFormMonedaPrecioId]?.precioVenta || "").replace(",", ".")
+    );
+    const mVal = parseFloat((prodFormGanancia || "").replace(",", "."));
+    const tienePrecioManual = !isNaN(pvVal) && pvVal > 0;
+    const puedeAutoCalcular = !isNaN(mVal) && mVal >= 0 && pcVal > 0;
+    if (!tienePrecioManual && !puedeAutoCalcular) {
+      setProdFormError("Ingresa un precio de venta mayor a 0 o un margen de ganancia (%)");
+      return false;
+    }
+    const vistos = new Set<string>();
+    const codigosVistos = new Set<string>();
+    const codProd = prodFormCodigo.trim().toLowerCase();
+    for (const p of prodFormPresentaciones) {
+      const n = p.nombre.trim();
+      if (!n) continue;
+      const clave = n.toLowerCase();
+      if (vistos.has(clave)) {
+        setProdFormError(`La presentación "${n}" está repetida`);
+        return false;
+      }
+      vistos.add(clave);
+      const u = parseInt(p.unidades, 10);
+      if (!Number.isInteger(u) || u <= 1) {
+        setProdFormError(`Presentación "${n}": las unidades deben ser un número entero mayor a 1`);
+        return false;
+      }
+      const cod = p.codigoBarras.trim();
+      if (cod) {
+        const codClave = cod.toLowerCase();
+        if (codProd && codClave === codProd) {
+          setProdFormError(
+            `La presentación "${n}" no puede tener el mismo código de barras que el producto`
+          );
+          return false;
+        }
+        if (codigosVistos.has(codClave)) {
+          setProdFormError(
+            `El código de barras "${cod}" está repetido en las presentaciones de este producto`
+          );
+          return false;
+        }
+        codigosVistos.add(codClave);
+      }
+      if (p.modo_venta === "fijo") {
+        const f = parseFloat((p.precio_override || "").replace(",", "."));
+        if (!Number.isFinite(f) || f <= 0) {
+          setProdFormError(`Presentación "${n}": en modo "precio fijo" indica un precio mayor a 0`);
+          return false;
+        }
+      }
+      if (p.modo_venta === "margen") {
+        const m = parseFloat((p.margen_override || "").replace(",", "."));
+        if (!Number.isFinite(m) || m < 0) {
+          setProdFormError(`Presentación "${n}": en modo "por margen" indica un porcentaje ≥ 0`);
+          return false;
+        }
+      }
+    }
+    setProdFormError("");
+    return true;
+  }, [
+    prodFormMonedaCostoId,
+    prodFormMonedaPrecioId,
+    prodFormPreciosPorMoneda,
+    prodFormGanancia,
+    prodFormCodigo,
+    prodFormPresentaciones,
+  ]);
+
+  const nextStepProd = useCallback(() => {
+    if (prodFormStep === 1 && !validateStep1Prod()) return;
+    if (prodFormStep === 2 && !validateStep2Prod()) return;
+    setProdFormStep((s) => (Math.min(s + 1, 3) as 1 | 2 | 3));
+  }, [prodFormStep, validateStep1Prod, validateStep2Prod]);
+
+  const prevStepProd = useCallback(() => {
+    setProdFormError("");
+    setProdFormStep((s) => (Math.max(s - 1, 1) as 1 | 2 | 3));
+  }, []);
+
+  const handleSaveProducto = useCallback(async () => {
+    if (!validateStep1Prod()) {
+      setProdFormStep(1);
+      return;
+    }
+    if (!validateStep2Prod()) {
+      setProdFormStep(2);
+      return;
+    }
+
+    const preciosClean: Record<string, { precio: number; costo: number }> = {};
+    for (const m of monedas) {
+      const p = prodFormPreciosPorMoneda[String(m.id)];
+      preciosClean[String(m.id)] = {
+        precio: parseFloat((p?.precioVenta || "0").replace(",", ".")) || 0,
+        costo: parseFloat((p?.precioCompra || "0").replace(",", ".")) || 0,
+      };
+    }
+
+    const costoBaseVal = prodFormMonedaCostoId
+      ? preciosClean[prodFormMonedaCostoId]?.costo || 0
+      : 0;
+    const margenVal = Math.max(0, parseFloat((prodFormGanancia || "0").replace(",", ".")) || 0);
+    let precioBaseVal = prodFormMonedaPrecioId
+      ? preciosClean[prodFormMonedaPrecioId]?.precio || 0
+      : 0;
+
+    if (precioBaseVal <= 0 && margenVal >= 0 && costoBaseVal > 0 && prodVentaMoneda) {
+      const costoEnV = costoEnMonedaVentaActual(
+        prodFormPreciosPorMoneda,
+        prodFormMonedaCostoId,
+        prodFormMonedaPrecioId
+      );
+      precioBaseVal = redondear(costoEnV * (1 + margenVal / 100), prodDecVenta);
+      if (prodFormMonedaPrecioId && preciosClean[prodFormMonedaPrecioId]) {
+        preciosClean[prodFormMonedaPrecioId].precio = precioBaseVal;
+      }
+    }
+
+    const provIdsClean = prodFormProvIds
+      .map((id) => String(id).trim())
+      .filter((id) => id.length > 0);
+
+    const presentacionesClean = prodFormPresentaciones
+      .filter((p) => p.nombre.trim().length > 0)
+      .map((p) => {
+        const modo = p.modo_venta ?? "derivado";
+        const po = parseFloat((p.precio_override || "").replace(",", "."));
+        const mo = parseFloat((p.margen_override || "").replace(",", "."));
+        const cod = p.codigoBarras.trim();
+        return {
+          ...(p.id ? { id: String(p.id) } : {}),
+          nombre: p.nombre.trim(),
+          unidades: parseInt(p.unidades, 10),
+          activo: p.activo,
+          codigo: cod.length > 0 ? cod : null,
+          modo_venta: modo,
+          precio_override: modo === "fijo" && Number.isFinite(po) ? po : null,
+          margen_override: modo === "margen" && Number.isFinite(mo) ? mo : null,
+        };
+      });
+
+    setSavingProd(true);
+    try {
+      await saveProductoCloud({
+        id: prodModalMode === "edit" && editingProd?.id ? editingProd.id : undefined,
+        codigo: prodFormCodigo.trim(),
+        nombre: prodFormNombre.trim(),
+        descripcion: prodFormDesc.trim() || null,
+        categoria_id: prodFormCatId || null,
+        marca_id: prodFormMarcaId || null,
+        proveedor_ids: provIdsClean,
+        proveedor_id: provIdsClean[0] ?? null,
+        stock: Math.max(0, Math.round(prodFormStock || 0)),
+        stock_minimo: Math.max(0, parseInt(prodFormStockMin, 10) || 0),
+        activo: prodFormActivo,
+        iva_incluido: prodFormIvaIncluido,
+        moneda_base_id: prodFormMonedaPrecioId || null,
+        moneda_costo_id: prodFormMonedaCostoId || prodFormMonedaPrecioId || null,
+        precio_base: precioBaseVal,
+        costo_base: costoBaseVal,
+        margen_ganancia: margenVal,
+        precios: preciosClean,
+        presentaciones: presentacionesClean,
+      });
+      setProdModalOpen(false);
+      await refreshLocalState(posSearch);
+      showToast(
+        prodModalMode === "edit"
+          ? "Producto actualizado exitosamente"
+          : "Producto creado exitosamente",
+        "success"
+      );
+    } catch (e: any) {
+      const msg = e?.message || "Error al guardar producto";
+      setProdFormError(msg);
+      showToast(msg, "error");
+    } finally {
+      setSavingProd(false);
+    }
+  }, [
+    validateStep1Prod,
+    validateStep2Prod,
+    monedas,
+    prodFormPreciosPorMoneda,
+    prodFormMonedaCostoId,
+    prodFormMonedaPrecioId,
+    prodFormGanancia,
+    prodVentaMoneda,
+    costoEnMonedaVentaActual,
+    redondear,
+    prodDecVenta,
+    prodFormProvIds,
+    prodFormPresentaciones,
+    prodModalMode,
+    editingProd,
+    prodFormCodigo,
+    prodFormNombre,
+    prodFormDesc,
+    prodFormCatId,
+    prodFormMarcaId,
+    prodFormStock,
+    prodFormStockMin,
+    prodFormActivo,
+    prodFormIvaIncluido,
+    refreshLocalState,
+    posSearch,
+    showToast,
+  ]);
+
+  const handleDeleteProducto = useCallback(
+    (prod: LocalProducto) => {
+      Alert.alert(
+        "Eliminar Producto",
+        `¿Estás seguro de que deseas eliminar el producto "${prod.nombre}" (${prod.codigo})?\n\nSi ya tiene transacciones asociadas, se moverá de forma segura al Basurero.`,
+        [
+          { text: "Cancelar", style: "cancel" },
+          {
+            text: "Eliminar",
+            style: "destructive",
+            onPress: async () => {
+              try {
+                await deleteProductoCloud(prod.id);
+                await refreshLocalState(posSearch);
+                showToast("Producto eliminado", "info");
+              } catch (e: any) {
+                showToast(e?.message || "No se pudo eliminar el producto", "error");
+              }
+            },
+          },
+        ]
+      );
+    },
+    [refreshLocalState, posSearch, showToast]
+  );
+
+  // 2. CATEGORÍAS CRUD (con autoselección cuando se crea desde el modal de Producto)
+  const openCategoriaModal = useCallback((cat: any | null = null) => {
+    setEditingCat(cat);
+    setCatFormNombre(cat?.nombre || "");
+    setCatFormDesc(cat?.descripcion || "");
+    setCatModalOpen(true);
+  }, []);
+
+  const handleSaveCategoria = useCallback(async () => {
+    if (!catFormNombre.trim()) {
+      showToast("El nombre de la categoría es obligatorio", "error");
+      return;
+    }
+    setSavingCat(true);
+    try {
+      const saved = await saveCategoriaCloud({
+        id: editingCat?.id || undefined,
+        nombre: catFormNombre.trim(),
+        descripcion: catFormDesc.trim() || null,
+        activa: true,
+      });
+      setCatModalOpen(false);
+      await loadCatalogExtras();
+      if (!editingCat && saved?.id) {
+        setProdFormCatId(String(saved.id));
+      }
+      showToast(editingCat ? "Categoría actualizada" : "Categoría creada", "success");
+    } catch (e: any) {
+      showToast(e?.message || "Error al guardar categoría", "error");
+    } finally {
+      setSavingCat(false);
+    }
+  }, [editingCat, catFormNombre, catFormDesc, loadCatalogExtras, showToast]);
+
+  const handleDeleteCategoria = useCallback(
+    (cat: any) => {
+      Alert.alert("Eliminar Categoría", `¿Eliminar la categoría "${cat.nombre}"?`, [
+        { text: "Cancelar", style: "cancel" },
+        {
+          text: "Eliminar",
+          style: "destructive",
+          onPress: async () => {
+            try {
+              await deleteCategoriaCloud(cat.id);
+              await loadCatalogExtras();
+              showToast("Categoría eliminada", "info");
+            } catch (e: any) {
+              showToast(e?.message || "No se pudo eliminar", "error");
+            }
+          },
+        },
+      ]);
+    },
+    [loadCatalogExtras, showToast]
+  );
+
+  // 3. MARCAS CRUD (con autoselección cuando se crea desde el modal de Producto)
+  const openMarcaModal = useCallback((marca: any | null = null) => {
+    setEditingMarca(marca);
+    setMarcaFormNombre(marca?.nombre || "");
+    setMarcaFormDesc(marca?.pais || marca?.descripcion || "");
+    setMarcaModalOpen(true);
+  }, []);
+
+  const handleSaveMarca = useCallback(async () => {
+    if (!marcaFormNombre.trim()) {
+      showToast("El nombre de la marca es obligatorio", "error");
+      return;
+    }
+    setSavingMarca(true);
+    try {
+      const saved = await saveMarcaCloud({
+        id: editingMarca?.id || undefined,
+        nombre: marcaFormNombre.trim(),
+        descripcion: marcaFormDesc.trim() || null,
+        activo: true,
+      });
+      setMarcaModalOpen(false);
+      await loadCatalogExtras();
+      if (!editingMarca && saved?.id) {
+        setProdFormMarcaId(String(saved.id));
+      }
+      showToast(editingMarca ? "Marca actualizada" : "Marca creada", "success");
+    } catch (e: any) {
+      showToast(e?.message || "Error al guardar marca", "error");
+    } finally {
+      setSavingMarca(false);
+    }
+  }, [editingMarca, marcaFormNombre, marcaFormDesc, loadCatalogExtras, showToast]);
+
+  const handleDeleteMarca = useCallback(
+    (marca: any) => {
+      Alert.alert("Eliminar Marca", `¿Eliminar la marca "${marca.nombre}"?`, [
+        { text: "Cancelar", style: "cancel" },
+        {
+          text: "Eliminar",
+          style: "destructive",
+          onPress: async () => {
+            try {
+              await deleteMarcaCloud(marca.id);
+              await loadCatalogExtras();
+              showToast("Marca eliminada", "info");
+            } catch (e: any) {
+              showToast(e?.message || "No se pudo eliminar la marca", "error");
+            }
+          },
+        },
+      ]);
+    },
+    [loadCatalogExtras, showToast]
+  );
+
+  // 4. PROVEEDORES CRUD (con autoselección N:M cuando se crea desde el modal de Producto)
+  const openProveedorModal = useCallback((prov: any | null = null) => {
+    setEditingProv(prov);
+    setProvFormNombre(prov?.nombre || "");
+    setProvFormDoc(prov?.rif || prov?.documento || "");
+    setProvFormContacto(prov?.contacto || "");
+    setProvFormTel(prov?.telefono || "");
+    setProvFormEmail(prov?.email || "");
+    setProvFormCiudad(prov?.ciudad || "");
+    setProvFormDir(prov?.direccion || "");
+    setProvFormNotas(prov?.notas || "");
+    setProvModalOpen(true);
+  }, []);
+
+  const handleSaveProveedor = useCallback(async () => {
+    if (!provFormNombre.trim()) {
+      showToast("El nombre del proveedor es obligatorio", "error");
+      return;
+    }
+    setSavingProv(true);
+    try {
+      const saved = await saveProveedorCloud({
+        id: editingProv?.id || undefined,
+        nombre: provFormNombre.trim(),
+        documento: provFormDoc.trim() || null,
+        contacto: provFormContacto.trim() || null,
+        telefono: provFormTel.trim() || null,
+        email: provFormEmail.trim() || null,
+        ciudad: provFormCiudad.trim() || null,
+        direccion: provFormDir.trim() || null,
+        notas: provFormNotas.trim() || null,
+        activo: true,
+      });
+      setProvModalOpen(false);
+      await loadProveedores();
+      if (!editingProv && saved?.id) {
+        const sid = String(saved.id);
+        setProdFormProvIds((prev) => (prev.includes(sid) ? prev : [...prev, sid]));
+      }
+      showToast(editingProv ? "Proveedor actualizado" : "Proveedor registrado", "success");
+    } catch (e: any) {
+      showToast(e?.message || "Error al guardar proveedor", "error");
+    } finally {
+      setSavingProv(false);
+    }
+  }, [
+    editingProv,
+    provFormNombre,
+    provFormDoc,
+    provFormContacto,
+    provFormTel,
+    provFormEmail,
+    provFormCiudad,
+    provFormDir,
+    provFormNotas,
+    loadProveedores,
+    showToast,
+  ]);
+
+  const handleDeleteProveedor = useCallback(
+    (prov: any) => {
+      Alert.alert("Eliminar Proveedor", `¿Eliminar a "${prov.nombre}"?`, [
+        { text: "Cancelar", style: "cancel" },
+        {
+          text: "Eliminar",
+          style: "destructive",
+          onPress: async () => {
+            try {
+              await deleteProveedorCloud(prov.id);
+              await loadProveedores();
+              showToast("Proveedor eliminado", "info");
+            } catch (e: any) {
+              showToast(e?.message || "No se pudo eliminar el proveedor", "error");
+            }
+          },
+        },
+      ]);
+    },
+    [loadProveedores, showToast]
+  );
+
+  // 5. COMPRAS
+  const openNuevaCompraModal = useCallback(() => {
+    const baseM = monedas.find((m) => m.es_base === 1) || monedas[0];
+    setNcProveedorId(proveedoresList[0]?.id ? String(proveedoresList[0].id) : "");
+    setNcMonedaId(String(baseM?.id || "1"));
+    setNcTipoPago("contado");
+    setNcMetodoPagoId(metodosPago[0]?.id ? String(metodosPago[0].id) : "");
+    setNcAbonoInicial("");
+    setNcReferencia("");
+    setNcObs("");
+    setNcSearchProd("");
+    setNcItems([]);
+    setNuevaCompraModalOpen(true);
+  }, [monedas, proveedoresList, metodosPago]);
+
+  const addProductoToCompra = useCallback((prod: LocalProducto) => {
+    setNcItems((prev) => {
+      const idx = prev.findIndex((x) => x.producto.id === prod.id);
+      if (idx >= 0) {
+        const copy = [...prev];
+        copy[idx] = {
+          ...copy[idx],
+          cantidadStr: String((parseFloat(copy[idx].cantidadStr) || 1) + 1),
+        };
+        return copy;
+      }
+      return [
+        ...prev,
+        {
+          producto: prod,
+          cantidadStr: "1",
+          costoUnitStr: String(Number(prod.costo_base || prod.precio_base || 1)),
+        },
+      ];
+    });
+  }, []);
+
+  const handleSaveCompra = useCallback(async () => {
+    if (ncItems.length === 0) {
+      showToast("Agrega al menos un producto a la compra", "error");
+      return;
+    }
+    const itemsValidos = ncItems
+      .map((it) => ({
+        producto_id: it.producto.id,
+        cantidad: Math.max(1, Math.round(parseFloat(it.cantidadStr) || 1)),
+        costo_unit: Math.max(0.01, parseFloat(it.costoUnitStr.replace(",", ".")) || 0),
+      }))
+      .filter((x) => x.cantidad > 0 && x.costo_unit > 0);
+
+    if (itemsValidos.length === 0) {
+      showToast("Verifica las cantidades y costos unitarios", "error");
+      return;
+    }
+    const mpObj = metodosPago.find((m) => String(m.id) === String(ncMetodoPagoId));
+    setSavingCompra(true);
+    try {
+      await crearCompraCloud({
+        proveedor_id: ncProveedorId || null,
+        moneda_id: ncMonedaId || String(baseMonedaSistema?.id || "1"),
+        tipo_pago: ncTipoPago,
+        metodo_pago_id: ncTipoPago !== "credito" ? ncMetodoPagoId || null : null,
+        caja_id: ncTipoPago !== "credito" ? mpObj?.caja_id || cajaSeleccionada || null : null,
+        abono_inicial:
+          ncTipoPago === "parcial" ? parseFloat(ncAbonoInicial.replace(",", ".")) || 0 : undefined,
+        referencia: ncReferencia.trim() || null,
+        observaciones: ncObs.trim() || "Compra registrada desde App Móvil",
+        items: itemsValidos,
+      });
+      setNuevaCompraModalOpen(false);
+      await loadCompras();
+      await runSilentSync();
+      showToast("Compra registrada y stock actualizado", "success");
+    } catch (e: any) {
+      showToast(e?.message || "Error al registrar compra", "error");
+    } finally {
+      setSavingCompra(false);
+    }
+  }, [
+    ncItems,
+    ncProveedorId,
+    ncMonedaId,
+    ncTipoPago,
+    ncMetodoPagoId,
+    ncAbonoInicial,
+    ncReferencia,
+    ncObs,
+    metodosPago,
+    baseMonedaSistema,
+    cajaSeleccionada,
+    loadCompras,
+    runSilentSync,
+    showToast,
+  ]);
+
+  // 6. RETORNOS
+  const openNuevoRetornoModal = useCallback(() => {
+    setNrTipo("Cliente");
+    setNrClienteId(clientes[0]?.id ? String(clientes[0].id) : "");
+    setNrProveedorId(proveedoresList[0]?.id ? String(proveedoresList[0].id) : "");
+    setNrMetodoReembolso("efectivo");
+    setNrMetodoPagoId(metodosPago[0]?.id ? String(metodosPago[0].id) : "");
+    setNrMotivo("Devolución de mercancía");
+    setNrObs("");
+    setNrSearchProd("");
+    setNrItems([]);
+    setNuevoRetornoModalOpen(true);
+  }, [clientes, proveedoresList, metodosPago]);
+
+  const addProductoToRetorno = useCallback((prod: LocalProducto) => {
+    setNrItems((prev) => {
+      const idx = prev.findIndex((x) => x.producto.id === prod.id);
+      if (idx >= 0) {
+        const copy = [...prev];
+        copy[idx] = {
+          ...copy[idx],
+          cantidadStr: String((parseFloat(copy[idx].cantidadStr) || 1) + 1),
+        };
+        return copy;
+      }
+      return [
+        ...prev,
+        {
+          producto: prod,
+          cantidadStr: "1",
+          precioUnitStr: String(Number(prod.precio_base || 1)),
+        },
+      ];
+    });
+  }, []);
+
+  const handleSaveRetorno = useCallback(async () => {
+    if (nrItems.length === 0) {
+      showToast("Agrega al menos un producto al retorno", "error");
+      return;
+    }
+    const mpObj = metodosPago.find((m) => String(m.id) === String(nrMetodoPagoId));
+    setSavingRetorno(true);
+    try {
+      await crearRetornoCloud({
+        tipo: nrTipo,
+        cliente_id: nrTipo === "Cliente" ? nrClienteId || null : null,
+        proveedor_id: nrTipo === "Proveedor" ? nrProveedorId || null : null,
+        motivo: nrMotivo.trim() || "Devolución",
+        observaciones: nrObs.trim() || null,
+        metodo_reembolso: nrMetodoReembolso,
+        metodo_pago_id: nrMetodoReembolso === "efectivo" ? nrMetodoPagoId || null : null,
+        caja_id: nrMetodoReembolso === "efectivo" ? mpObj?.caja_id || cajaSeleccionada || null : null,
+        items: nrItems.map((it) => ({
+          producto_id: it.producto.id,
+          cantidad: Math.max(1, Math.round(parseFloat(it.cantidadStr) || 1)),
+          precio_unit: Math.max(0, parseFloat(it.precioUnitStr.replace(",", ".")) || 0),
+        })),
+      });
+      setNuevoRetornoModalOpen(false);
+      await loadRetornos();
+      await runSilentSync();
+      showToast("Retorno registrado exitosamente", "success");
+    } catch (e: any) {
+      showToast(e?.message || "Error al registrar retorno", "error");
+    } finally {
+      setSavingRetorno(false);
+    }
+  }, [
+    nrItems,
+    nrTipo,
+    nrClienteId,
+    nrProveedorId,
+    nrMotivo,
+    nrObs,
+    nrMetodoReembolso,
+    nrMetodoPagoId,
+    metodosPago,
+    cajaSeleccionada,
+    loadRetornos,
+    runSilentSync,
+    showToast,
+  ]);
+
+  // ── RETORNO DIRECTO DESDE VENTA O COMPRA + ELIMINAR VENTA/COMPRA + PAGAR CRÉDITO ──
+  const openRetornoDirectoFromVenta = useCallback(
+    async (v: any, preloadedItems?: any[]) => {
+      if (String(v.id).startsWith("local_") && v.sincronizado !== 1) {
+        showToast("Sincroniza primero esta venta local con el servidor para retornar productos", "info");
+        return;
+      }
+
+      let rawItems: any[] = Array.isArray(preloadedItems) && preloadedItems.length > 0 ? preloadedItems : [];
+      if (rawItems.length === 0 && Array.isArray(v.local_items) && v.local_items.length > 0) {
+        rawItems = v.local_items;
+      }
+      if (rawItems.length === 0 && v.items_json) {
+        try {
+          const parsed = typeof v.items_json === "string" ? JSON.parse(v.items_json) : v.items_json;
+          if (Array.isArray(parsed) && parsed.length > 0) rawItems = parsed;
+        } catch {}
+      }
+      if (rawItems.length === 0) {
+        const dbItems = await getLocalVentaItemsByVentaId(String(v.id));
+        if (dbItems && dbItems.length > 0) rawItems = dbItems;
+      }
+      if (rawItems.length === 0) {
+        rawItems = ventaItemsRemotos.filter((i) => String(i.venta_id) === String(v.id));
+      }
+      if (rawItems.length === 0) {
+        const cloudV = await fetchVentaDetalleCloud(String(v.id));
+        if (cloudV && Array.isArray(cloudV.items)) {
+          rawItems = cloudV.items;
+        }
+      }
+
+      if (rawItems.length === 0) {
+        showToast("No se encontraron productos en esta factura para retornar", "error");
+        return;
+      }
+
+      const normalized = rawItems.map((it: any) => ({
+        producto_id: Number(it.producto_id),
+        producto_nombre: String(it.producto_nombre || it.nombre || `Producto #${it.producto_id}`),
+        producto_codigo: it.producto_codigo || it.codigo || "",
+        cantidad_original: Math.max(1, Number(it.cantidad) || 1),
+        precio_unit: Number(it.precio_unit ?? it.precio ?? 0) || 0,
+        presentacion_nombre: it.presentacion_nombre || null,
+      }));
+
+      const creditoMatch = (creditosData.creditos || []).find(
+        (c) =>
+          (c.venta_id && String(c.venta_id) === String(v.id)) ||
+          (c.venta_numero && c.venta_numero === v.numero)
+      );
+      const tieneCredito =
+        v.tipo_pago === "Credito" ||
+        v.estado !== "Pagada" ||
+        Boolean(creditoMatch && creditoMatch.saldo > 0.01);
+
+      setRdItemsState(
+        normalized.map((it) => ({
+          producto_id: it.producto_id,
+          cantidad: it.cantidad_original,
+          seleccionado: true,
+        }))
+      );
+      setRdAbonarCredito(tieneCredito);
+      setRdMotivo("Devolución de mercancía");
+      setVentaDetailModal(null);
+      setRetornoDirectoModal({
+        tipo: "Cliente",
+        referenciaId: String(v.id),
+        referenciaNumero: String(v.numero || ""),
+        entidadId: v.cliente_id ? String(v.cliente_id) : creditoMatch?.cliente_id || null,
+        entidadNombre: String(v.cliente_nombre || v.cliente || "Consumidor Final"),
+        tipoPago: v.tipo_pago || "Contado",
+        tieneCreditoPendiente: tieneCredito,
+        monedaCodigo: v.moneda_codigo || monedaSeleccionada || "USD",
+        items: normalized,
+      });
+    },
+    [creditosData, monedaSeleccionada, showToast, ventaItemsRemotos]
+  );
+
+  const openRetornoDirectoFromCompra = useCallback(
+    (c: any, preloadedItems?: any[]) => {
+      const rawItems =
+        Array.isArray(preloadedItems) && preloadedItems.length > 0
+          ? preloadedItems
+          : compraItemsList.filter((i: any) => String(i.compra_id) === String(c.id));
+
+      if (rawItems.length === 0) {
+        showToast("No hay productos cargados en esta compra para devolver", "error");
+        return;
+      }
+
+      const normalized = rawItems.map((it: any) => ({
+        producto_id: Number(it.producto_id),
+        producto_nombre: String(it.producto_nombre || it.nombre || `Producto #${it.producto_id}`),
+        producto_codigo: it.producto_codigo || it.codigo || "",
+        cantidad_original: Math.max(1, Number(it.cantidad) || 1),
+        precio_unit: Number(it.costo_unit ?? it.precio_unit ?? 0) || 0,
+        presentacion_nombre: it.presentacion_nombre || null,
+      }));
+
+      const tieneCredito =
+        c.tipo_pago === "Credito" ||
+        c.tipo_pago === "credito" ||
+        c.estado !== "Pagada" ||
+        Number(c.saldo_pendiente) > 0.01;
+
+      setRdItemsState(
+        normalized.map((it) => ({
+          producto_id: it.producto_id,
+          cantidad: it.cantidad_original,
+          seleccionado: true,
+        }))
+      );
+      setRdAbonarCredito(tieneCredito);
+      setRdMotivo("Devolución a proveedor");
+      setCompraDetailModal(null);
+      setRetornoDirectoModal({
+        tipo: "Proveedor",
+        referenciaId: String(c.id),
+        referenciaNumero: String(c.numero || ""),
+        entidadId: c.proveedor_id ? String(c.proveedor_id) : null,
+        entidadNombre: String(c.proveedor_nombre || c.proveedor || "Sin proveedor"),
+        tipoPago: c.tipo_pago || "Contado",
+        tieneCreditoPendiente: tieneCredito,
+        monedaCodigo: c.moneda_codigo || monedaSeleccionada || "USD",
+        items: normalized,
+      });
+    },
+    [compraItemsList, monedaSeleccionada, showToast]
+  );
+
+  const handleSubmitRetornoDirecto = useCallback(async () => {
+    if (!retornoDirectoModal) return;
+    const seleccionados = rdItemsState.filter((it) => it.seleccionado && it.cantidad > 0);
+    if (seleccionados.length === 0) {
+      showToast("Selecciona al menos un producto con cantidad mayor a 0", "error");
+      return;
+    }
+
+    setRdSubmitting(true);
+    try {
+      const itemsPayload = seleccionados.map((sel) => {
+        const orig = retornoDirectoModal.items.find((x) => x.producto_id === sel.producto_id);
+        return {
+          producto_id: sel.producto_id,
+          cantidad: sel.cantidad,
+          precio_unit: orig?.precio_unit || 0,
+        };
+      });
+
+      await crearRetornoCloud({
+        tipo: retornoDirectoModal.tipo,
+        motivo: rdMotivo.trim() || `Retorno de ${retornoDirectoModal.referenciaNumero}`,
+        ...(retornoDirectoModal.tipo === "Cliente"
+          ? {
+              venta_id: retornoDirectoModal.referenciaId,
+              cliente_id: retornoDirectoModal.entidadId,
+            }
+          : {
+              compra_id: retornoDirectoModal.referenciaId,
+              proveedor_id: retornoDirectoModal.entidadId,
+            }),
+        abonar_credito: retornoDirectoModal.tieneCreditoPendiente ? rdAbonarCredito : false,
+        items: itemsPayload,
+      });
+
+      setRetornoDirectoModal(null);
+      await runSilentSync();
+      await refreshLocalState(posSearch);
+      if (route === "compras") await loadCompras();
+      if (route === "retornos") await loadRetornos();
+      showToast(
+        `Retorno registrado exitosamente (${retornoDirectoModal.referenciaNumero})`,
+        "success"
+      );
+    } catch (e: any) {
+      showToast(e?.message || "No se pudo registrar el retorno", "error");
+    } finally {
+      setRdSubmitting(false);
+    }
+  }, [
+    retornoDirectoModal,
+    rdItemsState,
+    rdMotivo,
+    rdAbonarCredito,
+    runSilentSync,
+    refreshLocalState,
+    posSearch,
+    route,
+    loadCompras,
+    loadRetornos,
+    showToast,
+  ]);
+
+  const handleDeleteVenta = useCallback(
+    (v: any) => {
+      if (String(v.id).startsWith("local_") && v.sincronizado !== 1) {
+        showToast("Sincroniza primero esta venta local antes de anularla", "info");
+        return;
+      }
+      Alert.alert(
+        "Eliminar / Anular Venta",
+        `¿Estás seguro de eliminar la factura ${v.numero}?\n\nSe revertirá el stock de los productos, el movimiento de caja y el crédito asociado.`,
+        [
+          { text: "Cancelar", style: "cancel" },
+          {
+            text: "Eliminar Venta",
+            style: "destructive",
+            onPress: async () => {
+              try {
+                await eliminarVentaCloud(v.id);
+                setVentaDetailModal(null);
+                await runSilentSync();
+                await refreshLocalState(posSearch);
+                showToast(`Venta ${v.numero} eliminada y stock revertido`, "info");
+              } catch (e: any) {
+                showToast(e?.message || "No se pudo eliminar la venta", "error");
+              }
+            },
+          },
+        ]
+      );
+    },
+    [runSilentSync, refreshLocalState, posSearch, showToast]
+  );
+
+  const handleDeleteCompra = useCallback(
+    (c: any) => {
+      Alert.alert(
+        "Eliminar Compra",
+        `¿Estás seguro de eliminar la compra ${c.numero}?\n\nSe descontará el stock ingresado y se revertirá el movimiento de caja.`,
+        [
+          { text: "Cancelar", style: "cancel" },
+          {
+            text: "Eliminar Compra",
+            style: "destructive",
+            onPress: async () => {
+              try {
+                await eliminarCompraCloud(c.id);
+                setCompraDetailModal(null);
+                await loadCompras();
+                await runSilentSync();
+                await refreshLocalState(posSearch);
+                showToast(`Compra ${c.numero} eliminada`, "info");
+              } catch (e: any) {
+                showToast(e?.message || "No se pudo eliminar la compra", "error");
+              }
+            },
+          },
+        ]
+      );
+    },
+    [loadCompras, runSilentSync, refreshLocalState, posSearch, showToast]
+  );
+
+  // 7. TRANSACCIONES DE CAJA Y NUEVA CAJA
+  const openNuevaTransModal = useCallback(() => {
+    const firstCaja =
+      cajasCloud.find((c) => c.estado === "Abierta") || cajasCloud[0] || cajas[0];
+    setNtCajaId(firstCaja ? String(firstCaja.id) : "");
+    setNtTipo("Entrada");
+    setNtMonto("");
+    setNtDesc("");
+    setNuevaTransModalOpen(true);
+  }, [cajasCloud, cajas]);
+
+  const handleSaveTransaccion = useCallback(async () => {
+    const montoVal = parseFloat(ntMonto.replace(",", ".")) || 0;
+    if (!ntCajaId || montoVal <= 0 || !ntDesc.trim()) {
+      showToast("Selecciona caja, monto > 0 y descripción", "error");
+      return;
+    }
+    setSavingTrans(true);
+    try {
+      await crearTransaccionCloud({
+        caja_id: ntCajaId,
+        tipo: ntTipo,
+        monto: montoVal,
+        descripcion: ntDesc.trim(),
+      });
+      setNuevaTransModalOpen(false);
+      await loadTransacciones();
+      showToast(`${ntTipo} de caja registrada`, "success");
+    } catch (e: any) {
+      showToast(e?.message || "Error al registrar transacción", "error");
+    } finally {
+      setSavingTrans(false);
+    }
+  }, [ntCajaId, ntTipo, ntMonto, ntDesc, loadTransacciones, showToast]);
+
+  const handleCreateNuevaCaja = useCallback(async () => {
+    if (!ncajaNombre.trim() || !ncajaMonedaId) {
+      showToast("Ingresa el nombre y la moneda de la caja", "error");
+      return;
+    }
+    setSavingNuevaCaja(true);
+    try {
+      await crearCajaCloud({
+        nombre: ncajaNombre.trim(),
+        moneda_id: ncajaMonedaId,
+      });
+      setNuevaCajaModalOpen(false);
+      setNcajaNombre("");
+      await loadCajas();
+      await runSilentSync();
+      showToast("Caja creada y abierta exitosamente", "success");
+    } catch (e: any) {
+      showToast(e?.message || "Error al crear caja", "error");
+    } finally {
+      setSavingNuevaCaja(false);
+    }
+  }, [ncajaNombre, ncajaMonedaId, loadCajas, runSilentSync, showToast]);
+
+  // 8. MONEDAS Y TASAS
+  const openMonedaModal = useCallback((mon: LocalMoneda | null = null) => {
+    setEditingMoneda(mon);
+    if (mon) {
+      setMonFormNombre(mon.nombre);
+      setMonFormCodigo(mon.codigo);
+      setMonFormSimbolo(mon.simbolo);
+      setMonFormTasa(String(mon.tasa ?? 1));
+      setMonFormDecimales(String(mon.decimales ?? 2));
+      setMonFormUsaDirecta(Boolean(mon.usa_tasa_usd_directa));
+      setMonFormTasaDirecta(mon.tasa_usd_directa ? String(mon.tasa_usd_directa) : String(mon.tasa ?? 1));
+    } else {
+      setMonFormNombre("");
+      setMonFormCodigo("");
+      setMonFormSimbolo("$");
+      setMonFormTasa("1");
+      setMonFormDecimales("2");
+      setMonFormUsaDirecta(false);
+      setMonFormTasaDirecta("");
+    }
+    setMonedaModalOpen(true);
+  }, []);
+
+  const handleSaveMoneda = useCallback(async () => {
+    if (!monFormNombre.trim() || !monFormCodigo.trim() || !monFormSimbolo.trim()) {
+      showToast("Nombre, código y símbolo son obligatorios", "error");
+      return;
+    }
+    const tasaVal = parseFloat(monFormTasa.replace(",", ".")) || 1;
+    const tasaDirVal = parseFloat(monFormTasaDirecta.replace(",", ".")) || null;
+    setSavingMoneda(true);
+    try {
+      await saveMonedaCloud({
+        id: editingMoneda?.id || undefined,
+        nombre: monFormNombre.trim(),
+        codigo: monFormCodigo.trim().toUpperCase(),
+        simbolo: monFormSimbolo.trim(),
+        tasa: tasaVal,
+        decimales: Math.max(0, Math.min(4, parseInt(monFormDecimales, 10) || 2)),
+        usa_tasa_usd_directa: monFormUsaDirecta,
+        tasa_usd_directa: monFormUsaDirecta ? tasaDirVal : null,
+      });
+      setMonedaModalOpen(false);
+      await refreshLocalState(posSearch);
+      await runSilentSync();
+      showToast("Moneda y tasa actualizadas", "success");
+    } catch (e: any) {
+      showToast(e?.message || "Error al guardar moneda", "error");
+    } finally {
+      setSavingMoneda(false);
+    }
+  }, [
+    editingMoneda,
+    monFormNombre,
+    monFormCodigo,
+    monFormSimbolo,
+    monFormTasa,
+    monFormDecimales,
+    monFormUsaDirecta,
+    monFormTasaDirecta,
+    refreshLocalState,
+    posSearch,
+    runSilentSync,
+    showToast,
+  ]);
+
+  // 9. MÉTODOS DE PAGO
+  const openMetodoPagoModal = useCallback(
+    (mp: LocalMetodoPago | null = null) => {
+      setEditingMp(mp);
+      const defCaja = cajas[0]?.id ? String(cajas[0].id) : "";
+      if (mp) {
+        setMpFormNombre(mp.nombre);
+        setMpFormTipo(mp.tipo || "Efectivo");
+        setMpFormCajaId(mp.caja_id ? String(mp.caja_id) : defCaja);
+        setMpFormActivo(true);
+      } else {
+        setMpFormNombre("");
+        setMpFormTipo("Efectivo");
+        setMpFormCajaId(defCaja);
+        setMpFormActivo(true);
+      }
+      setMpModalOpen(true);
+    },
+    [cajas]
+  );
+
+  const handleSaveMetodoPago = useCallback(async () => {
+    if (!mpFormNombre.trim() || !mpFormCajaId) {
+      showToast("Nombre y caja asociada son obligatorios", "error");
+      return;
+    }
+    setSavingMp(true);
+    try {
+      await saveMetodoPagoCloud({
+        id: editingMp?.id || undefined,
+        nombre: mpFormNombre.trim(),
+        tipo: mpFormTipo,
+        caja_id: mpFormCajaId,
+        activo: mpFormActivo,
+      });
+      setMpModalOpen(false);
+      await fetchMetodosPagoCloud();
+      await refreshLocalState(posSearch);
+      showToast(editingMp ? "Método de pago actualizado" : "Método de pago creado", "success");
+    } catch (e: any) {
+      showToast(e?.message || "Error al guardar método de pago", "error");
+    } finally {
+      setSavingMp(false);
+    }
+  }, [editingMp, mpFormNombre, mpFormTipo, mpFormCajaId, mpFormActivo, refreshLocalState, posSearch, showToast]);
+
+  const handleDeleteMetodoPago = useCallback(
+    (mp: LocalMetodoPago) => {
+      Alert.alert("Eliminar Método de Pago", `¿Eliminar "${mp.nombre}"?`, [
+        { text: "Cancelar", style: "cancel" },
+        {
+          text: "Eliminar",
+          style: "destructive",
+          onPress: async () => {
+            try {
+              await deleteMetodoPagoCloud(mp.id);
+              await refreshLocalState(posSearch);
+              showToast("Método de pago eliminado", "info");
+            } catch (e: any) {
+              showToast(e?.message || "No se pudo eliminar", "error");
+            }
+          },
+        },
+      ]);
+    },
+    [refreshLocalState, posSearch, showToast]
+  );
+
+  // 10. CONFIGURACIÓN GLOBAL, EMPRESA Y USUARIOS
+  const handleSaveConfigGlobal = useCallback(async () => {
+    setSavingConfigGlobal(true);
+    try {
+      await saveConfiguracionGlobalCloud({
+        modo_conversion_ventas: cfgModoVentas,
+        modo_conversion_compras: cfgModoCompras,
+        redondear_conversion_ventas: cfgRedondearVentas,
+        actualizar_precio_en_compra: cfgActualizarEnCompra,
+        porcentaje_ganancia_defecto: parseFloat(cfgGananciaDefecto) || 30,
+        iva_porcentaje: parseFloat(empresaConfig.iva_porcentaje || "16") || 16,
+      });
+      await refreshLocalState(posSearch);
+      showToast("Reglas del motor de conversión guardadas", "success");
+    } catch (e: any) {
+      showToast(e?.message || "Error al guardar configuración global", "error");
+    } finally {
+      setSavingConfigGlobal(false);
+    }
+  }, [
+    cfgModoVentas,
+    cfgModoCompras,
+    cfgRedondearVentas,
+    cfgActualizarEnCompra,
+    cfgGananciaDefecto,
+    empresaConfig.iva_porcentaje,
+    refreshLocalState,
+    posSearch,
+    showToast,
+  ]);
+
+  const handleRecalcularPrecios = useCallback(async () => {
+    setRecalculandoPrecios(true);
+    try {
+      const res = await recalcularPreciosGlobalCloud();
+      await runSilentSync();
+      showToast(
+        `Precios recalculados (${res?.actualizados ?? productos.length} productos actualizados)`,
+        "success"
+      );
+    } catch (e: any) {
+      showToast(e?.message || "Error al recalcular precios", "error");
+    } finally {
+      setRecalculandoPrecios(false);
+    }
+  }, [runSilentSync, productos.length, showToast]);
+
+  const handleSaveEmpresaConfig = useCallback(async () => {
+    setSavingConfigGlobal(true);
+    try {
+      const entries = Object.entries(empresaConfig);
+      for (const [k, v] of entries) {
+        await saveConfiguracionClaveCloud(k, String(v ?? ""), "empresa", k);
+      }
+      showToast("Datos de la empresa guardados", "success");
+    } catch (e: any) {
+      showToast(e?.message || "Error al guardar datos de empresa", "error");
+    } finally {
+      setSavingConfigGlobal(false);
+    }
+  }, [empresaConfig, showToast]);
+
+  const openUsuarioModal = useCallback((usr: any | null = null) => {
+    setEditingUsuario(usr);
+    setUsrFormName(usr?.name || "");
+    setUsrFormEmail(usr?.email || "");
+    setUsrFormRole(usr?.role || "cajero");
+    setUsrFormPassword("");
+    setUsuarioModalOpen(true);
+  }, []);
+
+  const handleSaveUsuario = useCallback(async () => {
+    if (!usrFormName.trim() || !usrFormEmail.trim()) {
+      showToast("Nombre y correo son obligatorios", "error");
+      return;
+    }
+    if (!editingUsuario && usrFormPassword.length < 8) {
+      showToast("La contraseña debe tener mínimo 8 caracteres", "error");
+      return;
+    }
+    setSavingUsuario(true);
+    try {
+      await saveUsuarioAdminCloud({
+        id: editingUsuario?.id || undefined,
+        name: usrFormName.trim(),
+        email: usrFormEmail.trim().toLowerCase(),
+        role: usrFormRole,
+        password: usrFormPassword.trim() ? usrFormPassword.trim() : undefined,
+      });
+      setUsuarioModalOpen(false);
+      await loadUsuariosAdmin();
+      showToast(editingUsuario ? "Usuario actualizado" : "Usuario creado", "success");
+    } catch (e: any) {
+      showToast(e?.message || "Error al guardar usuario", "error");
+    } finally {
+      setSavingUsuario(false);
+    }
+  }, [editingUsuario, usrFormName, usrFormEmail, usrFormRole, usrFormPassword, loadUsuariosAdmin, showToast]);
+
+  const handleDeleteUsuario = useCallback(
+    (usr: any) => {
+      Alert.alert("Eliminar Usuario", `¿Eliminar la cuenta de "${usr.name}"?`, [
+        { text: "Cancelar", style: "cancel" },
+        {
+          text: "Eliminar",
+          style: "destructive",
+          onPress: async () => {
+            try {
+              await deleteUsuarioAdminCloud(String(usr.id));
+              await loadUsuariosAdmin();
+              showToast("Usuario eliminado", "info");
+            } catch (e: any) {
+              showToast(e?.message || "No se pudo eliminar el usuario", "error");
+            }
+          },
+        },
+      ]);
+    },
+    [loadUsuariosAdmin, showToast]
+  );
+
   // ── Modal Ajustar Límite de Crédito (clon de CreditoLimiteModal web) ──
   const openAjustarCreditoModal = useCallback(
     (cli: LocalCliente, monedaInicialId?: string, op: "add" | "remove" = "add") => {
@@ -2423,6 +5215,33 @@ export default function App() {
       setPdObs("");
     },
     [monedas, metodosPago]
+  );
+
+  const handlePagarVentaCredito = useCallback(
+    (v: any) => {
+      const creditoMatch = (creditosData.creditos || []).find(
+        (c) =>
+          (c.venta_id && String(c.venta_id) === String(v.id)) ||
+          (c.venta_numero && c.venta_numero === v.numero)
+      );
+      if (creditoMatch) {
+        setVentaDetailModal(null);
+        openAbonoModal(creditoMatch);
+        return;
+      }
+      if (v.cliente_id) {
+        const cli = clientes.find((c) => String(c.id) === String(v.cliente_id));
+        if (cli) {
+          setVentaDetailModal(null);
+          openPagoDeudaGlobal(cli, v.moneda_id);
+          return;
+        }
+      }
+      setVentaDetailModal(null);
+      setRoute("creditos");
+      showToast("Selecciona el crédito pendiente para registrar el abono", "info");
+    },
+    [creditosData.creditos, clientes, openAbonoModal, openPagoDeudaGlobal, showToast]
   );
 
   const handleSelectMetodoPagoDeuda = useCallback(
@@ -2826,10 +5645,19 @@ export default function App() {
     creditos: "Créditos / Deudores",
     ventas: "Historial de Ventas",
     productos: "Productos",
-    config: "Sincronización y Tasas",
+    categorias: "Categorías",
+    marcas: "Marcas",
+    compras: "Compras",
+    retornos: "Retornos y Devoluciones",
     kardex: "Kardex de Inventario",
     cajas: "Cajas y Turnos",
+    transacciones: "Transacciones de Caja",
+    proveedores: "Proveedores",
+    metodos_pago: "Métodos de Pago",
+    monedas: "Monedas y Tasas",
     reportes: "Reportes y Estadísticas",
+    usuarios: "Usuarios y Permisos",
+    config: "Configuración del Sistema",
   };
 
   return (
@@ -3004,12 +5832,828 @@ export default function App() {
         </View>
       </Modal>
 
+      {/* ── MODAL LECTOR DE CÓDIGO DE BARRAS EN TIEMPO REAL (POS & VERIFICADOR) ── */}
+      <Modal
+        visible={showScannerModal}
+        animationType="slide"
+        transparent={false}
+        onRequestClose={() => setShowScannerModal(false)}
+      >
+        <View
+          style={[
+            styles.scannerModalRoot,
+            scannerLowLightGlow && styles.scannerModalRootLowLightGlow,
+          ]}
+        >
+          <StatusBar barStyle="light-content" backgroundColor="#000000" />
+
+          {/* Barra Superior del Escáner */}
+          <View style={styles.scannerTopHeader}>
+            <TouchableOpacity
+              style={styles.scannerCloseBtn}
+              onPress={() => setShowScannerModal(false)}
+            >
+              <Feather name="x" size={18} color="#ffffff" />
+              <Text style={styles.scannerCloseBtnText}>Cerrar</Text>
+            </TouchableOpacity>
+
+            <View style={{ alignItems: "center", flex: 1 }}>
+              <Text style={styles.scannerHeaderTitle}>Escáner POS en Vivo</Text>
+              <Text style={styles.scannerHeaderSub}>
+                {scannerAntiBlurMode
+                  ? "Nitidez Activa · Enfoque Macro"
+                  : "13 formatos 1D/2D activos"}
+              </Text>
+            </View>
+
+            <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
+              <TouchableOpacity
+                style={[
+                  styles.scannerIconPillBtn,
+                  scannerTorch && styles.scannerIconPillBtnActive,
+                ]}
+                onPress={() => setScannerTorch((v) => !v)}
+              >
+                <Feather
+                  name={scannerTorch ? "zap" : "zap-off"}
+                  size={16}
+                  color={scannerTorch ? "#1c1917" : "#ffffff"}
+                />
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                style={styles.scannerIconPillBtn}
+                onPress={() =>
+                  setScannerFacing((f) => (f === "back" ? "front" : "back"))
+                }
+              >
+                <Feather name="refresh-cw" size={15} color="#ffffff" />
+              </TouchableOpacity>
+            </View>
+          </View>
+
+          {/* Selector de Modo de Escaneo (Ráfaga POS / 1 Escaneo / Consultar Precio) */}
+          <View style={styles.scannerModeTabsRow}>
+            <TouchableOpacity
+              style={[
+                styles.scannerModeTab,
+                scannerMode === "rafaga" && styles.scannerModeTabActive,
+              ]}
+              onPress={() => setScannerMode("rafaga")}
+            >
+              <Feather
+                name="zap"
+                size={13}
+                color={scannerMode === "rafaga" ? "#ffffff" : "#d6d3ce"}
+              />
+              <Text
+                style={[
+                  styles.scannerModeTabText,
+                  scannerMode === "rafaga" && styles.scannerModeTabTextActive,
+                ]}
+              >
+                Ráfaga POS
+              </Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              style={[
+                styles.scannerModeTab,
+                scannerMode === "unico" && styles.scannerModeTabActive,
+              ]}
+              onPress={() => setScannerMode("unico")}
+            >
+              <Feather
+                name="check-circle"
+                size={13}
+                color={scannerMode === "unico" ? "#ffffff" : "#d6d3ce"}
+              />
+              <Text
+                style={[
+                  styles.scannerModeTabText,
+                  scannerMode === "unico" && styles.scannerModeTabTextActive,
+                ]}
+              >
+                1 Escaneo
+              </Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              style={[
+                styles.scannerModeTab,
+                scannerMode === "consulta" && styles.scannerModeTabActive,
+              ]}
+              onPress={() => setScannerMode("consulta")}
+            >
+              <Feather
+                name="tag"
+                size={13}
+                color={scannerMode === "consulta" ? "#ffffff" : "#d6d3ce"}
+              />
+              <Text
+                style={[
+                  styles.scannerModeTabText,
+                  scannerMode === "consulta" && styles.scannerModeTabTextActive,
+                ]}
+              >
+                Ver Precio
+              </Text>
+            </TouchableOpacity>
+          </View>
+
+          {/* Cuerpo Principal: Permiso o Cámara en Tiempo Real */}
+          {!cameraPermission?.granted ? (
+            <View style={styles.scannerPermissionBox}>
+              <View style={styles.scannerPermissionIconCircle}>
+                <Feather name="camera" size={34} color={THEME.primary} />
+              </View>
+              <Text style={styles.scannerPermissionTitle}>
+                Activar Cámara para Lector de Código de Barras
+              </Text>
+              <Text style={styles.scannerPermissionSub}>
+                Escanea productos en tiempo real con compensación de baja luz, zoom macro antidesenfoque y detección instantánea de presentaciones.
+              </Text>
+              <TouchableOpacity
+                style={styles.scannerGrantBtn}
+                onPress={requestCameraPermission}
+              >
+                <Feather name="check-circle" size={17} color="#ffffff" />
+                <Text style={styles.scannerGrantBtnText}>Permitir Acceso a la Cámara</Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                style={styles.scannerManualInputPermissionBtn}
+                onPress={() => setScannerManualInputOpen(true)}
+              >
+                <Feather name="edit-3" size={16} color="#ffffff" />
+                <Text style={styles.scannerManualInputPermissionBtnText}>
+                  Ingresar Código Manualmente
+                </Text>
+              </TouchableOpacity>
+            </View>
+          ) : (
+            <View style={styles.scannerViewportContainer}>
+              <CameraView
+                style={StyleSheet.absoluteFillObject}
+                facing={scannerFacing}
+                enableTorch={scannerTorch}
+                zoom={scannerZoom}
+                autofocus={scannerAutoFocus}
+                barcodeScannerSettings={{
+                  barcodeTypes: ALL_BARCODE_TYPES,
+                }}
+                onBarcodeScanned={scannerPaused ? undefined : handleCameraBarcodeScanned}
+              />
+
+              {/* Halo de Luz Suave de Pantalla (Softbox para oscuridad total o etiquetas brillantes) */}
+              {scannerLowLightGlow && (
+                <View pointerEvents="none" style={styles.scannerSoftboxGlowBorder} />
+              )}
+
+              {/* Capa Táctil para Tap-to-Focus y Visor Óptico */}
+              <TouchableOpacity
+                activeOpacity={1}
+                style={styles.scannerInteractiveOverlay}
+                onPress={(e) => {
+                  const { locationX, locationY } = e.nativeEvent;
+                  triggerScannerFocus(locationX, locationY);
+                }}
+              >
+                {/* Indicador donde el usuario tocó para enfocar */}
+                {focusPoint && (
+                  <Animated.View
+                    pointerEvents="none"
+                    style={[
+                      styles.scannerTapFocusRing,
+                      {
+                        left: Math.max(20, focusPoint.x - 32),
+                        top: Math.max(20, focusPoint.y - 32),
+                        transform: [{ scale: scannerFocusAnim }],
+                      },
+                    ]}
+                  />
+                )}
+
+                {/* Marco del Visor Óptico con Esquinas Dinámicas y Láser */}
+                <Animated.View
+                  style={[
+                    styles.scannerReticleBox,
+                    { transform: [{ scale: scannerFrameScaleAnim }] },
+                    scannerStatusRing === "success" && styles.scannerReticleSuccess,
+                    scannerStatusRing === "warning" && styles.scannerReticleWarning,
+                    scannerStatusRing === "error" && styles.scannerReticleError,
+                  ]}
+                >
+                  {/* 4 Esquinas de alta visibilidad */}
+                  <View
+                    style={[
+                      styles.scannerCornerTL,
+                      scannerStatusRing === "success" && { borderColor: THEME.success },
+                      scannerStatusRing === "warning" && { borderColor: THEME.warning },
+                      scannerStatusRing === "error" && { borderColor: THEME.danger },
+                    ]}
+                  />
+                  <View
+                    style={[
+                      styles.scannerCornerTR,
+                      scannerStatusRing === "success" && { borderColor: THEME.success },
+                      scannerStatusRing === "warning" && { borderColor: THEME.warning },
+                      scannerStatusRing === "error" && { borderColor: THEME.danger },
+                    ]}
+                  />
+                  <View
+                    style={[
+                      styles.scannerCornerBL,
+                      scannerStatusRing === "success" && { borderColor: THEME.success },
+                      scannerStatusRing === "warning" && { borderColor: THEME.warning },
+                      scannerStatusRing === "error" && { borderColor: THEME.danger },
+                    ]}
+                  />
+                  <View
+                    style={[
+                      styles.scannerCornerBR,
+                      scannerStatusRing === "success" && { borderColor: THEME.success },
+                      scannerStatusRing === "warning" && { borderColor: THEME.warning },
+                      scannerStatusRing === "error" && { borderColor: THEME.danger },
+                    ]}
+                  />
+
+                  {/* Línea Láser Animada */}
+                  {!scannerPaused && (
+                    <Animated.View
+                      style={[
+                        styles.scannerLaserLine,
+                        scannerStatusRing === "success" && {
+                          backgroundColor: THEME.success,
+                          shadowColor: THEME.success,
+                        },
+                        {
+                          transform: [
+                            {
+                              translateY: scannerLaserAnim.interpolate({
+                                inputRange: [0, 1],
+                                outputRange: [-68, 68],
+                              }),
+                            },
+                          ],
+                        },
+                      ]}
+                    />
+                  )}
+
+                  {/* Etiqueta de estado dentro del visor */}
+                  <View style={styles.scannerReticleHintPill}>
+                    <Text style={styles.scannerReticleHintText}>
+                      {scannerPaused
+                        ? "Escáner en pausa"
+                        : scannerStatusRing === "success"
+                        ? "✓ ¡Código detectado!"
+                        : scannerStatusRing === "error"
+                        ? "✕ Código no registrado"
+                        : "Toca el cuadro para re-enfocar · Mantén a 18 cm"}
+                    </Text>
+                  </View>
+                </Animated.View>
+
+                {/* Controles Rápidos de Zoom Óptico/Digital (Clave para códigos borrosos o pequeños) */}
+                <View style={styles.scannerZoomBar}>
+                  {[
+                    { label: "1x", val: 0 },
+                    { label: "1.5x Nítido", val: 0.12 },
+                    { label: "2x Macro", val: 0.25 },
+                    { label: "3x Pequeño", val: 0.45 },
+                  ].map((z) => {
+                    const active = Math.abs(scannerZoom - z.val) < 0.03;
+                    return (
+                      <TouchableOpacity
+                        key={z.label}
+                        style={[
+                          styles.scannerZoomChip,
+                          active && styles.scannerZoomChipActive,
+                        ]}
+                        onPress={() => {
+                          setScannerZoom(z.val);
+                          triggerScannerFocus();
+                        }}
+                      >
+                        <Text
+                          style={[
+                            styles.scannerZoomChipText,
+                            active && styles.scannerZoomChipTextActive,
+                          ]}
+                        >
+                          {z.label}
+                        </Text>
+                      </TouchableOpacity>
+                    );
+                  })}
+                </View>
+
+                {/* Barra de Asistencia para Baja Luz, Desenfoque y Entrada Manual */}
+                <View style={styles.scannerAssistToolbar}>
+                  <TouchableOpacity
+                    style={[
+                      styles.scannerAssistBtn,
+                      (scannerTorch || scannerLowLightGlow) && styles.scannerAssistBtnActive,
+                    ]}
+                    onPress={() => {
+                      const next = !scannerLowLightGlow;
+                      setScannerLowLightGlow(next);
+                      setScannerTorch(next);
+                    }}
+                  >
+                    <Feather
+                      name="sun"
+                      size={13}
+                      color={scannerTorch || scannerLowLightGlow ? "#1c1917" : "#ffffff"}
+                    />
+                    <Text
+                      style={[
+                        styles.scannerAssistBtnText,
+                        (scannerTorch || scannerLowLightGlow) && { color: "#1c1917" },
+                      ]}
+                    >
+                      Baja Luz / Brillo
+                    </Text>
+                  </TouchableOpacity>
+
+                  <TouchableOpacity
+                    style={[
+                      styles.scannerAssistBtn,
+                      scannerAntiBlurMode && styles.scannerAssistBtnActive,
+                    ]}
+                    onPress={() => {
+                      const next = !scannerAntiBlurMode;
+                      setScannerAntiBlurMode(next);
+                      if (next && scannerZoom < 0.1) {
+                        setScannerZoom(0.12);
+                      }
+                      triggerScannerFocus();
+                    }}
+                  >
+                    <Feather
+                      name="crosshair"
+                      size={13}
+                      color={scannerAntiBlurMode ? "#1c1917" : "#ffffff"}
+                    />
+                    <Text
+                      style={[
+                        styles.scannerAssistBtnText,
+                        scannerAntiBlurMode && { color: "#1c1917" },
+                      ]}
+                    >
+                      Antidesenfoque
+                    </Text>
+                  </TouchableOpacity>
+
+                  <TouchableOpacity
+                    style={styles.scannerAssistBtn}
+                    onPress={() => triggerScannerFocus()}
+                  >
+                    <Feather name="target" size={13} color="#ffffff" />
+                    <Text style={styles.scannerAssistBtnText}>Enfocar</Text>
+                  </TouchableOpacity>
+
+                  <TouchableOpacity
+                    style={[
+                      styles.scannerAssistBtn,
+                      scannerManualInputOpen && styles.scannerAssistBtnActive,
+                    ]}
+                    onPress={() => setScannerManualInputOpen((v) => !v)}
+                  >
+                    <Feather
+                      name="edit-3"
+                      size={13}
+                      color={scannerManualInputOpen ? "#1c1917" : "#ffffff"}
+                    />
+                    <Text
+                      style={[
+                        styles.scannerAssistBtnText,
+                        scannerManualInputOpen && { color: "#1c1917" },
+                      ]}
+                    >
+                      Digitar Código
+                    </Text>
+                  </TouchableOpacity>
+                </View>
+
+                {/* Botón flotante siempre visible: Ingresar código manualmente */}
+                <TouchableOpacity
+                  style={styles.scannerManualFloatingBtn}
+                  onPress={() => setScannerManualInputOpen(true)}
+                  activeOpacity={0.8}
+                >
+                  <Feather name="edit-3" size={13} color="#ffffff" />
+                  <Text style={styles.scannerManualFloatingBtnText}>
+                    Ingresar código manualmente
+                  </Text>
+                </TouchableOpacity>
+              </TouchableOpacity>
+            </View>
+          )}
+
+          {/* Cajón desplegable para digitar código manualmente (si la etiqueta está rota o borrosa) */}
+          {scannerManualInputOpen && (
+            <View style={styles.scannerManualInputBar}>
+              <View
+                style={{
+                  flexDirection: "row",
+                  justifyContent: "space-between",
+                  alignItems: "center",
+                  marginBottom: 8,
+                }}
+              >
+                <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
+                  <Feather name="edit-3" size={14} color={THEME.primary} />
+                  <Text style={styles.scannerManualInputHeaderTitle}>
+                    Ingresar código manualmente
+                  </Text>
+                </View>
+                <TouchableOpacity
+                  onPress={() => setScannerManualInputOpen(false)}
+                  hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                >
+                  <Feather name="x" size={17} color="#d6d3ce" />
+                </TouchableOpacity>
+              </View>
+
+              <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+                <TextInput
+                  style={styles.scannerManualTextInput}
+                  placeholder="Escribe o pega el código de barras..."
+                  placeholderTextColor="#a8a29e"
+                  value={scannerManualCode}
+                  onChangeText={setScannerManualCode}
+                  autoFocus
+                  returnKeyType="search"
+                  onSubmitEditing={() => {
+                    if (scannerManualCode.trim()) {
+                      processScannedBarcode(scannerManualCode.trim(), "manual");
+                      setScannerManualCode("");
+                    }
+                  }}
+                />
+                <TouchableOpacity
+                  style={styles.scannerManualSubmitBtn}
+                  onPress={() => {
+                    if (scannerManualCode.trim()) {
+                      processScannedBarcode(scannerManualCode.trim(), "manual");
+                      setScannerManualCode("");
+                    }
+                  }}
+                >
+                  <Text style={styles.scannerManualSubmitBtnText}>Buscar</Text>
+                </TouchableOpacity>
+              </View>
+            </View>
+          )}
+
+          {/* Panel Inferior en Vivo: Tarjeta del Producto Escaneado + Resumen del Carrito POS */}
+          <View style={styles.scannerBottomDock}>
+            {lastScannedEvent ? (
+              <View
+                style={[
+                  styles.scannerResultCard,
+                  lastScannedEvent.status === "not_found" && {
+                    borderColor: THEME.danger,
+                  },
+                  lastScannedEvent.status === "out_of_stock" && {
+                    borderColor: THEME.warning,
+                  },
+                ]}
+              >
+                {lastScannedEvent.producto ? (
+                  (() => {
+                    const p = lastScannedEvent.producto;
+                    const pres = lastScannedEvent.presentacion || null;
+                    const targetClave = claveLinea(p.id, pres?.id);
+                    const itemEnCarrito = cart.find((c) => claveDe(c) === targetClave);
+                    const qtyEnCarrito = itemEnCarrito?.qty || 0;
+                    const precioUnit = pres
+                      ? precioDeLineaEnMoneda(
+                          { product: p, qty: 1, presentacion: pres },
+                          monedaSeleccionada
+                        )
+                      : precioUnitarioEnMoneda(p, monedaSeleccionada);
+
+                    return (
+                      <View style={{ gap: 8 }}>
+                        <View
+                          style={{
+                            flexDirection: "row",
+                            alignItems: "flex-start",
+                            justifyContent: "space-between",
+                            gap: 10,
+                          }}
+                        >
+                          <View style={{ flex: 1 }}>
+                            <View
+                              style={{
+                                flexDirection: "row",
+                                alignItems: "center",
+                                gap: 6,
+                                flexWrap: "wrap",
+                              }}
+                            >
+                              <View
+                                style={[
+                                  styles.scannerStatusPill,
+                                  lastScannedEvent.status === "out_of_stock"
+                                    ? { backgroundColor: THEME.dangerSoft }
+                                    : lastScannedEvent.status === "inspected"
+                                    ? { backgroundColor: THEME.infoSoft }
+                                    : { backgroundColor: THEME.successSoft },
+                                ]}
+                              >
+                                <Text
+                                  style={{
+                                    fontSize: 10,
+                                    fontWeight: "800",
+                                    color:
+                                      lastScannedEvent.status === "out_of_stock"
+                                        ? THEME.dangerStrong
+                                        : lastScannedEvent.status === "inspected"
+                                        ? THEME.infoStrong
+                                        : THEME.successStrong,
+                                  }}
+                                >
+                                  {lastScannedEvent.status === "out_of_stock"
+                                    ? "SIN STOCK"
+                                    : lastScannedEvent.status === "inspected"
+                                    ? "PRECIO VERIFICADO"
+                                    : "✓ AGREGADO AL CARRITO"}
+                                </Text>
+                              </View>
+                              {pres && (
+                                <View style={styles.posPresMiniBtn}>
+                                  <Feather name="box" size={10} color={THEME.primary600} />
+                                  <Text style={styles.posPresMiniBtnText}>
+                                    {pres.nombre} x{pres.unidades}
+                                  </Text>
+                                </View>
+                              )}
+                              <Text style={{ fontSize: 10.5, color: THEME.mutedForeground }}>
+                                #{lastScannedEvent.rawCode} · Stock: {p.stock}
+                              </Text>
+                            </View>
+
+                            <Text
+                              style={{
+                                fontSize: 15,
+                                fontWeight: "800",
+                                color: THEME.foreground,
+                                marginTop: 3,
+                              }}
+                              numberOfLines={1}
+                            >
+                              {p.nombre}
+                            </Text>
+
+                            {/* Precios en la moneda activa + secundarias */}
+                            <View
+                              style={{
+                                flexDirection: "row",
+                                alignItems: "baseline",
+                                gap: 8,
+                                flexWrap: "wrap",
+                                marginTop: 2,
+                              }}
+                            >
+                              <Text
+                                style={{
+                                  fontSize: 16,
+                                  fontWeight: "900",
+                                  color: THEME.primary600,
+                                }}
+                              >
+                                {fmt(precioUnit, monedaSeleccionada)}
+                              </Text>
+                              {monedas
+                                .filter((m) => m.codigo !== monedaSeleccionada)
+                                .map((m) => {
+                                  const altP = pres
+                                    ? precioDeLineaEnMoneda(
+                                        { product: p, qty: 1, presentacion: pres },
+                                        m.codigo
+                                      )
+                                    : precioUnitarioEnMoneda(p, m.codigo);
+                                  return (
+                                    <Text
+                                      key={m.codigo}
+                                      style={{
+                                        fontSize: 11,
+                                        fontWeight: "700",
+                                        color: THEME.mutedForeground,
+                                      }}
+                                    >
+                                      {fmt(altP, m.codigo)}
+                                    </Text>
+                                  );
+                                })}
+                            </View>
+                          </View>
+
+                          {/* Controles rápidos de cantidad y botón para Quitar del Carrito */}
+                          {qtyEnCarrito > 0 ? (
+                            <View style={{ alignItems: "flex-end", gap: 6 }}>
+                              <View style={styles.scannerQtyControlBox}>
+                                <TouchableOpacity
+                                  style={[
+                                    styles.scannerQtyBtn,
+                                    qtyEnCarrito === 1 && { backgroundColor: THEME.danger },
+                                  ]}
+                                  onPress={() => updateCartQty(targetClave, -1)}
+                                  hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                                >
+                                  <Feather
+                                    name={qtyEnCarrito === 1 ? "trash-2" : "minus"}
+                                    size={13}
+                                    color="#ffffff"
+                                  />
+                                </TouchableOpacity>
+                                <View style={{ paddingHorizontal: 10, alignItems: "center" }}>
+                                  <Text
+                                    style={{
+                                      fontSize: 15,
+                                      fontWeight: "900",
+                                      color: THEME.foreground,
+                                    }}
+                                  >
+                                    {qtyEnCarrito}
+                                  </Text>
+                                  <Text
+                                    style={{
+                                      fontSize: 9,
+                                      fontWeight: "700",
+                                      color: THEME.mutedForeground,
+                                    }}
+                                  >
+                                    en carrito
+                                  </Text>
+                                </View>
+                                <TouchableOpacity
+                                  style={[
+                                    styles.scannerQtyBtn,
+                                    { backgroundColor: THEME.primary },
+                                  ]}
+                                  onPress={() => addToCart(p, pres)}
+                                  hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                                >
+                                  <Feather name="plus" size={13} color="#ffffff" />
+                                </TouchableOpacity>
+                              </View>
+
+                              {/* Botón explícito para quitar del carrito con 1 toque */}
+                              <TouchableOpacity
+                                style={styles.scannerRemoveBtn}
+                                onPress={() => {
+                                  updateCartQty(targetClave, -qtyEnCarrito);
+                                  showToast(`${p.nombre} quitado del carrito`, "info");
+                                  try {
+                                    Vibration.vibrate(30);
+                                  } catch {}
+                                }}
+                                hitSlop={{ top: 6, bottom: 6, left: 8, right: 8 }}
+                              >
+                                <Feather name="trash-2" size={12} color={THEME.dangerStrong} />
+                                <Text style={styles.scannerRemoveBtnText}>Quitar del carrito</Text>
+                              </TouchableOpacity>
+                            </View>
+                          ) : (
+                            p.stock > 0 && (
+                              <TouchableOpacity
+                                style={styles.scannerQuickAddBtn}
+                                onPress={() => addToCart(p, pres)}
+                              >
+                                <Feather name="plus" size={14} color="#ffffff" />
+                                <Text style={styles.scannerQuickAddBtnText}>Sumar</Text>
+                              </TouchableOpacity>
+                            )
+                          )}
+                        </View>
+                      </View>
+                    );
+                  })()
+                ) : (
+                  /* Código no encontrado en la base local */
+                  <View
+                    style={{
+                      flexDirection: "row",
+                      alignItems: "center",
+                      justifyContent: "space-between",
+                      gap: 8,
+                    }}
+                  >
+                    <View style={{ flex: 1 }}>
+                      <Text
+                        style={{
+                          fontSize: 13,
+                          fontWeight: "800",
+                          color: THEME.dangerStrong,
+                        }}
+                      >
+                        Código no encontrado: {lastScannedEvent.rawCode}
+                      </Text>
+                      <Text style={{ fontSize: 11.5, color: THEME.mutedForeground }}>
+                        No coincide con ningún producto del catálogo. ¿Deseas registrarlo?
+                      </Text>
+                    </View>
+                    <TouchableOpacity
+                      style={styles.primarySmallBtn}
+                      onPress={() => {
+                        const codeToCreate = lastScannedEvent.rawCode;
+                        setShowScannerModal(false);
+                        openProductoModal(null, codeToCreate);
+                      }}
+                    >
+                      <Feather name="plus" size={13} color="#ffffff" />
+                      <Text style={styles.primarySmallBtnText}>Crear</Text>
+                    </TouchableOpacity>
+                  </View>
+                )}
+              </View>
+            ) : (
+              <View style={styles.scannerEmptyPromptBox}>
+                <Feather name="maximize" size={18} color={THEME.primary} />
+                <Text style={styles.scannerEmptyPromptText}>
+                  Apunta al código de barras. El modo{" "}
+                  <Text style={{ fontWeight: "800", color: "#ffffff" }}>
+                    Antidesenfoque (1.5x)
+                  </Text>{" "}
+                  y{" "}
+                  <Text style={{ fontWeight: "800", color: "#ffffff" }}>Baja Luz</Text>{" "}
+                  detectan códigos borrosos o con poca iluminación.
+                </Text>
+              </View>
+            )}
+
+            {/* Barra de Resumen del Carrito y Cobro Inmediato dentro del Escáner */}
+            <View style={styles.scannerCartSummaryBar}>
+              <View style={{ flexDirection: "row", alignItems: "center", gap: 10 }}>
+                <View style={styles.floatingCartBadge}>
+                  <Text style={styles.floatingCartBadgeText}>
+                    {cart.reduce((s, c) => s + c.qty, 0)}
+                  </Text>
+                </View>
+                <View>
+                  <Text style={{ fontSize: 10, color: "#a8a29e", fontWeight: "700" }}>
+                    TOTAL EN CARRITO ({monedaSeleccionada})
+                  </Text>
+                  <Text style={{ fontSize: 17, color: "#ffffff", fontWeight: "900" }}>
+                    {fmt(total, monedaSeleccionada)}
+                  </Text>
+                </View>
+              </View>
+
+              <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+                {cart.length > 0 && (
+                  <TouchableOpacity
+                    style={styles.scannerViewCartBtn}
+                    onPress={() => {
+                      setShowScannerModal(false);
+                      setRoute("pos");
+                      setPosSubView("carrito");
+                    }}
+                  >
+                    <Feather name="shopping-cart" size={14} color="#ffffff" />
+                    <Text style={styles.scannerViewCartBtnText}>Carrito</Text>
+                  </TouchableOpacity>
+                )}
+
+                <TouchableOpacity
+                  style={[
+                    styles.scannerCheckoutBtn,
+                    cart.length === 0 && { backgroundColor: "#44403c" },
+                  ]}
+                  onPress={() => {
+                    setShowScannerModal(false);
+                    if (cart.length > 0) {
+                      setRoute("pos");
+                      handleOpenCheckout();
+                    }
+                  }}
+                >
+                  <Text style={styles.scannerCheckoutBtnText}>
+                    {cart.length > 0 ? "Cobrar" : "Listo"}
+                  </Text>
+                  <Feather
+                    name={cart.length > 0 ? "arrow-right" : "check"}
+                    size={15}
+                    color="#ffffff"
+                  />
+                </TouchableOpacity>
+              </View>
+            </View>
+          </View>
+        </View>
+      </Modal>
+
       {/* ── CONTENIDO PRINCIPAL SEGÚN RUTA ── */}
 
       {/* ==================== 1. PUNTO DE VENTA (/pos) ==================== */}
       {route === "pos" && (
         <View style={{ flex: 1 }}>
-          {/* Barra superior de controles del POS (Buscador + Método de Pago + Moneda + Sub-tabs Catálogo/Carrito) */}
+          {/* Barra superior de controles del POS (Buscador + Escáner + Método de Pago + Moneda + Sub-tabs Catálogo/Carrito) */}
           <View style={styles.posControlHeader}>
             <View style={styles.posSearchRow}>
               <View style={styles.searchBox}>
@@ -3027,6 +6671,25 @@ export default function App() {
                   </TouchableOpacity>
                 )}
               </View>
+
+              {/* Botón Principal para Abrir Lector de Código de Barras en Tiempo Real */}
+              <TouchableOpacity
+                style={styles.posScanTriggerBtn}
+                onPress={() => openBarcodeScanner("rafaga")}
+                activeOpacity={0.8}
+              >
+                <Feather name="camera" size={15} color="#ffffff" />
+                <Text style={styles.posScanTriggerBtnText}>Escanear</Text>
+              </TouchableOpacity>
+
+              {/* Botón rápido de Verificador de Precios por Cámara */}
+              <TouchableOpacity
+                style={styles.posPriceCheckTriggerBtn}
+                onPress={() => openBarcodeScanner("consulta")}
+                activeOpacity={0.8}
+              >
+                <Feather name="tag" size={15} color={THEME.primary600} />
+              </TouchableOpacity>
             </View>
 
             {/* Métodos de Pago horizontales (idénticos al selector del POS web: cambian la moneda automáticamente) */}
@@ -3271,11 +6934,18 @@ export default function App() {
                           {inCartQty > 0 && (
                             <View style={styles.inCartControlGroup}>
                               <TouchableOpacity
-                                style={styles.inCartMinusBtn}
+                                style={[
+                                  styles.inCartMinusBtn,
+                                  inCartQty === 1 && { backgroundColor: THEME.danger },
+                                ]}
                                 onPress={() => decreaseOrRemoveFromCart(item.id)}
                                 hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
                               >
-                                <Feather name="minus" size={11} color="#fff" />
+                                <Feather
+                                  name={inCartQty === 1 ? "trash-2" : "minus"}
+                                  size={11}
+                                  color="#fff"
+                                />
                               </TouchableOpacity>
                               <View style={styles.inCartCountBadge}>
                                 <Text style={styles.inCartCountBadgeText}>{inCartQty}</Text>
@@ -3392,34 +7062,92 @@ export default function App() {
               contentContainerStyle={{ padding: 12, paddingBottom: 40, gap: 12 }}
               keyboardShouldPersistTaps="handled"
             >
-              {/* Cabecera del Carrito + Pausar + Limpiar */}
+              {/* Cabecera del Carrito + Escanear + Pausar + Limpiar */}
               <View style={styles.card}>
-                <View style={styles.cartHeaderRow}>
-                  <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
-                    <Feather name="shopping-cart" size={16} color={THEME.primary} />
-                    <Text style={styles.cardSectionTitle}>
-                      Carrito ({cart.reduce((s, c) => s + c.qty, 0)} ítems)
-                    </Text>
-                  </View>
-                  <View style={{ flexDirection: "row", gap: 8 }}>
-                    {cart.length > 0 && (
-                      <>
-                        <TouchableOpacity style={styles.outlineSmallBtn} onPress={handlePauseCart}>
-                          <Feather name="pause" size={12} color={THEME.foreground} />
-                          <Text style={styles.outlineSmallBtnText}>Pausar</Text>
-                        </TouchableOpacity>
-                        <TouchableOpacity
-                          style={[styles.outlineSmallBtn, { borderColor: THEME.dangerBorder }]}
-                          onPress={() => setCart([])}
-                        >
-                          <Feather name="trash-2" size={12} color={THEME.dangerStrong} />
-                          <Text style={[styles.outlineSmallBtnText, { color: THEME.dangerStrong }]}>
-                            Limpiar
-                          </Text>
-                        </TouchableOpacity>
-                      </>
+                <View style={styles.cartHeaderContainer}>
+                  <View style={styles.cartHeaderTopRow}>
+                    <View style={{ flexDirection: "row", alignItems: "center", gap: 8, flex: 1 }}>
+                      <Feather name="shopping-cart" size={16} color={THEME.primary} />
+                      <Text style={styles.cardSectionTitle} numberOfLines={1}>
+                        Carrito ({cart.reduce((s, c) => s + c.qty, 0)} ítems)
+                      </Text>
+                    </View>
+                    {cart.length === 0 ? (
+                      <TouchableOpacity
+                        style={styles.cartScanHeaderBtn}
+                        onPress={() => openBarcodeScanner("rafaga")}
+                      >
+                        <Feather name="camera" size={13} color="#ffffff" />
+                        <Text style={styles.cartScanHeaderBtnText}>Escanear</Text>
+                      </TouchableOpacity>
+                    ) : (
+                      <View style={styles.cartHeaderTotalPill}>
+                        <Text style={styles.cartHeaderTotalPillText}>
+                          {fmt(total, monedaSeleccionada)}
+                        </Text>
+                      </View>
                     )}
                   </View>
+
+                  {/* Barra de 3 Botones Proporcionales (Escanear + Pausar + Limpiar) — 100% dentro del contenedor */}
+                  {cart.length > 0 && (
+                    <View style={styles.cartHeaderActionsRow}>
+                      <TouchableOpacity
+                        style={[
+                          styles.cartHeaderActionBtn,
+                          { backgroundColor: THEME.primary, borderColor: THEME.primary600 },
+                        ]}
+                        onPress={() => openBarcodeScanner("rafaga")}
+                      >
+                        <Feather name="camera" size={13} color="#ffffff" />
+                        <Text style={[styles.cartHeaderActionBtnText, { color: "#ffffff" }]}>
+                          Escanear
+                        </Text>
+                      </TouchableOpacity>
+
+                      <TouchableOpacity
+                        style={styles.cartHeaderActionBtn}
+                        onPress={handlePauseCart}
+                      >
+                        <Feather name="pause" size={12} color={THEME.foreground} />
+                        <Text style={styles.cartHeaderActionBtnText}>Pausar</Text>
+                      </TouchableOpacity>
+
+                      <TouchableOpacity
+                        style={[
+                          styles.cartHeaderActionBtn,
+                          { borderColor: THEME.dangerBorder, backgroundColor: THEME.dangerSoft },
+                        ]}
+                        onPress={() => {
+                          Alert.alert(
+                            "Vaciar Carrito",
+                            "¿Estás seguro de que deseas vaciar todos los productos del carrito?",
+                            [
+                              { text: "Cancelar", style: "cancel" },
+                              {
+                                text: "Vaciar",
+                                style: "destructive",
+                                onPress: () => {
+                                  setCart([]);
+                                  showToast("Carrito vaciado", "info");
+                                },
+                              },
+                            ]
+                          );
+                        }}
+                      >
+                        <Feather name="trash-2" size={12} color={THEME.dangerStrong} />
+                        <Text
+                          style={[
+                            styles.cartHeaderActionBtnText,
+                            { color: THEME.dangerStrong },
+                          ]}
+                        >
+                          Limpiar
+                        </Text>
+                      </TouchableOpacity>
+                    </View>
+                  )}
                 </View>
 
                 {/* Selector Interactivo de Cliente en Carrito */}
@@ -5147,80 +8875,182 @@ export default function App() {
             contentContainerStyle={{ padding: 12, paddingBottom: 95, gap: 10 }}
             renderItem={({ item: v }) => {
               const esPagada = v.estado === "Pagada";
+              const creditoDeVenta = (creditosData.creditos || []).find(
+                (c) =>
+                  (c.venta_id && String(c.venta_id) === String(v.id)) ||
+                  (c.venta_numero && c.venta_numero === v.numero)
+              );
+              const tieneDeudaPendiente =
+                !esPagada || Boolean(creditoDeVenta && creditoDeVenta.saldo > 0.01);
+
               return (
-                <TouchableOpacity
-                  key={v.id}
-                  style={styles.card}
-                  activeOpacity={0.7}
-                  onPress={() => handleOpenVentaDetail(v)}
-                >
-                  <View style={styles.creditoCardHeader}>
-                    <View style={{ flex: 1, paddingRight: 8 }}>
-                      <View style={{ flexDirection: "row", alignItems: "center", gap: 6, marginBottom: 2 }}>
-                        <Text style={styles.creditoNumero}>{v.numero}</Text>
-                        {v.isLocal && (
-                          <View
-                            style={[
-                              styles.statusBadge,
-                              v.sincronizado === 1
-                                ? { backgroundColor: THEME.successSoft, borderColor: THEME.successBorder }
-                                : { backgroundColor: THEME.warningSoft, borderColor: THEME.warningBorder },
-                            ]}
-                          >
-                            <Text
+                <View key={v.id} style={styles.card}>
+                  <TouchableOpacity
+                    activeOpacity={0.7}
+                    onPress={() => handleOpenVentaDetail(v)}
+                  >
+                    <View style={styles.creditoCardHeader}>
+                      <View style={{ flex: 1, paddingRight: 8 }}>
+                        <View style={{ flexDirection: "row", alignItems: "center", gap: 6, marginBottom: 2 }}>
+                          <Text style={styles.creditoNumero}>{v.numero}</Text>
+                          {v.isLocal && (
+                            <View
                               style={[
-                                styles.statusBadgeText,
-                                {
-                                  color: v.sincronizado === 1 ? THEME.successStrong : THEME.warningStrong,
-                                  fontSize: 10,
-                                },
+                                styles.statusBadge,
+                                v.sincronizado === 1
+                                  ? { backgroundColor: THEME.successSoft, borderColor: THEME.successBorder }
+                                  : { backgroundColor: THEME.warningSoft, borderColor: THEME.warningBorder },
                               ]}
                             >
-                              {v.sincronizado === 1 ? "Sincronizada" : "Local"}
-                            </Text>
-                          </View>
-                        )}
-                      </View>
-                      <Text style={styles.creditoClienteName} numberOfLines={1}>
-                        {v.cliente || "Consumidor Final"}
-                      </Text>
-                      <Text style={[styles.clientCardMeta, { marginTop: 3 }]}>
-                        🕒 {fmtDateTime(v.creado_en || v.fecha)}
-                      </Text>
-                      <Text style={[styles.clientCardMeta, { color: THEME.foreground, fontWeight: "600" }]}>
-                        {v.tipo_pago}{v.metodo_pago_nombre ? ` · ${v.metodo_pago_nombre}` : ""}
-                      </Text>
-                    </View>
-
-                    <View style={{ alignItems: "flex-end", justifyContent: "space-between" }}>
-                      <Text style={styles.posProdPrice}>
-                        {fmt(Number(v.total) || 0, v.moneda_codigo)}
-                      </Text>
-                      <View
-                        style={[
-                          styles.statusBadge,
-                          esPagada
-                            ? { backgroundColor: THEME.successSoft, borderColor: THEME.successBorder }
-                            : { backgroundColor: THEME.warningSoft, borderColor: THEME.warningBorder },
-                          { marginTop: 4 },
-                        ]}
-                      >
-                        <Text
-                          style={[
-                            styles.statusBadgeText,
-                            { color: esPagada ? THEME.successStrong : THEME.warningStrong },
-                          ]}
-                        >
-                          {v.estado}
+                              <Text
+                                style={[
+                                  styles.statusBadgeText,
+                                  {
+                                    color: v.sincronizado === 1 ? THEME.successStrong : THEME.warningStrong,
+                                    fontSize: 10,
+                                  },
+                                ]}
+                              >
+                                {v.sincronizado === 1 ? "Sincronizada" : "Local"}
+                              </Text>
+                            </View>
+                          )}
+                        </View>
+                        <Text style={styles.creditoClienteName} numberOfLines={1}>
+                          {v.cliente || "Consumidor Final"}
+                        </Text>
+                        <Text style={[styles.clientCardMeta, { marginTop: 3 }]}>
+                          🕒 {fmtDateTime(v.creado_en || v.fecha)}
+                        </Text>
+                        <Text style={[styles.clientCardMeta, { color: THEME.foreground, fontWeight: "600" }]}>
+                          {v.tipo_pago}{v.metodo_pago_nombre ? ` · ${v.metodo_pago_nombre}` : ""}
                         </Text>
                       </View>
-                      <View style={{ flexDirection: "row", alignItems: "center", gap: 2, marginTop: 8 }}>
-                        <Text style={{ fontSize: 11, fontWeight: "700", color: THEME.primary }}>Ver detalle</Text>
-                        <Feather name="chevron-right" size={13} color={THEME.primary} />
+
+                      <View style={{ alignItems: "flex-end", justifyContent: "space-between" }}>
+                        <Text style={styles.posProdPrice}>
+                          {fmt(Number(v.total) || 0, v.moneda_codigo)}
+                        </Text>
+                        <View
+                          style={[
+                            styles.statusBadge,
+                            esPagada
+                              ? { backgroundColor: THEME.successSoft, borderColor: THEME.successBorder }
+                              : { backgroundColor: THEME.warningSoft, borderColor: THEME.warningBorder },
+                            { marginTop: 4 },
+                          ]}
+                        >
+                          <Text
+                            style={[
+                              styles.statusBadgeText,
+                              { color: esPagada ? THEME.successStrong : THEME.warningStrong },
+                            ]}
+                          >
+                            {v.estado}
+                          </Text>
+                        </View>
+                        {creditoDeVenta && creditoDeVenta.saldo > 0.01 && (
+                          <Text
+                            style={{
+                              fontSize: 11,
+                              fontWeight: "700",
+                              color: THEME.dangerStrong,
+                              marginTop: 4,
+                            }}
+                          >
+                            Debe: {fmt(creditoDeVenta.saldo, creditoDeVenta.moneda_codigo)}
+                          </Text>
+                        )}
                       </View>
                     </View>
+                  </TouchableOpacity>
+
+                  {/* Barra de Acciones idéntica a PC (/ventas): Ver · Pagar · Retornar · Eliminar */}
+                  <View
+                    style={[
+                      styles.cartHeaderActionsRow,
+                      {
+                        marginTop: 10,
+                        paddingTop: 8,
+                        borderTopWidth: 1,
+                        borderTopColor: THEME.border,
+                      },
+                    ]}
+                  >
+                    <TouchableOpacity
+                      style={styles.cartHeaderActionBtn}
+                      onPress={() => handleOpenVentaDetail(v)}
+                    >
+                      <Feather name="eye" size={13} color={THEME.foreground} />
+                      <Text style={styles.cartHeaderActionBtnText}>Ver</Text>
+                    </TouchableOpacity>
+
+                    {tieneDeudaPendiente && (
+                      <TouchableOpacity
+                        style={[
+                          styles.cartHeaderActionBtn,
+                          {
+                            backgroundColor: THEME.successSoft,
+                            borderColor: THEME.successBorder,
+                          },
+                        ]}
+                        onPress={() => handlePagarVentaCredito(v)}
+                      >
+                        <Feather name="dollar-sign" size={13} color={THEME.successStrong} />
+                        <Text
+                          style={[
+                            styles.cartHeaderActionBtnText,
+                            { color: THEME.successStrong },
+                          ]}
+                        >
+                          Pagar
+                        </Text>
+                      </TouchableOpacity>
+                    )}
+
+                    <TouchableOpacity
+                      style={[
+                        styles.cartHeaderActionBtn,
+                        {
+                          backgroundColor: THEME.warningSoft,
+                          borderColor: THEME.warningBorder,
+                        },
+                      ]}
+                      onPress={() => openRetornoDirectoFromVenta(v)}
+                    >
+                      <Feather name="rotate-ccw" size={13} color={THEME.warningStrong} />
+                      <Text
+                        style={[
+                          styles.cartHeaderActionBtnText,
+                          { color: THEME.warningStrong },
+                        ]}
+                      >
+                        Retornar
+                      </Text>
+                    </TouchableOpacity>
+
+                    <TouchableOpacity
+                      style={[
+                        styles.cartHeaderActionBtn,
+                        {
+                          backgroundColor: THEME.dangerSoft,
+                          borderColor: THEME.dangerBorder,
+                        },
+                      ]}
+                      onPress={() => handleDeleteVenta(v)}
+                    >
+                      <Feather name="trash-2" size={13} color={THEME.dangerStrong} />
+                      <Text
+                        style={[
+                          styles.cartHeaderActionBtnText,
+                          { color: THEME.dangerStrong },
+                        ]}
+                      >
+                        Eliminar
+                      </Text>
+                    </TouchableOpacity>
                   </View>
-                </TouchableOpacity>
+                </View>
               );
             }}
             ListEmptyComponent={
@@ -5426,19 +9256,28 @@ export default function App() {
                 Cajas y Turnos de Arqueo
               </Text>
               <Text style={{ fontSize: 11, color: THEME.mutedForeground }}>
-                Gestión de saldos, aperturas y cierres de caja
+                Saldos, aperturas, cierres y movimientos
               </Text>
             </View>
             <TouchableOpacity
-              style={[styles.outlineSmallBtn, { height: 40, paddingHorizontal: 12 }]}
-              onPress={loadCajas}
-              disabled={cajasLoading}
+              style={styles.outlineSmallBtn}
+              onPress={() => setRoute("transacciones")}
             >
-              {cajasLoading ? (
-                <ActivityIndicator size="small" color={THEME.primary} />
-              ) : (
-                <Feather name="refresh-cw" size={16} color={THEME.foreground} />
-              )}
+              <Feather name="repeat" size={13} color={THEME.primary600} />
+              <Text style={[styles.outlineSmallBtnText, { color: THEME.primary600 }]}>
+                Movimientos
+              </Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={styles.primarySmallBtn}
+              onPress={() => {
+                setNcajaNombre("");
+                setNcajaMonedaId(String(monedas[0]?.id || "1"));
+                setNuevaCajaModalOpen(true);
+              }}
+            >
+              <Feather name="plus" size={14} color="#fff" />
+              <Text style={styles.primarySmallBtnText}>Nueva Caja</Text>
             </TouchableOpacity>
           </View>
 
@@ -6084,6 +9923,55 @@ export default function App() {
                 </TouchableOpacity>
               )}
             </View>
+            <TouchableOpacity
+              style={styles.posPriceCheckTriggerBtn}
+              onPress={() => openBarcodeScanner("consulta")}
+              activeOpacity={0.8}
+            >
+              <Feather name="camera" size={15} color={THEME.primary600} />
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={styles.primarySmallBtn}
+              onPress={() => openProductoModal(null)}
+            >
+              <Feather name="plus" size={14} color="#fff" />
+              <Text style={styles.primarySmallBtnText}>Nuevo</Text>
+            </TouchableOpacity>
+          </View>
+
+          {/* Sub-barra rápida de Catálogo: Productos | Categorías | Marcas */}
+          <View
+            style={{
+              flexDirection: "row",
+              gap: 8,
+              paddingHorizontal: 12,
+              paddingTop: 10,
+              paddingBottom: 2,
+            }}
+          >
+            <TouchableOpacity
+              style={[styles.posModeTab, styles.posModeTabActive]}
+              onPress={() => setRoute("productos")}
+            >
+              <Feather name="package" size={13} color="#fff" />
+              <Text style={[styles.posModeTabText, styles.posModeTabTextActive]}>
+                Productos ({productos.length})
+              </Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={styles.posModeTab}
+              onPress={() => setRoute("categorias")}
+            >
+              <Feather name="folder" size={13} color={THEME.foreground} />
+              <Text style={styles.posModeTabText}>Categorías</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={styles.posModeTab}
+              onPress={() => setRoute("marcas")}
+            >
+              <Feather name="tag" size={13} color={THEME.foreground} />
+              <Text style={styles.posModeTabText}>Marcas</Text>
+            </TouchableOpacity>
           </View>
 
           <FlatList
@@ -6146,7 +10034,20 @@ export default function App() {
                         Código: {item.codigo}
                         {item.categoria_nombre ? ` · ${item.categoria_nombre}` : ""}
                         {item.marca_nombre ? ` · ${item.marca_nombre}` : ""}
+                        {item.proveedores && item.proveedores.length > 0
+                          ? ` · Prov: ${item.proveedores.map((p) => p.nombre).join(", ")}`
+                          : item.proveedor_nombre
+                          ? ` · Prov: ${item.proveedor_nombre}`
+                          : ""}
                       </Text>
+                      {item.descripcion ? (
+                        <Text
+                          style={[styles.clientCardMeta, { fontStyle: "italic", marginTop: 2 }]}
+                          numberOfLines={1}
+                        >
+                          {item.descripcion}
+                        </Text>
+                      ) : null}
                     </View>
 
                     <View
@@ -6240,6 +10141,74 @@ export default function App() {
                       ))}
                     </View>
                   </View>
+
+                  {/* Presentaciones si tiene */}
+                  {item.presentaciones && item.presentaciones.length > 0 && (
+                    <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 6, marginTop: 8 }}>
+                      {item.presentaciones.map((pr) => (
+                        <View key={pr.id} style={styles.posPresMiniBtn}>
+                          <Feather name="box" size={11} color={THEME.primary600} />
+                          <Text style={styles.posPresMiniBtnText}>
+                            {pr.nombre} x{pr.unidades} ({fmt(precioDeLineaEnMoneda({ product: item, qty: 1, presentacion: pr }, monedaSeleccionada), monedaSeleccionada)})
+                          </Text>
+                        </View>
+                      ))}
+                    </View>
+                  )}
+
+                  {/* Acciones de Producto: Ver | Editar | Stock | Eliminar */}
+                  <View style={styles.cartHeaderActionsRow}>
+                    <TouchableOpacity
+                      style={[styles.cartHeaderActionBtn, { marginTop: 10 }]}
+                      onPress={() => openProductoModal(item, "", "view")}
+                    >
+                      <Feather name="eye" size={13} color={THEME.foreground} />
+                      <Text style={styles.cartHeaderActionBtnText}>Ver</Text>
+                    </TouchableOpacity>
+
+                    <TouchableOpacity
+                      style={[styles.cartHeaderActionBtn, { marginTop: 10 }]}
+                      onPress={() => openProductoModal(item, "", "edit")}
+                    >
+                      <Feather name="edit-2" size={13} color={THEME.primary600} />
+                      <Text style={[styles.cartHeaderActionBtnText, { color: THEME.primary600 }]}>
+                        Editar
+                      </Text>
+                    </TouchableOpacity>
+
+                    <TouchableOpacity
+                      style={[styles.cartHeaderActionBtn, { marginTop: 10 }]}
+                      onPress={() => {
+                        setAjusteProducto(item);
+                        setAjustePresentacionId(null);
+                        setAjusteTipo("Entrada");
+                        setAjusteCantidad("1");
+                        setModalAjusteKardexVisible(true);
+                      }}
+                    >
+                      <Feather name="sliders" size={13} color={THEME.infoStrong} />
+                      <Text style={[styles.cartHeaderActionBtnText, { color: THEME.infoStrong }]}>
+                        Stock
+                      </Text>
+                    </TouchableOpacity>
+
+                    <TouchableOpacity
+                      style={[
+                        styles.cartHeaderActionBtn,
+                        {
+                          marginTop: 10,
+                          backgroundColor: THEME.dangerSoft,
+                          borderColor: THEME.dangerBorder,
+                        },
+                      ]}
+                      onPress={() => handleDeleteProducto(item)}
+                    >
+                      <Feather name="trash-2" size={13} color={THEME.dangerStrong} />
+                      <Text style={[styles.cartHeaderActionBtnText, { color: THEME.dangerStrong }]}>
+                        Eliminar
+                      </Text>
+                    </TouchableOpacity>
+                  </View>
                 </View>
               );
             }}
@@ -6247,8 +10216,743 @@ export default function App() {
         </View>
       )}
 
-      {/* ==================== 6. PANEL DE CONTROL (/dashboard) & CONFIG ==================== */}
-      {(route === "dashboard" || route === "config") && (
+      {/* ==================== 5B. CATEGORÍAS (/categorias) ==================== */}
+      {route === "categorias" && (
+        <View style={{ flex: 1 }}>
+          <View style={styles.moduleHeaderBar}>
+            <View style={[styles.searchBox, { flex: 1 }]}>
+              <Feather name="search" size={16} color={THEME.mutedForeground} />
+              <TextInput
+                style={styles.searchBoxInput}
+                placeholder="Buscar categoría..."
+                placeholderTextColor={THEME.mutedForeground}
+                value={catSearch}
+                onChangeText={setCatSearch}
+              />
+            </View>
+            <TouchableOpacity style={styles.primarySmallBtn} onPress={() => openCategoriaModal(null)}>
+              <Feather name="plus" size={14} color="#fff" />
+              <Text style={styles.primarySmallBtnText}>Nueva Categoría</Text>
+            </TouchableOpacity>
+          </View>
+
+          <View style={{ flexDirection: "row", gap: 8, paddingHorizontal: 12, paddingTop: 10 }}>
+            <TouchableOpacity style={styles.posModeTab} onPress={() => setRoute("productos")}>
+              <Feather name="package" size={13} color={THEME.foreground} />
+              <Text style={styles.posModeTabText}>Productos</Text>
+            </TouchableOpacity>
+            <TouchableOpacity style={[styles.posModeTab, styles.posModeTabActive]} onPress={() => setRoute("categorias")}>
+              <Feather name="folder" size={13} color="#fff" />
+              <Text style={[styles.posModeTabText, styles.posModeTabTextActive]}>Categorías</Text>
+            </TouchableOpacity>
+            <TouchableOpacity style={styles.posModeTab} onPress={() => setRoute("marcas")}>
+              <Feather name="tag" size={13} color={THEME.foreground} />
+              <Text style={styles.posModeTabText}>Marcas</Text>
+            </TouchableOpacity>
+          </View>
+
+          <FlatList
+            data={(categoriasCloud.length > 0 ? categoriasCloud : categorias).filter(
+              (c: any) => !catSearch.trim() || c.nombre.toLowerCase().includes(catSearch.toLowerCase())
+            )}
+            keyExtractor={(item: any) => String(item.id)}
+            contentContainerStyle={{ padding: 12, paddingBottom: 90, gap: 10 }}
+            renderItem={({ item }: { item: any }) => (
+              <View style={styles.card}>
+                <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center" }}>
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.clientCardName}>{item.nombre}</Text>
+                    {item.descripcion ? (
+                      <Text style={styles.clientCardMeta}>{item.descripcion}</Text>
+                    ) : null}
+                  </View>
+                  <View style={{ flexDirection: "row", gap: 8 }}>
+                    <TouchableOpacity style={styles.outlineSmallBtn} onPress={() => openCategoriaModal(item)}>
+                      <Feather name="edit-2" size={13} color={THEME.primary600} />
+                      <Text style={styles.outlineSmallBtnText}>Editar</Text>
+                    </TouchableOpacity>
+                    <TouchableOpacity
+                      style={[styles.outlineSmallBtn, { borderColor: THEME.dangerBorder, backgroundColor: THEME.dangerSoft }]}
+                      onPress={() => handleDeleteCategoria(item)}
+                    >
+                      <Feather name="trash-2" size={13} color={THEME.dangerStrong} />
+                    </TouchableOpacity>
+                  </View>
+                </View>
+              </View>
+            )}
+          />
+        </View>
+      )}
+
+      {/* ==================== 5C. MARCAS (/marcas) ==================== */}
+      {route === "marcas" && (
+        <View style={{ flex: 1 }}>
+          <View style={styles.moduleHeaderBar}>
+            <View style={[styles.searchBox, { flex: 1 }]}>
+              <Feather name="search" size={16} color={THEME.mutedForeground} />
+              <TextInput
+                style={styles.searchBoxInput}
+                placeholder="Buscar marca..."
+                placeholderTextColor={THEME.mutedForeground}
+                value={marcaSearch}
+                onChangeText={setMarcaSearch}
+              />
+            </View>
+            <TouchableOpacity style={styles.primarySmallBtn} onPress={() => openMarcaModal(null)}>
+              <Feather name="plus" size={14} color="#fff" />
+              <Text style={styles.primarySmallBtnText}>Nueva Marca</Text>
+            </TouchableOpacity>
+          </View>
+
+          <View style={{ flexDirection: "row", gap: 8, paddingHorizontal: 12, paddingTop: 10 }}>
+            <TouchableOpacity style={styles.posModeTab} onPress={() => setRoute("productos")}>
+              <Feather name="package" size={13} color={THEME.foreground} />
+              <Text style={styles.posModeTabText}>Productos</Text>
+            </TouchableOpacity>
+            <TouchableOpacity style={styles.posModeTab} onPress={() => setRoute("categorias")}>
+              <Feather name="folder" size={13} color={THEME.foreground} />
+              <Text style={styles.posModeTabText}>Categorías</Text>
+            </TouchableOpacity>
+            <TouchableOpacity style={[styles.posModeTab, styles.posModeTabActive]} onPress={() => setRoute("marcas")}>
+              <Feather name="tag" size={13} color="#fff" />
+              <Text style={[styles.posModeTabText, styles.posModeTabTextActive]}>Marcas</Text>
+            </TouchableOpacity>
+          </View>
+
+          <FlatList
+            data={marcasCloud.filter(
+              (m: any) => !marcaSearch.trim() || m.nombre.toLowerCase().includes(marcaSearch.toLowerCase())
+            )}
+            keyExtractor={(item: any) => String(item.id)}
+            contentContainerStyle={{ padding: 12, paddingBottom: 90, gap: 10 }}
+            ListEmptyComponent={
+              <View style={[styles.card, { alignItems: "center", paddingVertical: 28 }]}>
+                <Feather name="tag" size={26} color={THEME.mutedForeground} />
+                <Text style={[styles.clientCardName, { marginTop: 8 }]}>Sin marcas registradas</Text>
+                <Text style={styles.clientCardMeta}>Pulsa "Nueva Marca" para agregar una.</Text>
+              </View>
+            }
+            renderItem={({ item }: { item: any }) => (
+              <View style={styles.card}>
+                <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center" }}>
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.clientCardName}>{item.nombre}</Text>
+                    <Text style={styles.clientCardMeta}>
+                      {item.pais || item.descripcion || "Marca de catálogo"}
+                      {item.productos_count !== undefined ? ` · ${item.productos_count} prod.` : ""}
+                    </Text>
+                  </View>
+                  <View style={{ flexDirection: "row", gap: 8 }}>
+                    <TouchableOpacity style={styles.outlineSmallBtn} onPress={() => openMarcaModal(item)}>
+                      <Feather name="edit-2" size={13} color={THEME.primary600} />
+                      <Text style={styles.outlineSmallBtnText}>Editar</Text>
+                    </TouchableOpacity>
+                    <TouchableOpacity
+                      style={[styles.outlineSmallBtn, { borderColor: THEME.dangerBorder, backgroundColor: THEME.dangerSoft }]}
+                      onPress={() => handleDeleteMarca(item)}
+                    >
+                      <Feather name="trash-2" size={13} color={THEME.dangerStrong} />
+                    </TouchableOpacity>
+                  </View>
+                </View>
+              </View>
+            )}
+          />
+        </View>
+      )}
+
+      {/* ==================== 5D. COMPRAS (/compras) ==================== */}
+      {route === "compras" && (
+        <View style={{ flex: 1 }}>
+          <View style={styles.moduleHeaderBar}>
+            <View style={[styles.searchBox, { flex: 1 }]}>
+              <Feather name="search" size={16} color={THEME.mutedForeground} />
+              <TextInput
+                style={styles.searchBoxInput}
+                placeholder="Buscar compra por número o proveedor..."
+                placeholderTextColor={THEME.mutedForeground}
+                value={comprasSearch}
+                onChangeText={setComprasSearch}
+              />
+            </View>
+            <TouchableOpacity style={styles.primarySmallBtn} onPress={openNuevaCompraModal}>
+              <Feather name="plus" size={14} color="#fff" />
+              <Text style={styles.primarySmallBtnText}>Nueva Compra</Text>
+            </TouchableOpacity>
+          </View>
+
+          {comprasLoading ? (
+            <View style={{ flex: 1, justifyContent: "center", alignItems: "center" }}>
+              <ActivityIndicator size="large" color={THEME.primary} />
+            </View>
+          ) : (
+            <FlatList
+              data={comprasList.filter(
+                (c: any) =>
+                  !comprasSearch.trim() ||
+                  (c.numero && c.numero.toLowerCase().includes(comprasSearch.toLowerCase())) ||
+                  (c.proveedor_nombre &&
+                    c.proveedor_nombre.toLowerCase().includes(comprasSearch.toLowerCase()))
+              )}
+              keyExtractor={(item: any) => String(item.id)}
+              contentContainerStyle={{ padding: 12, paddingBottom: 90, gap: 10 }}
+              ListEmptyComponent={
+                <View style={[styles.card, { alignItems: "center", paddingVertical: 30 }]}>
+                  <Feather name="shopping-bag" size={28} color={THEME.mutedForeground} />
+                  <Text style={[styles.clientCardName, { marginTop: 8 }]}>No hay compras registradas</Text>
+                  <Text style={styles.clientCardMeta}>
+                    Registra compras de mercancía para abastecer tu inventario.
+                  </Text>
+                </View>
+              }
+              renderItem={({ item }: { item: any }) => {
+                const itemsDeCompra = compraItemsList.filter(
+                  (i: any) => String(i.compra_id) === String(item.id)
+                );
+                return (
+                  <View style={styles.card}>
+                    <TouchableOpacity
+                      activeOpacity={0.7}
+                      onPress={() => setCompraDetailModal({ compra: item, items: itemsDeCompra })}
+                    >
+                      <View style={styles.creditoCardHeader}>
+                        <View style={{ flex: 1 }}>
+                          <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
+                            <Text style={styles.creditoNumero}>{item.numero}</Text>
+                            <View
+                              style={[
+                                styles.statusBadge,
+                                item.estado === "Pagada"
+                                  ? { backgroundColor: THEME.successSoft, borderColor: THEME.successBorder }
+                                  : { backgroundColor: THEME.warningSoft, borderColor: THEME.warningBorder },
+                              ]}
+                            >
+                              <Text
+                                style={[
+                                  styles.statusBadgeText,
+                                  {
+                                    color:
+                                      item.estado === "Pagada" ? THEME.successStrong : THEME.warningStrong,
+                                  },
+                                ]}
+                              >
+                                {item.estado || "Pagada"}
+                              </Text>
+                            </View>
+                          </View>
+                          <Text style={[styles.clientCardName, { marginTop: 2 }]}>
+                            {item.proveedor_nombre || item.proveedor || "Sin proveedor"}
+                          </Text>
+                          <Text style={styles.clientCardMeta}>
+                            Fecha: {String(item.fecha || "").slice(0, 10)} · {itemsDeCompra.length} ítem(s)
+                          </Text>
+                        </View>
+                        <View style={{ alignItems: "flex-end" }}>
+                          <Text style={[styles.posProdPrice, { fontSize: 16 }]}>
+                            {fmt(Number(item.total) || 0, item.moneda_codigo || monedaSeleccionada)}
+                          </Text>
+                          {Number(item.saldo_pendiente) > 0.01 && (
+                            <Text style={{ fontSize: 11, fontWeight: "700", color: THEME.dangerStrong }}>
+                              Pend.: {fmt(Number(item.saldo_pendiente), item.moneda_codigo || monedaSeleccionada)}
+                            </Text>
+                          )}
+                        </View>
+                      </View>
+                    </TouchableOpacity>
+
+                    {/* Acciones de Compra idénticas a PC: Ver · Devolver · Eliminar */}
+                    <View
+                      style={[
+                        styles.cartHeaderActionsRow,
+                        {
+                          marginTop: 10,
+                          paddingTop: 8,
+                          borderTopWidth: 1,
+                          borderTopColor: THEME.border,
+                        },
+                      ]}
+                    >
+                      <TouchableOpacity
+                        style={styles.cartHeaderActionBtn}
+                        onPress={() => setCompraDetailModal({ compra: item, items: itemsDeCompra })}
+                      >
+                        <Feather name="eye" size={13} color={THEME.foreground} />
+                        <Text style={styles.cartHeaderActionBtnText}>Ver</Text>
+                      </TouchableOpacity>
+
+                      <TouchableOpacity
+                        style={[
+                          styles.cartHeaderActionBtn,
+                          {
+                            backgroundColor: THEME.warningSoft,
+                            borderColor: THEME.warningBorder,
+                          },
+                        ]}
+                        onPress={() => openRetornoDirectoFromCompra(item, itemsDeCompra)}
+                      >
+                        <Feather name="rotate-ccw" size={13} color={THEME.warningStrong} />
+                        <Text style={[styles.cartHeaderActionBtnText, { color: THEME.warningStrong }]}>
+                          Devolver
+                        </Text>
+                      </TouchableOpacity>
+
+                      <TouchableOpacity
+                        style={[
+                          styles.cartHeaderActionBtn,
+                          {
+                            backgroundColor: THEME.dangerSoft,
+                            borderColor: THEME.dangerBorder,
+                          },
+                        ]}
+                        onPress={() => handleDeleteCompra(item)}
+                      >
+                        <Feather name="trash-2" size={13} color={THEME.dangerStrong} />
+                        <Text style={[styles.cartHeaderActionBtnText, { color: THEME.dangerStrong }]}>
+                          Eliminar
+                        </Text>
+                      </TouchableOpacity>
+                    </View>
+                  </View>
+                );
+              }}
+            />
+          )}
+        </View>
+      )}
+
+      {/* ==================== 5E. RETORNOS Y DEVOLUCIONES (/retornos) ==================== */}
+      {route === "retornos" && (
+        <View style={{ flex: 1 }}>
+          <View style={styles.moduleHeaderBar}>
+            <View style={[styles.searchBox, { flex: 1 }]}>
+              <Feather name="search" size={16} color={THEME.mutedForeground} />
+              <TextInput
+                style={styles.searchBoxInput}
+                placeholder="Buscar retorno por número, cliente o motivo..."
+                placeholderTextColor={THEME.mutedForeground}
+                value={retornosSearch}
+                onChangeText={setRetornosSearch}
+              />
+            </View>
+            <TouchableOpacity style={styles.primarySmallBtn} onPress={openNuevoRetornoModal}>
+              <Feather name="plus" size={14} color="#fff" />
+              <Text style={styles.primarySmallBtnText}>Nuevo Retorno</Text>
+            </TouchableOpacity>
+          </View>
+
+          {retornosLoading ? (
+            <View style={{ flex: 1, justifyContent: "center", alignItems: "center" }}>
+              <ActivityIndicator size="large" color={THEME.primary} />
+            </View>
+          ) : (
+            <FlatList
+              data={retornosList.filter(
+                (r: any) =>
+                  !retornosSearch.trim() ||
+                  (r.numero && r.numero.toLowerCase().includes(retornosSearch.toLowerCase())) ||
+                  (r.cliente_nombre && r.cliente_nombre.toLowerCase().includes(retornosSearch.toLowerCase())) ||
+                  (r.motivo && r.motivo.toLowerCase().includes(retornosSearch.toLowerCase()))
+              )}
+              keyExtractor={(item: any) => String(item.id)}
+              contentContainerStyle={{ padding: 12, paddingBottom: 90, gap: 10 }}
+              ListEmptyComponent={
+                <View style={[styles.card, { alignItems: "center", paddingVertical: 30 }]}>
+                  <Feather name="rotate-ccw" size={28} color={THEME.mutedForeground} />
+                  <Text style={[styles.clientCardName, { marginTop: 8 }]}>Sin retornos registrados</Text>
+                  <Text style={styles.clientCardMeta}>
+                    Registra devoluciones de clientes o a proveedores desde aquí.
+                  </Text>
+                </View>
+              }
+              renderItem={({ item }: { item: any }) => {
+                const rItems = retornoItemsList.filter(
+                  (i: any) => String(i.retorno_id) === String(item.id)
+                );
+                return (
+                  <View style={styles.card}>
+                    <View style={styles.creditoCardHeader}>
+                      <View style={{ flex: 1 }}>
+                        <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
+                          <Text style={styles.creditoNumero}>{item.numero}</Text>
+                          <View
+                            style={[
+                              styles.statusBadge,
+                              item.tipo === "Cliente"
+                                ? { backgroundColor: THEME.infoSoft, borderColor: THEME.infoBorder }
+                                : { backgroundColor: THEME.warningSoft, borderColor: THEME.warningBorder },
+                            ]}
+                          >
+                            <Text
+                              style={[
+                                styles.statusBadgeText,
+                                {
+                                  color:
+                                    item.tipo === "Cliente" ? THEME.infoStrong : THEME.warningStrong,
+                                },
+                              ]}
+                            >
+                              {item.tipo}
+                            </Text>
+                          </View>
+                        </View>
+                        <Text style={[styles.clientCardName, { marginTop: 2 }]}>
+                          {item.cliente_nombre || item.proveedor_nombre || "General"}
+                        </Text>
+                        <Text style={styles.clientCardMeta}>
+                          Motivo: {item.motivo} · {String(item.fecha || "").slice(0, 10)}
+                        </Text>
+                        {rItems.length > 0 && (
+                          <Text style={[styles.clientCardMeta, { marginTop: 3 }]}>
+                            {rItems.map((ri: any) => `${ri.cantidad}x ${ri.producto_nombre}`).join(", ")}
+                          </Text>
+                        )}
+                      </View>
+                      <Text style={[styles.posProdPrice, { fontSize: 15 }]}>
+                        {fmt(Number(item.monto) || 0, item.moneda_codigo || monedaSeleccionada)}
+                      </Text>
+                    </View>
+                  </View>
+                );
+              }}
+            />
+          )}
+        </View>
+      )}
+
+      {/* ==================== 5F. TRANSACCIONES DE CAJA (/transacciones) ==================== */}
+      {route === "transacciones" && (
+        <View style={{ flex: 1 }}>
+          <View style={styles.moduleHeaderBar}>
+            <View style={[styles.searchBox, { flex: 1 }]}>
+              <Feather name="search" size={16} color={THEME.mutedForeground} />
+              <TextInput
+                style={styles.searchBoxInput}
+                placeholder="Buscar movimiento de caja..."
+                placeholderTextColor={THEME.mutedForeground}
+                value={transaccionesSearch}
+                onChangeText={setTransaccionesSearch}
+              />
+            </View>
+            <TouchableOpacity style={styles.primarySmallBtn} onPress={openNuevaTransModal}>
+              <Feather name="plus" size={14} color="#fff" />
+              <Text style={styles.primarySmallBtnText}>Registrar</Text>
+            </TouchableOpacity>
+          </View>
+
+          {transaccionesLoading ? (
+            <View style={{ flex: 1, justifyContent: "center", alignItems: "center" }}>
+              <ActivityIndicator size="large" color={THEME.primary} />
+            </View>
+          ) : (
+            <FlatList
+              data={transaccionesList.filter(
+                (t: any) =>
+                  !transaccionesSearch.trim() ||
+                  (t.descripcion &&
+                    t.descripcion.toLowerCase().includes(transaccionesSearch.toLowerCase())) ||
+                  (t.caja_nombre &&
+                    t.caja_nombre.toLowerCase().includes(transaccionesSearch.toLowerCase()))
+              )}
+              keyExtractor={(item: any) => String(item.id)}
+              contentContainerStyle={{ padding: 12, paddingBottom: 90, gap: 10 }}
+              renderItem={({ item }: { item: any }) => {
+                const isEntrada = item.tipo === "Entrada";
+                return (
+                  <View style={styles.card}>
+                    <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center" }}>
+                      <View style={{ flex: 1, paddingRight: 8 }}>
+                        <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
+                          <View
+                            style={[
+                              styles.statusBadge,
+                              isEntrada
+                                ? { backgroundColor: THEME.successSoft, borderColor: THEME.successBorder }
+                                : { backgroundColor: THEME.dangerSoft, borderColor: THEME.dangerBorder },
+                            ]}
+                          >
+                            <Text
+                              style={[
+                                styles.statusBadgeText,
+                                { color: isEntrada ? THEME.successStrong : THEME.dangerStrong },
+                              ]}
+                            >
+                              {isEntrada ? "↓ Entrada" : "↑ Salida"}
+                            </Text>
+                          </View>
+                          <Text style={styles.clientCardMeta}>{item.caja_nombre}</Text>
+                        </View>
+                        <Text style={[styles.clientCardName, { marginTop: 4 }]}>{item.descripcion}</Text>
+                        <Text style={styles.clientCardMeta}>
+                          {item.fecha ? new Date(item.fecha).toLocaleString() : ""}
+                        </Text>
+                      </View>
+                      <Text
+                        style={{
+                          fontSize: 15,
+                          fontWeight: "900",
+                          color: isEntrada ? THEME.successStrong : THEME.dangerStrong,
+                        }}
+                      >
+                        {isEntrada ? "+" : "-"}
+                        {fmt(Number(item.monto) || 0, item.moneda_codigo || monedaSeleccionada)}
+                      </Text>
+                    </View>
+                  </View>
+                );
+              }}
+            />
+          )}
+        </View>
+      )}
+
+      {/* ==================== 5G. PROVEEDORES (/proveedores) ==================== */}
+      {route === "proveedores" && (
+        <View style={{ flex: 1 }}>
+          <View style={styles.moduleHeaderBar}>
+            <View style={[styles.searchBox, { flex: 1 }]}>
+              <Feather name="search" size={16} color={THEME.mutedForeground} />
+              <TextInput
+                style={styles.searchBoxInput}
+                placeholder="Buscar proveedor por nombre, RIF o tel..."
+                placeholderTextColor={THEME.mutedForeground}
+                value={provSearch}
+                onChangeText={setProvSearch}
+              />
+            </View>
+            <TouchableOpacity style={styles.primarySmallBtn} onPress={() => openProveedorModal(null)}>
+              <Feather name="plus" size={14} color="#fff" />
+              <Text style={styles.primarySmallBtnText}>Nuevo</Text>
+            </TouchableOpacity>
+          </View>
+
+          <FlatList
+            data={proveedoresList.filter(
+              (p: any) =>
+                !provSearch.trim() ||
+                p.nombre.toLowerCase().includes(provSearch.toLowerCase()) ||
+                (p.documento && p.documento.toLowerCase().includes(provSearch.toLowerCase()))
+            )}
+            keyExtractor={(item: any) => String(item.id)}
+            contentContainerStyle={{ padding: 12, paddingBottom: 90, gap: 10 }}
+            ListEmptyComponent={
+              <View style={[styles.card, { alignItems: "center", paddingVertical: 30 }]}>
+                <Feather name="truck" size={28} color={THEME.mutedForeground} />
+                <Text style={[styles.clientCardName, { marginTop: 8 }]}>Sin proveedores registrados</Text>
+                <Text style={styles.clientCardMeta}>Pulsa "Nuevo" para registrar un proveedor.</Text>
+              </View>
+            }
+            renderItem={({ item }: { item: any }) => (
+              <View style={styles.card}>
+                <View style={styles.creditoCardHeader}>
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.clientCardName}>{item.nombre}</Text>
+                    <Text style={styles.clientCardMeta}>
+                      {item.documento ? `RIF/Doc: ${item.documento}` : "Sin documento"}
+                      {item.telefono ? ` · Tel: ${item.telefono}` : ""}
+                    </Text>
+                    {(item.contacto || item.ciudad) && (
+                      <Text style={styles.clientCardMeta}>
+                        {item.contacto ? `Contacto: ${item.contacto}` : ""}
+                        {item.ciudad ? ` · ${item.ciudad}` : ""}
+                      </Text>
+                    )}
+                  </View>
+                  <View style={{ flexDirection: "row", gap: 6 }}>
+                    <TouchableOpacity style={styles.outlineSmallBtn} onPress={() => openProveedorModal(item)}>
+                      <Feather name="edit-2" size={13} color={THEME.primary600} />
+                      <Text style={styles.outlineSmallBtnText}>Editar</Text>
+                    </TouchableOpacity>
+                    <TouchableOpacity
+                      style={[styles.outlineSmallBtn, { borderColor: THEME.dangerBorder, backgroundColor: THEME.dangerSoft }]}
+                      onPress={() => handleDeleteProveedor(item)}
+                    >
+                      <Feather name="trash-2" size={13} color={THEME.dangerStrong} />
+                    </TouchableOpacity>
+                  </View>
+                </View>
+              </View>
+            )}
+          />
+        </View>
+      )}
+
+      {/* ==================== 5H. MÉTODOS DE PAGO (/metodos_pago) ==================== */}
+      {route === "metodos_pago" && (
+        <View style={{ flex: 1 }}>
+          <View style={styles.moduleHeaderBar}>
+            <Text style={[styles.cardSectionTitle, { flex: 1 }]}>
+              Métodos de Pago ({metodosPago.length})
+            </Text>
+            <TouchableOpacity style={styles.primarySmallBtn} onPress={() => openMetodoPagoModal(null)}>
+              <Feather name="plus" size={14} color="#fff" />
+              <Text style={styles.primarySmallBtnText}>Nuevo Método</Text>
+            </TouchableOpacity>
+          </View>
+
+          <FlatList
+            data={metodosPago}
+            keyExtractor={(item) => String(item.id)}
+            contentContainerStyle={{ padding: 12, paddingBottom: 90, gap: 10 }}
+            renderItem={({ item }) => (
+              <View style={styles.card}>
+                <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center" }}>
+                  <View style={{ flexDirection: "row", alignItems: "center", gap: 10, flex: 1 }}>
+                    <View style={styles.posProdIconWrap}>
+                      <Text style={{ fontSize: 16 }}>{getMetodoEmoji(item.tipo, item.nombre)}</Text>
+                    </View>
+                    <View style={{ flex: 1 }}>
+                      <Text style={styles.clientCardName}>{item.nombre}</Text>
+                      <Text style={styles.clientCardMeta}>
+                        Tipo: {item.tipo} · Moneda: {item.moneda_codigo || monedaSeleccionada}
+                      </Text>
+                    </View>
+                  </View>
+                  <View style={{ flexDirection: "row", gap: 6 }}>
+                    <TouchableOpacity style={styles.outlineSmallBtn} onPress={() => openMetodoPagoModal(item)}>
+                      <Feather name="edit-2" size={13} color={THEME.primary600} />
+                      <Text style={styles.outlineSmallBtnText}>Editar</Text>
+                    </TouchableOpacity>
+                    <TouchableOpacity
+                      style={[styles.outlineSmallBtn, { borderColor: THEME.dangerBorder, backgroundColor: THEME.dangerSoft }]}
+                      onPress={() => handleDeleteMetodoPago(item)}
+                    >
+                      <Feather name="trash-2" size={13} color={THEME.dangerStrong} />
+                    </TouchableOpacity>
+                  </View>
+                </View>
+              </View>
+            )}
+          />
+        </View>
+      )}
+
+      {/* ==================== 5I. MONEDAS Y TASAS (/monedas) ==================== */}
+      {route === "monedas" && (
+        <View style={{ flex: 1 }}>
+          <View style={styles.moduleHeaderBar}>
+            <Text style={[styles.cardSectionTitle, { flex: 1 }]}>
+              Monedas y Tasas de Cambio ({monedas.length})
+            </Text>
+            <TouchableOpacity style={styles.primarySmallBtn} onPress={() => openMonedaModal(null)}>
+              <Feather name="plus" size={14} color="#fff" />
+              <Text style={styles.primarySmallBtnText}>Nueva Moneda</Text>
+            </TouchableOpacity>
+          </View>
+
+          <FlatList
+            data={monedas}
+            keyExtractor={(item) => String(item.id)}
+            contentContainerStyle={{ padding: 12, paddingBottom: 90, gap: 10 }}
+            renderItem={({ item }) => {
+              const directa = tasaDirectaUsd(item);
+              return (
+                <View style={styles.card}>
+                  <View style={styles.creditoCardHeader}>
+                    <View style={{ flex: 1 }}>
+                      <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
+                        <Text style={styles.clientCardName}>
+                          {item.nombre} ({item.codigo}) · {item.simbolo}
+                        </Text>
+                        {item.es_base === 1 && (
+                          <View style={[styles.statusBadge, { backgroundColor: THEME.secondary, borderColor: THEME.primary }]}>
+                            <Text style={[styles.statusBadgeText, { color: THEME.primary600 }]}>Moneda Base</Text>
+                          </View>
+                        )}
+                      </View>
+                      <Text style={[styles.clientCardMeta, { marginTop: 4 }]}>
+                        Tasa Oficial: 1 Base = {item.simbolo} {Number(item.tasa).toLocaleString("es-VE", { maximumFractionDigits: 4 })}
+                      </Text>
+                      {directa !== null && (
+                        <Text style={[styles.clientCardMeta, { color: THEME.successStrong, fontWeight: "700" }]}>
+                          Tasa Directa USD: {item.simbolo} {Number(directa).toLocaleString("es-VE", { maximumFractionDigits: 4 })} / USD
+                        </Text>
+                      )}
+                    </View>
+                    <TouchableOpacity style={styles.primarySmallBtn} onPress={() => openMonedaModal(item)}>
+                      <Feather name="edit-2" size={13} color="#fff" />
+                      <Text style={styles.primarySmallBtnText}>Actualizar Tasa</Text>
+                    </TouchableOpacity>
+                  </View>
+                </View>
+              );
+            }}
+          />
+        </View>
+      )}
+
+      {/* ==================== 5J. USUARIOS Y PERMISOS (/usuarios) ==================== */}
+      {route === "usuarios" && (
+        <View style={{ flex: 1 }}>
+          <View style={styles.moduleHeaderBar}>
+            <Text style={[styles.cardSectionTitle, { flex: 1 }]}>
+              Usuarios del Sistema ({usuariosList.length})
+            </Text>
+            <TouchableOpacity style={styles.primarySmallBtn} onPress={() => openUsuarioModal(null)}>
+              <Feather name="user-plus" size={14} color="#fff" />
+              <Text style={styles.primarySmallBtnText}>Nuevo Usuario</Text>
+            </TouchableOpacity>
+          </View>
+
+          {usuariosLoading ? (
+            <View style={{ flex: 1, justifyContent: "center", alignItems: "center" }}>
+              <ActivityIndicator size="large" color={THEME.primary} />
+            </View>
+          ) : (
+            <FlatList
+              data={usuariosList}
+              keyExtractor={(item: any) => String(item.id)}
+              contentContainerStyle={{ padding: 12, paddingBottom: 90, gap: 10 }}
+              renderItem={({ item }: { item: any }) => (
+                <View style={styles.card}>
+                  <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center" }}>
+                    <View style={{ flex: 1 }}>
+                      <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
+                        <Text style={styles.clientCardName}>{item.name}</Text>
+                        <View
+                          style={[
+                            styles.statusBadge,
+                            item.role === "admin"
+                              ? { backgroundColor: THEME.secondary, borderColor: THEME.primary }
+                              : { backgroundColor: THEME.infoSoft, borderColor: THEME.infoBorder },
+                          ]}
+                        >
+                          <Text
+                            style={[
+                              styles.statusBadgeText,
+                              { color: item.role === "admin" ? THEME.primary600 : THEME.infoStrong },
+                            ]}
+                          >
+                            {String(item.role || "usuario").toUpperCase()}
+                          </Text>
+                        </View>
+                      </View>
+                      <Text style={styles.clientCardMeta}>{item.email}</Text>
+                    </View>
+                    <View style={{ flexDirection: "row", gap: 6 }}>
+                      <TouchableOpacity style={styles.outlineSmallBtn} onPress={() => openUsuarioModal(item)}>
+                        <Feather name="edit-2" size={13} color={THEME.primary600} />
+                        <Text style={styles.outlineSmallBtnText}>Editar</Text>
+                      </TouchableOpacity>
+                      {item.id !== session?.user?.id && (
+                        <TouchableOpacity
+                          style={[styles.outlineSmallBtn, { borderColor: THEME.dangerBorder, backgroundColor: THEME.dangerSoft }]}
+                          onPress={() => handleDeleteUsuario(item)}
+                        >
+                          <Feather name="trash-2" size={13} color={THEME.dangerStrong} />
+                        </TouchableOpacity>
+                      )}
+                    </View>
+                  </View>
+                </View>
+              )}
+            />
+          )}
+        </View>
+      )}
+
+      {/* ==================== 6. PANEL DE CONTROL (/dashboard) ==================== */}
+      {route === "dashboard" && (
         <ScrollView contentContainerStyle={{ padding: 12, paddingBottom: 90, gap: 12 }}>
           <View style={styles.creditosKpiRow}>
             <View style={styles.kpiCard}>
@@ -6267,16 +10971,32 @@ export default function App() {
             </View>
           </View>
 
-          {/* Accesos Directos idénticos al sistema */}
+          {/* Accesos Directos a todos los módulos */}
           <View style={styles.card}>
-            <Text style={styles.cardSectionTitle}>Módulos Principales</Text>
+            <Text style={styles.cardSectionTitle}>Módulos del Sistema</Text>
             <View style={styles.quickGrid}>
               <TouchableOpacity style={styles.quickTile} onPress={() => setRoute("pos")}>
                 <View style={[styles.quickTileIcon, { backgroundColor: THEME.accent }]}>
                   <Feather name="shopping-cart" size={20} color={THEME.primary} />
                 </View>
                 <Text style={styles.quickTileTitle}>Punto de Venta</Text>
-                <Text style={styles.quickTileSub}>Contado, Crédito y Mixto</Text>
+                <Text style={styles.quickTileSub}>Ventas y Escáner</Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity style={styles.quickTile} onPress={() => setRoute("productos")}>
+                <View style={[styles.quickTileIcon, { backgroundColor: THEME.secondary }]}>
+                  <Feather name="package" size={20} color={THEME.primary600} />
+                </View>
+                <Text style={styles.quickTileTitle}>Productos</Text>
+                <Text style={styles.quickTileSub}>Crear, Editar y Precios</Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity style={styles.quickTile} onPress={() => setRoute("compras")}>
+                <View style={[styles.quickTileIcon, { backgroundColor: THEME.infoSoft }]}>
+                  <Feather name="shopping-bag" size={20} color={THEME.infoStrong} />
+                </View>
+                <Text style={styles.quickTileTitle}>Compras</Text>
+                <Text style={styles.quickTileSub}>Abastecer Inventario</Text>
               </TouchableOpacity>
 
               <TouchableOpacity style={styles.quickTile} onPress={() => setRoute("clientes")}>
@@ -6292,7 +11012,7 @@ export default function App() {
                   <Feather name="credit-card" size={20} color={THEME.dangerStrong} />
                 </View>
                 <Text style={styles.quickTileTitle}>Deudores</Text>
-                <Text style={styles.quickTileSub}>Cuentas por Cobrar y Abonos</Text>
+                <Text style={styles.quickTileSub}>Cuentas por Cobrar</Text>
               </TouchableOpacity>
 
               <TouchableOpacity style={styles.quickTile} onPress={() => setRoute("ventas")}>
@@ -6302,129 +11022,282 @@ export default function App() {
                 <Text style={styles.quickTileTitle}>Ventas</Text>
                 <Text style={styles.quickTileSub}>Historial y Recibos</Text>
               </TouchableOpacity>
+
+              <TouchableOpacity style={styles.quickTile} onPress={() => setRoute("cajas")}>
+                <View style={[styles.quickTileIcon, { backgroundColor: THEME.warningSoft }]}>
+                  <Feather name="inbox" size={20} color={THEME.warningStrong} />
+                </View>
+                <Text style={styles.quickTileTitle}>Cajas y Turnos</Text>
+                <Text style={styles.quickTileSub}>Apertura y Cierre</Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity style={styles.quickTile} onPress={() => setRoute("config")}>
+                <View style={[styles.quickTileIcon, { backgroundColor: THEME.inputBg }]}>
+                  <Feather name="settings" size={20} color={THEME.foreground} />
+                </View>
+                <Text style={styles.quickTileTitle}>Configuración</Text>
+                <Text style={styles.quickTileSub}>Tasas, Empresa y Motor</Text>
+              </TouchableOpacity>
             </View>
           </View>
+        </ScrollView>
+      )}
 
-          {/* Tasas de Cambio Activas (con detalle de Directo USD y Referencia) */}
-          <View style={styles.card}>
-            <Text style={styles.cardSectionTitle}>Monedas y Tasas Sincronizadas</Text>
-            <View style={{ gap: 8, marginTop: 8 }}>
-              {monedas.map((m) => {
-                const refMon = m.tasa_ref_moneda_id
-                  ? monedas.find((x) => String(x.id) === String(m.tasa_ref_moneda_id))
-                  : baseMonedaSistema;
-                const directa = tasaDirectaUsd(m);
+      {/* ==================== 7. CONFIGURACIÓN COMPLETA (/config) ==================== */}
+      {route === "config" && (
+        <ScrollView contentContainerStyle={{ padding: 12, paddingBottom: 90, gap: 12 }} keyboardShouldPersistTaps="handled">
+          {/* Sub-pestañas de Configuración */}
+          <View style={{ flexDirection: "row", gap: 8 }}>
+            <TouchableOpacity
+              style={[styles.posModeTab, configSubTab === "motor" && styles.posModeTabActive]}
+              onPress={() => setConfigSubTab("motor")}
+            >
+              <Feather name="cpu" size={13} color={configSubTab === "motor" ? "#fff" : THEME.foreground} />
+              <Text style={[styles.posModeTabText, configSubTab === "motor" && styles.posModeTabTextActive]}>
+                Motor y Tasas
+              </Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={[styles.posModeTab, configSubTab === "empresa" && styles.posModeTabActive]}
+              onPress={() => setConfigSubTab("empresa")}
+            >
+              <Feather name="briefcase" size={13} color={configSubTab === "empresa" ? "#fff" : THEME.foreground} />
+              <Text style={[styles.posModeTabText, configSubTab === "empresa" && styles.posModeTabTextActive]}>
+                Empresa
+              </Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={[styles.posModeTab, configSubTab === "sync" && styles.posModeTabActive]}
+              onPress={() => setConfigSubTab("sync")}
+            >
+              <Feather name="refresh-cw" size={13} color={configSubTab === "sync" ? "#fff" : THEME.foreground} />
+              <Text style={[styles.posModeTabText, configSubTab === "sync" && styles.posModeTabTextActive]}>
+                Nube
+              </Text>
+            </TouchableOpacity>
+          </View>
 
-                return (
-                  <View
-                    key={m.id}
-                    style={{
-                      backgroundColor: THEME.inputBg,
-                      borderWidth: 1,
-                      borderColor: THEME.border,
-                      borderRadius: 8,
-                      padding: 10,
-                      gap: 4,
-                    }}
-                  >
-                    <View style={{ flexDirection: "row", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
-                      <Text style={{ fontSize: 13, fontWeight: "800", color: THEME.foreground }}>
-                        {m.nombre} ({m.codigo})
+          {configSubTab === "motor" && (
+            <>
+              <View style={styles.card}>
+                <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center" }}>
+                  <Text style={styles.cardSectionTitle}>Monedas y Tasas Activas</Text>
+                  <TouchableOpacity style={styles.outlineSmallBtn} onPress={() => setRoute("monedas")}>
+                    <Feather name="edit-2" size={12} color={THEME.primary600} />
+                    <Text style={[styles.outlineSmallBtnText, { color: THEME.primary600 }]}>Gestionar Monedas</Text>
+                  </TouchableOpacity>
+                </View>
+                <View style={{ gap: 8, marginTop: 8 }}>
+                  {monedas.map((m) => {
+                    const directa = tasaDirectaUsd(m);
+                    return (
+                      <TouchableOpacity
+                        key={m.id}
+                        style={{
+                          backgroundColor: THEME.inputBg,
+                          borderWidth: 1,
+                          borderColor: THEME.border,
+                          borderRadius: 8,
+                          padding: 10,
+                          flexDirection: "row",
+                          justifyContent: "space-between",
+                          alignItems: "center",
+                        }}
+                        onPress={() => openMonedaModal(m)}
+                      >
+                        <View style={{ flex: 1 }}>
+                          <Text style={{ fontSize: 13, fontWeight: "800", color: THEME.foreground }}>
+                            {m.nombre} ({m.codigo}) {m.es_base === 1 ? "· Base" : ""}
+                          </Text>
+                          {m.es_base !== 1 && (
+                            <Text style={styles.clientCardMeta}>
+                              Tasa: {m.simbolo} {Number(m.tasa).toLocaleString("es-VE", { maximumFractionDigits: 4 })}
+                              {directa !== null ? ` · Directa USD: ${Number(directa).toLocaleString("es-VE", { maximumFractionDigits: 4 })}` : ""}
+                            </Text>
+                          )}
+                        </View>
+                        <Feather name="edit-2" size={14} color={THEME.primary600} />
+                      </TouchableOpacity>
+                    );
+                  })}
+                </View>
+              </View>
+
+              <View style={styles.card}>
+                <Text style={styles.cardSectionTitle}>Motor de Conversión Global (CPP)</Text>
+                <Text style={styles.fieldLabel}>MODO DE CONVERSIÓN EN VENTAS</Text>
+                <View style={{ flexDirection: "row", gap: 8 }}>
+                  {(["directa", "triangulacion"] as const).map((modo) => (
+                    <TouchableOpacity
+                      key={`v-${modo}`}
+                      style={[styles.posModeTab, cfgModoVentas === modo && styles.posModeTabActive]}
+                      onPress={() => setCfgModoVentas(modo)}
+                    >
+                      <Text style={[styles.posModeTabText, cfgModoVentas === modo && styles.posModeTabTextActive]}>
+                        {modo === "directa" ? "Directa" : "Triangulación"}
                       </Text>
-                      {m.es_base === 1 && (
-                        <View
-                          style={[
-                            styles.statusBadge,
-                            { backgroundColor: THEME.secondary, borderColor: THEME.primary },
-                          ]}
-                        >
-                          <Text style={[styles.statusBadgeText, { color: THEME.primary600 }]}>
-                            Moneda Base
-                          </Text>
-                        </View>
-                      )}
-                      {directa !== null && (
-                        <View
-                          style={[
-                            styles.statusBadge,
-                            { backgroundColor: THEME.successSoft, borderColor: THEME.successBorder },
-                          ]}
-                        >
-                          <Text style={[styles.statusBadgeText, { color: THEME.successStrong }]}>
-                            USD ↔ {m.codigo} Directo
-                          </Text>
-                        </View>
-                      )}
-                    </View>
+                    </TouchableOpacity>
+                  ))}
+                </View>
 
-                    {m.es_base !== 1 && (
-                      <View style={{ flexDirection: "row", justifyContent: "space-between", flexWrap: "wrap", gap: 6 }}>
-                        <Text style={styles.clientCardMeta}>
-                          Tasa Ref ({refMon?.codigo || "USD"}): 1 {refMon?.codigo || "USD"} = {m.simbolo}{" "}
-                          {Number(m.tasa).toLocaleString("es-VE", { maximumFractionDigits: 4 })} {m.codigo}
-                        </Text>
-                        {directa !== null && (
-                          <Text style={[styles.clientCardMeta, { color: THEME.successStrong, fontWeight: "700" }]}>
-                            Tasa Directa USD: {m.simbolo} {Number(directa).toLocaleString("es-VE", { maximumFractionDigits: 4 })} / USD
-                          </Text>
-                        )}
-                      </View>
+                <Text style={styles.fieldLabel}>MODO DE CONVERSIÓN EN COMPRAS</Text>
+                <View style={{ flexDirection: "row", gap: 8 }}>
+                  {(["directa", "triangulacion"] as const).map((modo) => (
+                    <TouchableOpacity
+                      key={`c-${modo}`}
+                      style={[styles.posModeTab, cfgModoCompras === modo && styles.posModeTabActive]}
+                      onPress={() => setCfgModoCompras(modo)}
+                    >
+                      <Text style={[styles.posModeTabText, cfgModoCompras === modo && styles.posModeTabTextActive]}>
+                        {modo === "directa" ? "Directa" : "Triangulación"}
+                      </Text>
+                    </TouchableOpacity>
+                  ))}
+                </View>
+
+                <View style={{ flexDirection: "row", gap: 8, marginTop: 12 }}>
+                  <TouchableOpacity
+                    style={[styles.posModeTab, cfgRedondearVentas && styles.posModeTabActive]}
+                    onPress={() => setCfgRedondearVentas((v) => !v)}
+                  >
+                    <Feather
+                      name={cfgRedondearVentas ? "check-square" : "square"}
+                      size={14}
+                      color={cfgRedondearVentas ? "#fff" : THEME.foreground}
+                    />
+                    <Text style={[styles.posModeTabText, cfgRedondearVentas && styles.posModeTabTextActive]}>
+                      Redondear Ventas
+                    </Text>
+                  </TouchableOpacity>
+
+                  <TouchableOpacity
+                    style={[styles.posModeTab, cfgActualizarEnCompra && styles.posModeTabActive]}
+                    onPress={() => setCfgActualizarEnCompra((v) => !v)}
+                  >
+                    <Feather
+                      name={cfgActualizarEnCompra ? "check-square" : "square"}
+                      size={14}
+                      color={cfgActualizarEnCompra ? "#fff" : THEME.foreground}
+                    />
+                    <Text style={[styles.posModeTabText, cfgActualizarEnCompra && styles.posModeTabTextActive]}>
+                      Auto-Precio en Compra
+                    </Text>
+                  </TouchableOpacity>
+                </View>
+
+                <Text style={styles.fieldLabel}>% DE GANANCIA POR DEFECTO</Text>
+                <TextInput
+                  style={styles.input}
+                  keyboardType="decimal-pad"
+                  value={cfgGananciaDefecto}
+                  onChangeText={setCfgGananciaDefecto}
+                />
+
+                <View style={{ flexDirection: "row", gap: 8, marginTop: 14 }}>
+                  <TouchableOpacity
+                    style={[styles.primaryBtn, { flex: 1 }]}
+                    onPress={handleSaveConfigGlobal}
+                    disabled={savingConfigGlobal}
+                  >
+                    {savingConfigGlobal ? (
+                      <ActivityIndicator color="#fff" />
+                    ) : (
+                      <>
+                        <Feather name="save" size={15} color="#fff" />
+                        <Text style={styles.primaryBtnText}>Guardar Reglas</Text>
+                      </>
                     )}
-                  </View>
-                );
-              })}
-            </View>
-          </View>
+                  </TouchableOpacity>
 
-          {/* Motor de Conversión (CPP) sincronizado con la principal */}
-          <View style={styles.card}>
-            <Text style={styles.cardSectionTitle}>Reglas del Motor de Conversión (CPP)</Text>
-            <View style={{ marginTop: 6, gap: 4 }}>
-              <View style={styles.summaryRow}>
-                <Text style={styles.summaryLabel}>Conversión en Ventas:</Text>
-                <Text style={[styles.summaryVal, { color: THEME.primary600 }]}>
-                  {cfgGlobal.metodo_conversion_ventas === "triangulacion"
-                    ? `Triangulación (vía ${
-                        monedas.find((x) => String(x.id) === String(cfgGlobal.moneda_transito_ventas_id))
-                          ?.codigo || "Base"
-                      })`
-                    : "Directa"}
-                </Text>
+                  <TouchableOpacity
+                    style={[styles.outlineSmallBtn, { paddingHorizontal: 14 }]}
+                    onPress={handleRecalcularPrecios}
+                    disabled={recalculandoPrecios}
+                  >
+                    {recalculandoPrecios ? (
+                      <ActivityIndicator color={THEME.primary} />
+                    ) : (
+                      <>
+                        <Feather name="refresh-cw" size={14} color={THEME.primary600} />
+                        <Text style={[styles.outlineSmallBtnText, { color: THEME.primary600 }]}>
+                          Recalcular Precios
+                        </Text>
+                      </>
+                    )}
+                  </TouchableOpacity>
+                </View>
               </View>
-              <View style={styles.summaryRow}>
-                <Text style={styles.summaryLabel}>Conversión en Compras:</Text>
-                <Text style={styles.summaryVal}>
-                  {cfgGlobal.metodo_conversion_compras === "triangulacion"
-                    ? `Triangulación (vía ${
-                        monedas.find((x) => String(x.id) === String(cfgGlobal.moneda_transito_compras_id))
-                          ?.codigo || "Base"
-                      })`
-                    : "Directa"}
-                </Text>
-              </View>
-              <View style={styles.summaryRow}>
-                <Text style={styles.summaryLabel}>Redondeo de Precios:</Text>
-                <Text style={styles.summaryVal}>
-                  {cfgGlobal.redondeo_activo
-                    ? `Activo (Múltiplo ${cfgGlobal.redondeo_multiplo || 0})`
-                    : "Inactivo"}
-                </Text>
-              </View>
-            </View>
-          </View>
+            </>
+          )}
 
-          {/* Estado de Sincronización Automática */}
-          <View style={styles.card}>
-            <Text style={styles.cardSectionTitle}>Sincronización en Tiempo Real</Text>
-            <Text style={styles.clientCardMeta}>Servidor: {session.serverUrl}</Text>
-            <Text style={styles.clientCardMeta}>
-              Última actualización:{" "}
-              {lastSyncIso ? new Date(lastSyncIso).toLocaleTimeString() : "Recién conectado"}
-            </Text>
-            <Text style={[styles.clientCardMeta, { color: THEME.successStrong, marginTop: 4 }]}>
-              ✓ Sincronización automática activa en segundo plano (cada 10s y al registrar operaciones).
-            </Text>
-          </View>
+          {configSubTab === "empresa" && (
+            <View style={styles.card}>
+              <Text style={styles.cardSectionTitle}>Datos del Negocio / Empresa</Text>
+              <Text style={styles.fieldLabel}>NOMBRE DE LA EMPRESA</Text>
+              <TextInput
+                style={styles.input}
+                value={empresaConfig.empresa_nombre || ""}
+                onChangeText={(v) => setEmpresaConfig((p) => ({ ...p, empresa_nombre: v }))}
+              />
+              <Text style={styles.fieldLabel}>RIF / NIT / DOCUMENTO</Text>
+              <TextInput
+                style={styles.input}
+                value={empresaConfig.empresa_rif || ""}
+                onChangeText={(v) => setEmpresaConfig((p) => ({ ...p, empresa_rif: v }))}
+              />
+              <Text style={styles.fieldLabel}>TELÉFONO</Text>
+              <TextInput
+                style={styles.input}
+                value={empresaConfig.empresa_telefono || ""}
+                onChangeText={(v) => setEmpresaConfig((p) => ({ ...p, empresa_telefono: v }))}
+              />
+              <Text style={styles.fieldLabel}>DIRECCIÓN FISCAL</Text>
+              <TextInput
+                style={styles.input}
+                value={empresaConfig.empresa_direccion || ""}
+                onChangeText={(v) => setEmpresaConfig((p) => ({ ...p, empresa_direccion: v }))}
+              />
+              <Text style={styles.fieldLabel}>IVA PORCENTAJE (%)</Text>
+              <TextInput
+                style={styles.input}
+                keyboardType="decimal-pad"
+                value={empresaConfig.iva_porcentaje || "16"}
+                onChangeText={(v) => setEmpresaConfig((p) => ({ ...p, iva_porcentaje: v }))}
+              />
+              <TouchableOpacity
+                style={[styles.primaryBtn, { marginTop: 16 }]}
+                onPress={handleSaveEmpresaConfig}
+                disabled={savingConfigGlobal}
+              >
+                <Feather name="save" size={16} color="#fff" />
+                <Text style={styles.primaryBtnText}>Guardar Datos de Empresa</Text>
+              </TouchableOpacity>
+            </View>
+          )}
+
+          {configSubTab === "sync" && (
+            <View style={styles.card}>
+              <Text style={styles.cardSectionTitle}>Sincronización en Tiempo Real</Text>
+              <Text style={styles.clientCardMeta}>Servidor: {session.serverUrl}</Text>
+              <Text style={styles.clientCardMeta}>
+                Última actualización:{" "}
+                {lastSyncIso ? new Date(lastSyncIso).toLocaleTimeString() : "Recién conectado"}
+              </Text>
+              <Text style={[styles.clientCardMeta, { color: THEME.successStrong, marginTop: 4 }]}>
+                ✓ Sincronización bidireccional activa en segundo plano.
+              </Text>
+              <TouchableOpacity
+                style={[styles.primaryBtn, { marginTop: 14 }]}
+                onPress={runSilentSync}
+                disabled={syncing}
+              >
+                <Feather name="refresh-cw" size={16} color="#fff" />
+                <Text style={styles.primaryBtnText}>
+                  {syncing ? "Sincronizando..." : "Sincronizar Ahora"}
+                </Text>
+              </TouchableOpacity>
+            </View>
+          )}
         </ScrollView>
       )}
 
@@ -6553,22 +11426,46 @@ export default function App() {
                   group: "CATÁLOGO",
                   items: [
                     { id: "productos" as AppRoute, label: "Productos", icon: "package" },
-                    { id: "kardex" as AppRoute, label: "Kardex", icon: "activity" },
+                    { id: "categorias" as AppRoute, label: "Categorías", icon: "folder" },
+                    { id: "marcas" as AppRoute, label: "Marcas", icon: "tag" },
                   ],
                 },
                 {
                   group: "OPERACIONES",
                   items: [
                     { id: "pos" as AppRoute, label: "Punto de Venta", icon: "shopping-cart" },
+                    { id: "compras" as AppRoute, label: "Compras", icon: "shopping-bag" },
                     { id: "ventas" as AppRoute, label: "Ventas", icon: "trending-up" },
+                    { id: "retornos" as AppRoute, label: "Retornos", icon: "rotate-ccw" },
+                    { id: "kardex" as AppRoute, label: "Kardex", icon: "activity" },
+                  ],
+                },
+                {
+                  group: "FINANZAS",
+                  items: [
                     { id: "cajas" as AppRoute, label: "Cajas y Turnos", icon: "inbox" },
+                    { id: "transacciones" as AppRoute, label: "Transacciones", icon: "repeat" },
+                  ],
+                },
+                {
+                  group: "MAESTROS",
+                  items: [
+                    { id: "proveedores" as AppRoute, label: "Proveedores", icon: "truck" },
+                    { id: "metodos_pago" as AppRoute, label: "Métodos de Pago", icon: "credit-card" },
+                    { id: "monedas" as AppRoute, label: "Monedas y Tasas", icon: "dollar-sign" },
+                  ],
+                },
+                {
+                  group: "ANÁLISIS",
+                  items: [
                     { id: "reportes" as AppRoute, label: "Reportes", icon: "bar-chart-2" },
                   ],
                 },
                 {
                   group: "SISTEMA",
                   items: [
-                    { id: "config" as AppRoute, label: "Sincronización y Tasas", icon: "settings" },
+                    { id: "usuarios" as AppRoute, label: "Usuarios", icon: "shield" },
+                    { id: "config" as AppRoute, label: "Configuración", icon: "settings" },
                   ],
                 },
               ].map((section) => (
@@ -8785,10 +13682,471 @@ export default function App() {
                     Obs: {ventaDetailModal.venta.observaciones}
                   </Text>
                 ) : null}
+
+                {/* Botones de Acción de Factura (igual que en PC: Pagar · Retornar · Eliminar) */}
+                {(() => {
+                  const v = ventaDetailModal.venta;
+                  const creditoDeVenta = (creditosData.creditos || []).find(
+                    (c) =>
+                      (c.venta_id && String(c.venta_id) === String(v.id)) ||
+                      (c.venta_numero && c.venta_numero === v.numero)
+                  );
+                  const tieneDeudaPendiente =
+                    v.estado !== "Pagada" || Boolean(creditoDeVenta && creditoDeVenta.saldo > 0.01);
+
+                  return (
+                    <View
+                      style={{
+                        flexDirection: "row",
+                        gap: 8,
+                        marginTop: 14,
+                        paddingTop: 10,
+                        borderTopWidth: 1,
+                        borderTopColor: THEME.border,
+                      }}
+                    >
+                      {tieneDeudaPendiente && (
+                        <TouchableOpacity
+                          style={[
+                            styles.cartHeaderActionBtn,
+                            {
+                              flex: 1,
+                              backgroundColor: THEME.successSoft,
+                              borderColor: THEME.successBorder,
+                            },
+                          ]}
+                          onPress={() => handlePagarVentaCredito(v)}
+                        >
+                          <Feather name="dollar-sign" size={14} color={THEME.successStrong} />
+                          <Text
+                            style={[
+                              styles.cartHeaderActionBtnText,
+                              { color: THEME.successStrong },
+                            ]}
+                          >
+                            Pagar
+                          </Text>
+                        </TouchableOpacity>
+                      )}
+
+                      <TouchableOpacity
+                        style={[
+                          styles.cartHeaderActionBtn,
+                          {
+                            flex: 1,
+                            backgroundColor: THEME.warningSoft,
+                            borderColor: THEME.warningBorder,
+                          },
+                        ]}
+                        onPress={() =>
+                          openRetornoDirectoFromVenta(v, ventaDetailModal.items)
+                        }
+                      >
+                        <Feather name="rotate-ccw" size={14} color={THEME.warningStrong} />
+                        <Text
+                          style={[
+                            styles.cartHeaderActionBtnText,
+                            { color: THEME.warningStrong },
+                          ]}
+                        >
+                          Retornar
+                        </Text>
+                      </TouchableOpacity>
+
+                      <TouchableOpacity
+                        style={[
+                          styles.cartHeaderActionBtn,
+                          {
+                            flex: 1,
+                            backgroundColor: THEME.dangerSoft,
+                            borderColor: THEME.dangerBorder,
+                          },
+                        ]}
+                        onPress={() => handleDeleteVenta(v)}
+                      >
+                        <Feather name="trash-2" size={14} color={THEME.dangerStrong} />
+                        <Text
+                          style={[
+                            styles.cartHeaderActionBtnText,
+                            { color: THEME.dangerStrong },
+                          ]}
+                        >
+                          Eliminar
+                        </Text>
+                      </TouchableOpacity>
+                    </View>
+                  );
+                })()}
               </>
             )}
           </View>
         </View>
+      </Modal>
+
+      {/* ==================== MODAL RETORNO DIRECTO (DESDE VENTA O COMPRA - CLON 1:1 DE PC) ==================== */}
+      <Modal
+        visible={!!retornoDirectoModal}
+        transparent
+        animationType="slide"
+        onRequestClose={() => setRetornoDirectoModal(null)}
+      >
+        <KeyboardAvoidingView
+          behavior={Platform.OS === "ios" ? "padding" : undefined}
+          style={styles.modalBackdrop}
+        >
+          <View style={[styles.modalSheet, { maxHeight: "92%" }]}>
+            {retornoDirectoModal &&
+              (() => {
+                const seleccionados = rdItemsState.filter(
+                  (it) => it.seleccionado && it.cantidad > 0
+                );
+                const totalRetorno = seleccionados.reduce((sum, sel) => {
+                  const orig = retornoDirectoModal.items.find(
+                    (x) => x.producto_id === sel.producto_id
+                  );
+                  return sum + (orig?.precio_unit || 0) * sel.cantidad;
+                }, 0);
+
+                return (
+                  <>
+                    <View style={styles.modalHeader}>
+                      <View style={{ flex: 1, paddingRight: 8 }}>
+                        <Text style={styles.modalTitle}>
+                          {retornoDirectoModal.tipo === "Cliente"
+                            ? `Retornar de ${retornoDirectoModal.referenciaNumero}`
+                            : `Devolver Compra ${retornoDirectoModal.referenciaNumero}`}
+                        </Text>
+                        <Text style={styles.clientCardMeta}>
+                          {retornoDirectoModal.entidadNombre} · Selecciona los productos y cantidades
+                        </Text>
+                      </View>
+                      <TouchableOpacity
+                        onPress={() => setRetornoDirectoModal(null)}
+                        style={{ padding: 4 }}
+                      >
+                        <Feather name="x" size={20} color={THEME.mutedForeground} />
+                      </TouchableOpacity>
+                    </View>
+
+                    <ScrollView
+                      contentContainerStyle={{ gap: 10, paddingBottom: 14 }}
+                      keyboardShouldPersistTaps="handled"
+                    >
+                      <View
+                        style={{
+                          flexDirection: "row",
+                          justifyContent: "space-between",
+                          alignItems: "center",
+                        }}
+                      >
+                        <Text style={styles.fieldLabelSmall}>
+                          PRODUCTOS ({retornoDirectoModal.items.length})
+                        </Text>
+                        <View style={{ flexDirection: "row", gap: 10 }}>
+                          <TouchableOpacity
+                            onPress={() =>
+                              setRdItemsState((prev) =>
+                                prev.map((it) => ({ ...it, seleccionado: true }))
+                              )
+                            }
+                          >
+                            <Text style={{ fontSize: 11, fontWeight: "700", color: THEME.primary600 }}>
+                              Marcar todos
+                            </Text>
+                          </TouchableOpacity>
+                          <TouchableOpacity
+                            onPress={() =>
+                              setRdItemsState((prev) =>
+                                prev.map((it) => ({ ...it, seleccionado: false }))
+                              )
+                            }
+                          >
+                            <Text
+                              style={{
+                                fontSize: 11,
+                                fontWeight: "600",
+                                color: THEME.mutedForeground,
+                              }}
+                            >
+                              Desmarcar
+                            </Text>
+                          </TouchableOpacity>
+                        </View>
+                      </View>
+
+                      {retornoDirectoModal.items.map((orig) => {
+                        const st = rdItemsState.find((x) => x.producto_id === orig.producto_id) || {
+                          producto_id: orig.producto_id,
+                          cantidad: orig.cantidad_original,
+                          seleccionado: false,
+                        };
+                        return (
+                          <View
+                            key={`rd-${orig.producto_id}`}
+                            style={{
+                              backgroundColor: st.seleccionado ? THEME.accent : THEME.inputBg,
+                              borderWidth: 1,
+                              borderColor: st.seleccionado ? THEME.primary : THEME.border,
+                              borderRadius: 10,
+                              padding: 10,
+                              gap: 8,
+                            }}
+                          >
+                            <TouchableOpacity
+                              activeOpacity={0.8}
+                              onPress={() =>
+                                setRdItemsState((prev) =>
+                                  prev.map((x) =>
+                                    x.producto_id === orig.producto_id
+                                      ? { ...x, seleccionado: !x.seleccionado }
+                                      : x
+                                  )
+                                )
+                              }
+                              style={{
+                                flexDirection: "row",
+                                alignItems: "center",
+                                justifyContent: "space-between",
+                              }}
+                            >
+                              <View style={{ flexDirection: "row", alignItems: "center", gap: 8, flex: 1 }}>
+                                <Feather
+                                  name={st.seleccionado ? "check-square" : "square"}
+                                  size={18}
+                                  color={st.seleccionado ? THEME.primary600 : THEME.mutedForeground}
+                                />
+                                <View style={{ flex: 1 }}>
+                                  <Text
+                                    style={{
+                                      fontSize: 13,
+                                      fontWeight: "800",
+                                      color: THEME.foreground,
+                                    }}
+                                  >
+                                    {orig.producto_nombre}
+                                  </Text>
+                                  <Text style={styles.clientCardMeta}>
+                                    Facturado: {orig.cantidad_original} x{" "}
+                                    {fmt(orig.precio_unit, retornoDirectoModal.monedaCodigo)}
+                                    {orig.presentacion_nombre
+                                      ? ` (${orig.presentacion_nombre})`
+                                      : ""}
+                                  </Text>
+                                </View>
+                              </View>
+                              <Text style={[styles.posProdPrice, { fontSize: 14 }]}>
+                                {fmt(
+                                  st.seleccionado ? orig.precio_unit * st.cantidad : 0,
+                                  retornoDirectoModal.monedaCodigo
+                                )}
+                              </Text>
+                            </TouchableOpacity>
+
+                            {st.seleccionado && (
+                              <View
+                                style={{
+                                  flexDirection: "row",
+                                  alignItems: "center",
+                                  justifyContent: "space-between",
+                                  paddingTop: 6,
+                                  borderTopWidth: 1,
+                                  borderTopColor: THEME.border,
+                                }}
+                              >
+                                <Text style={{ fontSize: 11, fontWeight: "700", color: THEME.mutedForeground }}>
+                                  Cantidad a retornar (máx. {orig.cantidad_original}):
+                                </Text>
+                                <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+                                  <TouchableOpacity
+                                    style={{
+                                      width: 30,
+                                      height: 30,
+                                      borderRadius: 7,
+                                      borderWidth: 1,
+                                      borderColor: THEME.border,
+                                      backgroundColor: THEME.card,
+                                      alignItems: "center",
+                                      justifyContent: "center",
+                                    }}
+                                    onPress={() =>
+                                      setRdItemsState((prev) =>
+                                        prev.map((x) =>
+                                          x.producto_id === orig.producto_id
+                                            ? { ...x, cantidad: Math.max(1, x.cantidad - 1) }
+                                            : x
+                                        )
+                                      )
+                                    }
+                                  >
+                                    <Feather name="minus" size={14} color={THEME.foreground} />
+                                  </TouchableOpacity>
+                                  <Text
+                                    style={{
+                                      fontSize: 14,
+                                      fontWeight: "800",
+                                      color: THEME.foreground,
+                                      minWidth: 26,
+                                      textAlign: "center",
+                                    }}
+                                  >
+                                    {st.cantidad}
+                                  </Text>
+                                  <TouchableOpacity
+                                    style={{
+                                      width: 30,
+                                      height: 30,
+                                      borderRadius: 7,
+                                      borderWidth: 1,
+                                      borderColor: THEME.border,
+                                      backgroundColor: THEME.card,
+                                      alignItems: "center",
+                                      justifyContent: "center",
+                                    }}
+                                    onPress={() =>
+                                      setRdItemsState((prev) =>
+                                        prev.map((x) =>
+                                          x.producto_id === orig.producto_id
+                                            ? {
+                                                ...x,
+                                                cantidad: Math.min(
+                                                  orig.cantidad_original,
+                                                  x.cantidad + 1
+                                                ),
+                                              }
+                                            : x
+                                        )
+                                      )
+                                    }
+                                  >
+                                    <Feather name="plus" size={14} color={THEME.foreground} />
+                                  </TouchableOpacity>
+                                </View>
+                              </View>
+                            )}
+                          </View>
+                        );
+                      })}
+
+                      {/* Opción de descontar del crédito pendiente (igual que en PC) */}
+                      {retornoDirectoModal.tieneCreditoPendiente && (
+                        <TouchableOpacity
+                          activeOpacity={0.8}
+                          onPress={() => setRdAbonarCredito((v) => !v)}
+                          style={{
+                            flexDirection: "row",
+                            alignItems: "center",
+                            gap: 10,
+                            backgroundColor: THEME.warningSoft,
+                            borderWidth: 1,
+                            borderColor: THEME.warningBorder,
+                            borderRadius: 10,
+                            padding: 10,
+                          }}
+                        >
+                          <Feather
+                            name={rdAbonarCredito ? "check-square" : "square"}
+                            size={18}
+                            color={THEME.warningStrong}
+                          />
+                          <View style={{ flex: 1 }}>
+                            <Text
+                              style={{
+                                fontSize: 12.5,
+                                fontWeight: "800",
+                                color: THEME.warningStrong,
+                              }}
+                            >
+                              Descontar del crédito pendiente
+                            </Text>
+                            <Text style={{ fontSize: 11, color: THEME.warningStrong }}>
+                              El monto retornado se restará del saldo de la deuda asociada
+                            </Text>
+                          </View>
+                        </TouchableOpacity>
+                      )}
+
+                      {/* Motivo del retorno con sugerencias rápidas */}
+                      <View>
+                        <Text style={styles.fieldLabelSmall}>MOTIVO DEL RETORNO</Text>
+                        <ScrollView
+                          horizontal
+                          showsHorizontalScrollIndicator={false}
+                          contentContainerStyle={{ gap: 6, marginVertical: 6 }}
+                        >
+                          {[
+                            "Devolución de mercancía",
+                            "Producto defectuoso",
+                            "Cambio de opinión",
+                            "Error en pedido",
+                            "Garantía",
+                          ].map((mot) => (
+                            <TouchableOpacity
+                              key={mot}
+                              style={[
+                                styles.catChip,
+                                rdMotivo === mot && styles.catChipActive,
+                              ]}
+                              onPress={() => setRdMotivo(mot)}
+                            >
+                              <Text
+                                style={[
+                                  styles.catChipText,
+                                  rdMotivo === mot && styles.catChipTextActive,
+                                ]}
+                              >
+                                {mot}
+                              </Text>
+                            </TouchableOpacity>
+                          ))}
+                        </ScrollView>
+                        <TextInput
+                          style={styles.input}
+                          placeholder="Motivo de la devolución..."
+                          placeholderTextColor={THEME.mutedForeground}
+                          value={rdMotivo}
+                          onChangeText={setRdMotivo}
+                        />
+                      </View>
+
+                      {/* Resumen Total a Retornar */}
+                      <View style={styles.checkoutBalanceBanner}>
+                        <View style={styles.summaryTotalRow}>
+                          <Text style={styles.summaryTotalLabel}>
+                            Total a retornar ({seleccionados.length} prod.)
+                          </Text>
+                          <Text style={[styles.summaryTotalValue, { color: THEME.warningStrong }]}>
+                            {fmt(totalRetorno, retornoDirectoModal.monedaCodigo)}
+                          </Text>
+                        </View>
+                      </View>
+
+                      <TouchableOpacity
+                        style={[
+                          styles.primaryBtn,
+                          { backgroundColor: THEME.warningStrong },
+                          (rdSubmitting || seleccionados.length === 0) && { opacity: 0.6 },
+                        ]}
+                        disabled={rdSubmitting || seleccionados.length === 0}
+                        onPress={handleSubmitRetornoDirecto}
+                      >
+                        {rdSubmitting ? (
+                          <ActivityIndicator color="#fff" />
+                        ) : (
+                          <>
+                            <Feather name="rotate-ccw" size={16} color="#fff" />
+                            <Text style={styles.primaryBtnText}>
+                              Confirmar Retorno (
+                              {fmt(totalRetorno, retornoDirectoModal.monedaCodigo)})
+                            </Text>
+                          </>
+                        )}
+                      </TouchableOpacity>
+                    </ScrollView>
+                  </>
+                );
+              })()}
+          </View>
+        </KeyboardAvoidingView>
       </Modal>
 
       {/* ==================== MODAL CIERRE DE CAJA ==================== */}
@@ -9389,6 +14747,2841 @@ export default function App() {
           </View>
         </View>
       </Modal>
+
+      {/* ==================== MODAL CREAR / EDITAR / VER PRODUCTO (CLON 1:1 DE PC ProductoModal) ==================== */}
+      <Modal
+        visible={prodModalOpen}
+        transparent
+        animationType="slide"
+        onRequestClose={() => setProdModalOpen(false)}
+      >
+        <KeyboardAvoidingView
+          behavior={Platform.OS === "ios" ? "padding" : undefined}
+          style={styles.modalBackdrop}
+        >
+          <View style={[styles.modalSheet, { maxHeight: "94%" }]}>
+            {/* Encabezado idéntico a PC */}
+            <View style={styles.modalHeader}>
+              <Text style={styles.modalTitle}>
+                {prodModalMode === "create"
+                  ? "Nuevo Producto"
+                  : prodModalMode === "edit"
+                  ? "Editar Producto"
+                  : "Detalle del Producto"}
+              </Text>
+              <TouchableOpacity onPress={() => setProdModalOpen(false)}>
+                <Feather name="x" size={20} color={THEME.mutedForeground} />
+              </TouchableOpacity>
+            </View>
+
+            {/* Alerta de Error si hay */}
+            {prodFormError ? (
+              <View
+                style={{
+                  backgroundColor: THEME.dangerSoft,
+                  borderWidth: 1,
+                  borderColor: THEME.dangerBorder,
+                  borderRadius: 8,
+                  paddingHorizontal: 10,
+                  paddingVertical: 8,
+                  marginBottom: 8,
+                  flexDirection: "row",
+                  alignItems: "center",
+                  gap: 6,
+                }}
+              >
+                <Feather name="alert-circle" size={14} color={THEME.dangerStrong} />
+                <Text
+                  style={{
+                    flex: 1,
+                    fontSize: 12,
+                    fontWeight: "600",
+                    color: THEME.dangerStrong,
+                  }}
+                >
+                  {prodFormError}
+                </Text>
+              </View>
+            ) : null}
+
+            {/* Stepper para modo CREAR (1. Información -> 2. Precios y presentaciones -> 3. Existencias) */}
+            {prodModalMode === "create" && (
+              <View
+                style={{
+                  flexDirection: "row",
+                  alignItems: "center",
+                  marginBottom: 10,
+                  gap: 4,
+                }}
+              >
+                {[
+                  { id: 1 as const, label: "Información" },
+                  { id: 2 as const, label: "Precios y cajas" },
+                  { id: 3 as const, label: "Existencias" },
+                ].map((s, idx) => {
+                  const isCompleted = s.id < prodFormStep;
+                  const isCurrent = s.id === prodFormStep;
+                  return (
+                    <React.Fragment key={s.id}>
+                      <TouchableOpacity
+                        disabled={!isCompleted}
+                        onPress={() => isCompleted && setProdFormStep(s.id)}
+                        style={{
+                          flexDirection: "row",
+                          alignItems: "center",
+                          gap: 5,
+                        }}
+                      >
+                        <View
+                          style={{
+                            width: 24,
+                            height: 24,
+                            borderRadius: 12,
+                            alignItems: "center",
+                            justifyContent: "center",
+                            backgroundColor:
+                              isCompleted || isCurrent ? THEME.primary : THEME.muted,
+                          }}
+                        >
+                          {isCompleted ? (
+                            <Feather name="check" size={12} color="#fff" />
+                          ) : (
+                            <Text
+                              style={{
+                                fontSize: 11,
+                                fontWeight: "800",
+                                color: isCurrent ? "#fff" : THEME.mutedForeground,
+                              }}
+                            >
+                              {s.id}
+                            </Text>
+                          )}
+                        </View>
+                        <Text
+                          style={{
+                            fontSize: 11.5,
+                            fontWeight: isCurrent ? "800" : "600",
+                            color: isCurrent ? THEME.foreground : THEME.mutedForeground,
+                          }}
+                        >
+                          {s.label}
+                        </Text>
+                      </TouchableOpacity>
+                      {idx < 2 && (
+                        <View
+                          style={{
+                            flex: 1,
+                            height: 1.5,
+                            backgroundColor: isCompleted ? THEME.primary : THEME.border,
+                            marginHorizontal: 2,
+                          }}
+                        />
+                      )}
+                    </React.Fragment>
+                  );
+                })}
+              </View>
+            )}
+
+            {/* Pestañas directas para modo EDICIÓN (igual que en PC: saltar libremente entre las 3 secciones) */}
+            {prodModalMode === "edit" && (
+              <View
+                style={{
+                  flexDirection: "row",
+                  gap: 6,
+                  marginBottom: 10,
+                }}
+              >
+                {[
+                  { id: 1 as const, label: "1. Información" },
+                  { id: 2 as const, label: "2. Precios y cajas" },
+                  { id: 3 as const, label: "3. Existencias" },
+                ].map((s) => {
+                  const active = prodFormStep === s.id;
+                  return (
+                    <TouchableOpacity
+                      key={s.id}
+                      onPress={() => {
+                        setProdFormError("");
+                        setProdFormStep(s.id);
+                      }}
+                      style={{
+                        flex: 1,
+                        paddingVertical: 8,
+                        paddingHorizontal: 6,
+                        borderRadius: 8,
+                        borderWidth: 1,
+                        alignItems: "center",
+                        justifyContent: "center",
+                        borderColor: active ? THEME.primary : THEME.border,
+                        backgroundColor: active ? THEME.accent : THEME.card,
+                      }}
+                    >
+                      <Text
+                        style={{
+                          fontSize: 11,
+                          fontWeight: "800",
+                          color: active ? THEME.primary600 : THEME.mutedForeground,
+                          textAlign: "center",
+                        }}
+                        numberOfLines={1}
+                      >
+                        {s.label}
+                      </Text>
+                    </TouchableOpacity>
+                  );
+                })}
+              </View>
+            )}
+
+            <ScrollView
+              contentContainerStyle={{ gap: 12, paddingBottom: 16 }}
+              keyboardShouldPersistTaps="handled"
+            >
+              {/* ==================== MODO VISTA DETALLE (view) ==================== */}
+              {prodModalMode === "view" && (editingProd || prodFullCloud) && (
+                <View style={{ gap: 10 }}>
+                  {(() => {
+                    const pView = prodFullCloud || editingProd!;
+                    const preciosTres = editingProd
+                      ? preciosProductoTresMonedas(editingProd)
+                      : [];
+                    return (
+                      <>
+                        <View style={{ flexDirection: "row", gap: 10 }}>
+                          <View style={{ flex: 1 }}>
+                            <Text style={styles.fieldLabelSmall}>CÓDIGO</Text>
+                            <Text
+                              style={{
+                                fontSize: 14,
+                                fontWeight: "800",
+                                color: THEME.foreground,
+                                fontFamily: "monospace",
+                              }}
+                            >
+                              {pView.codigo}
+                            </Text>
+                          </View>
+                          <View style={{ flex: 1 }}>
+                            <Text style={styles.fieldLabelSmall}>EXISTENCIAS</Text>
+                            <Text
+                              style={{
+                                fontSize: 14,
+                                fontWeight: "800",
+                                color: THEME.foreground,
+                              }}
+                            >
+                              {pView.stock} uds. (Mín: {pView.stock_minimo ?? 5})
+                            </Text>
+                          </View>
+                        </View>
+
+                        <View>
+                          <Text style={styles.fieldLabelSmall}>NOMBRE</Text>
+                          <Text
+                            style={{
+                              fontSize: 15,
+                              fontWeight: "800",
+                              color: THEME.foreground,
+                            }}
+                          >
+                            {pView.nombre}
+                          </Text>
+                        </View>
+
+                        <View>
+                          <Text style={styles.fieldLabelSmall}>DESCRIPCIÓN</Text>
+                          <Text style={{ fontSize: 13, color: THEME.mutedForeground }}>
+                            {pView.descripcion || "—"}
+                          </Text>
+                        </View>
+
+                        <View style={{ flexDirection: "row", gap: 10 }}>
+                          <View style={{ flex: 1 }}>
+                            <Text style={styles.fieldLabelSmall}>CATEGORÍA</Text>
+                            <Text style={{ fontSize: 13, fontWeight: "700", color: THEME.foreground }}>
+                              {pView.categoria_nombre ||
+                                (pView.categoria_id
+                                  ? (categoriasCloud.length > 0 ? categoriasCloud : categorias).find(
+                                      (c: any) => String(c.id) === String(pView.categoria_id)
+                                    )?.nombre
+                                  : null) ||
+                                "—"}
+                            </Text>
+                          </View>
+                          <View style={{ flex: 1 }}>
+                            <Text style={styles.fieldLabelSmall}>MARCA</Text>
+                            <Text style={{ fontSize: 13, fontWeight: "700", color: THEME.foreground }}>
+                              {pView.marca_nombre ||
+                                (pView.marca_id
+                                  ? marcasCloud.find((m: any) => String(m.id) === String(pView.marca_id))
+                                      ?.nombre
+                                  : null) ||
+                                "—"}
+                            </Text>
+                          </View>
+                        </View>
+
+                        <View>
+                          <Text style={styles.fieldLabelSmall}>PROVEEDORES</Text>
+                          <Text style={{ fontSize: 13, fontWeight: "700", color: THEME.foreground }}>
+                            {Array.isArray(pView.proveedores) && pView.proveedores.length > 0
+                              ? pView.proveedores.map((pv: any) => pv.nombre).join(", ")
+                              : pView.proveedor_nombre ||
+                                (pView.proveedor_id
+                                  ? proveedoresList.find(
+                                      (pv: any) => String(pv.id) === String(pView.proveedor_id)
+                                    )?.nombre
+                                  : null) ||
+                                "—"}
+                          </Text>
+                        </View>
+
+                        <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+                          <Text style={styles.fieldLabelSmall}>IVA:</Text>
+                          <View
+                            style={[
+                              styles.ivaBadge,
+                              pView.iva_incluido !== false && pView.iva_incluido !== 0
+                                ? { backgroundColor: THEME.secondary, borderColor: THEME.primary }
+                                : {},
+                            ]}
+                          >
+                            <Text
+                              style={[
+                                styles.ivaBadgeText,
+                                pView.iva_incluido !== false && pView.iva_incluido !== 0
+                                  ? { color: THEME.primary600 }
+                                  : {},
+                              ]}
+                            >
+                              {pView.iva_incluido !== false && pView.iva_incluido !== 0
+                                ? "Incluido (16%)"
+                                : "Excluido (+IVA)"}
+                            </Text>
+                          </View>
+                        </View>
+
+                        <View
+                          style={{
+                            backgroundColor: THEME.inputBg,
+                            borderRadius: 10,
+                            borderWidth: 1,
+                            borderColor: THEME.border,
+                            padding: 10,
+                            gap: 6,
+                          }}
+                        >
+                          <Text style={styles.fieldLabelSmall}>PRECIOS POR MONEDA</Text>
+                          {preciosTres.map((pm) => (
+                            <View
+                              key={pm.codigo}
+                              style={{
+                                flexDirection: "row",
+                                justifyContent: "space-between",
+                                alignItems: "center",
+                                paddingVertical: 4,
+                                borderBottomWidth: 1,
+                                borderBottomColor: THEME.border,
+                              }}
+                            >
+                              <Text style={{ fontSize: 12, fontWeight: "700", color: THEME.foreground }}>
+                                {pm.simbolo} {pm.codigo} {pm.es_base_prod ? "(Base)" : ""}
+                              </Text>
+                              <View style={{ flexDirection: "row", gap: 12 }}>
+                                <Text style={{ fontSize: 12, color: THEME.mutedForeground }}>
+                                  Costo: {fmt(pm.costo, pm.codigo)}
+                                </Text>
+                                <Text style={{ fontSize: 12, fontWeight: "800", color: THEME.foreground }}>
+                                  Precio: {fmt(pm.precio, pm.codigo)}
+                                </Text>
+                              </View>
+                            </View>
+                          ))}
+                        </View>
+
+                        {prodMargenReal !== null && (
+                          <View
+                            style={{
+                              flexDirection: "row",
+                              justifyContent: "space-between",
+                              alignItems: "center",
+                              backgroundColor: THEME.warningSoft,
+                              borderWidth: 1,
+                              borderColor: THEME.warningBorder,
+                              borderRadius: 8,
+                              paddingHorizontal: 12,
+                              paddingVertical: 8,
+                            }}
+                          >
+                            <Text
+                              style={{
+                                fontSize: 11,
+                                fontWeight: "800",
+                                color: THEME.warningStrong,
+                              }}
+                            >
+                              MARGEN REAL
+                            </Text>
+                            <Text
+                              style={{
+                                fontSize: 13,
+                                fontWeight: "800",
+                                color: THEME.warningStrong,
+                              }}
+                            >
+                              {prodMargenReal.toFixed(2)} %
+                            </Text>
+                          </View>
+                        )}
+
+                        <View>
+                          <Text style={styles.fieldLabelSmall}>PRESENTACIONES</Text>
+                          {prodFormPresentaciones.length === 0 ? (
+                            <Text style={{ fontSize: 12, color: THEME.mutedForeground, marginTop: 4 }}>
+                              Sin presentaciones (solo Unidad)
+                            </Text>
+                          ) : (
+                            <View style={{ gap: 6, marginTop: 4 }}>
+                              {prodFormPresentaciones.map((pr) => {
+                                const uNum = parseInt(pr.unidades, 10) || 1;
+                                const r = precioSegunModoProd(pr, uNum);
+                                return (
+                                  <View
+                                    key={pr.key}
+                                    style={{
+                                      flexDirection: "row",
+                                      justifyContent: "space-between",
+                                      alignItems: "center",
+                                      backgroundColor: THEME.inputBg,
+                                      padding: 8,
+                                      borderRadius: 8,
+                                      borderWidth: 1,
+                                      borderColor: THEME.border,
+                                    }}
+                                  >
+                                    <Text style={{ fontSize: 12, color: THEME.foreground, fontWeight: "600" }}>
+                                      {pr.nombre} · 1 = {pr.unidades} unid.
+                                      {pr.codigoBarras ? ` (${pr.codigoBarras})` : ""}
+                                      {!pr.activo ? " (inactiva)" : ""}
+                                    </Text>
+                                    <Text
+                                      style={{
+                                        fontSize: 12,
+                                        fontWeight: "800",
+                                        color: THEME.primary600,
+                                      }}
+                                    >
+                                      {fmt(r.precio, prodVentaMoneda?.codigo || "USD")}
+                                    </Text>
+                                  </View>
+                                );
+                              })}
+                            </View>
+                          )}
+                        </View>
+                      </>
+                    );
+                  })()}
+                </View>
+              )}
+
+              {/* ==================== PASO 1: INFORMACIÓN (create & edit) ==================== */}
+              {prodModalMode !== "view" && prodFormStep === 1 && (
+                <View style={{ gap: 10 }}>
+                  {/* Código de barras + Escanear + Verificación en vivo */}
+                  <View>
+                    <Text style={styles.fieldLabelSmall}>CÓDIGO DE BARRAS / SKU *</Text>
+                    <View style={{ flexDirection: "row", gap: 8, marginTop: 4 }}>
+                      <TextInput
+                        style={[
+                          styles.input,
+                          { flex: 1 },
+                          prodVerifCodigo.estado === "ocupado" && {
+                            borderColor: THEME.danger,
+                          },
+                          prodVerifCodigo.estado === "libre" && {
+                            borderColor: THEME.success,
+                          },
+                        ]}
+                        placeholder="Ej: HAR-001 o escanea el código"
+                        placeholderTextColor={THEME.mutedForeground}
+                        value={prodFormCodigo}
+                        onChangeText={setProdFormCodigo}
+                        maxLength={50}
+                      />
+                      <TouchableOpacity
+                        style={styles.posScanTriggerBtn}
+                        onPress={() => {
+                          openBarcodeScanner("unico", (code) => {
+                            setProdFormCodigo(code);
+                            showToast(`Código ${code} capturado`, "success");
+                          });
+                        }}
+                      >
+                        <Feather name="camera" size={15} color="#fff" />
+                        <Text style={styles.posScanTriggerBtnText}>Escanear</Text>
+                      </TouchableOpacity>
+                    </View>
+                    {prodVerifCodigo.estado === "libre" && (
+                      <View
+                        style={{
+                          flexDirection: "row",
+                          alignItems: "center",
+                          gap: 4,
+                          marginTop: 4,
+                        }}
+                      >
+                        <Feather name="check-circle" size={12} color={THEME.successStrong} />
+                        <Text
+                          style={{
+                            fontSize: 11,
+                            fontWeight: "600",
+                            color: THEME.successStrong,
+                          }}
+                        >
+                          {prodVerifCodigo.mensaje || "Código disponible"}
+                        </Text>
+                      </View>
+                    )}
+                    {prodVerifCodigo.estado === "ocupado" && (
+                      <View
+                        style={{
+                          flexDirection: "row",
+                          alignItems: "center",
+                          gap: 4,
+                          marginTop: 4,
+                        }}
+                      >
+                        <Feather name="alert-circle" size={12} color={THEME.dangerStrong} />
+                        <Text
+                          style={{
+                            fontSize: 11,
+                            fontWeight: "600",
+                            color: THEME.dangerStrong,
+                          }}
+                        >
+                          {prodVerifCodigo.mensaje}
+                        </Text>
+                      </View>
+                    )}
+                  </View>
+
+                  {/* Nombre */}
+                  <View>
+                    <Text style={styles.fieldLabelSmall}>NOMBRE DEL PRODUCTO *</Text>
+                    <TextInput
+                      style={[styles.input, { marginTop: 4 }]}
+                      placeholder="Ej: Harina de maíz 1kg"
+                      placeholderTextColor={THEME.mutedForeground}
+                      value={prodFormNombre}
+                      onChangeText={setProdFormNombre}
+                      maxLength={200}
+                    />
+                  </View>
+
+                  {/* Categoría + Botón "+" Nueva Categoría */}
+                  <View>
+                    <View
+                      style={{
+                        flexDirection: "row",
+                        justifyContent: "space-between",
+                        alignItems: "center",
+                        marginBottom: 4,
+                      }}
+                    >
+                      <Text style={styles.fieldLabelSmall}>CATEGORÍA</Text>
+                      <TouchableOpacity
+                        style={[styles.outlineSmallBtn, { height: 28, paddingHorizontal: 8 }]}
+                        onPress={() => openCategoriaModal(null)}
+                      >
+                        <Feather name="plus" size={12} color={THEME.primary600} />
+                        <Text
+                          style={[
+                            styles.outlineSmallBtnText,
+                            { fontSize: 11, color: THEME.primary600 },
+                          ]}
+                        >
+                          Nueva categoría
+                        </Text>
+                      </TouchableOpacity>
+                    </View>
+                    <ScrollView
+                      horizontal
+                      showsHorizontalScrollIndicator={false}
+                      contentContainerStyle={{ gap: 6 }}
+                    >
+                      <TouchableOpacity
+                        style={[styles.catChip, !prodFormCatId && styles.catChipActive]}
+                        onPress={() => setProdFormCatId("")}
+                      >
+                        <Text
+                          style={[
+                            styles.catChipText,
+                            !prodFormCatId && styles.catChipTextActive,
+                          ]}
+                        >
+                          Sin categoría
+                        </Text>
+                      </TouchableOpacity>
+                      {(categoriasCloud.length > 0 ? categoriasCloud : categorias).map((c: any) => {
+                        const sel = String(prodFormCatId) === String(c.id);
+                        return (
+                          <TouchableOpacity
+                            key={c.id}
+                            style={[styles.catChip, sel && styles.catChipActive]}
+                            onPress={() => setProdFormCatId(sel ? "" : String(c.id))}
+                          >
+                            <Text style={[styles.catChipText, sel && styles.catChipTextActive]}>
+                              {c.nombre}
+                            </Text>
+                          </TouchableOpacity>
+                        );
+                      })}
+                    </ScrollView>
+                  </View>
+
+                  {/* Marca + Botón "+" Nueva Marca */}
+                  <View>
+                    <View
+                      style={{
+                        flexDirection: "row",
+                        justifyContent: "space-between",
+                        alignItems: "center",
+                        marginBottom: 4,
+                      }}
+                    >
+                      <Text style={styles.fieldLabelSmall}>MARCA</Text>
+                      <TouchableOpacity
+                        style={[styles.outlineSmallBtn, { height: 28, paddingHorizontal: 8 }]}
+                        onPress={() => openMarcaModal(null)}
+                      >
+                        <Feather name="plus" size={12} color={THEME.primary600} />
+                        <Text
+                          style={[
+                            styles.outlineSmallBtnText,
+                            { fontSize: 11, color: THEME.primary600 },
+                          ]}
+                        >
+                          Nueva marca
+                        </Text>
+                      </TouchableOpacity>
+                    </View>
+                    <ScrollView
+                      horizontal
+                      showsHorizontalScrollIndicator={false}
+                      contentContainerStyle={{ gap: 6 }}
+                    >
+                      <TouchableOpacity
+                        style={[styles.catChip, !prodFormMarcaId && styles.catChipActive]}
+                        onPress={() => setProdFormMarcaId("")}
+                      >
+                        <Text
+                          style={[
+                            styles.catChipText,
+                            !prodFormMarcaId && styles.catChipTextActive,
+                          ]}
+                        >
+                          Sin marca
+                        </Text>
+                      </TouchableOpacity>
+                      {marcasCloud.map((m: any) => {
+                        const sel = String(prodFormMarcaId) === String(m.id);
+                        return (
+                          <TouchableOpacity
+                            key={m.id}
+                            style={[styles.catChip, sel && styles.catChipActive]}
+                            onPress={() => setProdFormMarcaId(sel ? "" : String(m.id))}
+                          >
+                            <Text style={[styles.catChipText, sel && styles.catChipTextActive]}>
+                              {m.nombre}
+                            </Text>
+                          </TouchableOpacity>
+                        );
+                      })}
+                    </ScrollView>
+                  </View>
+
+                  {/* Proveedores (Multi-selector N:M) + Botón "+" Nuevo Proveedor */}
+                  <View>
+                    <View
+                      style={{
+                        flexDirection: "row",
+                        justifyContent: "space-between",
+                        alignItems: "center",
+                        marginBottom: 4,
+                      }}
+                    >
+                      <Text style={styles.fieldLabelSmall}>
+                        PROVEEDORES ({prodFormProvIds.length} seleccionados)
+                      </Text>
+                      <TouchableOpacity
+                        style={[styles.outlineSmallBtn, { height: 28, paddingHorizontal: 8 }]}
+                        onPress={() => openProveedorModal(null)}
+                      >
+                        <Feather name="plus" size={12} color={THEME.primary600} />
+                        <Text
+                          style={[
+                            styles.outlineSmallBtnText,
+                            { fontSize: 11, color: THEME.primary600 },
+                          ]}
+                        >
+                          Nuevo proveedor
+                        </Text>
+                      </TouchableOpacity>
+                    </View>
+                    {proveedoresList.length === 0 ? (
+                      <Text style={{ fontSize: 11, color: THEME.mutedForeground }}>
+                        Sin proveedores registrados. Usa "+ Nuevo proveedor" para crear uno.
+                      </Text>
+                    ) : (
+                      <ScrollView
+                        horizontal
+                        showsHorizontalScrollIndicator={false}
+                        contentContainerStyle={{ gap: 6 }}
+                      >
+                        {proveedoresList.map((pv: any) => {
+                          const sid = String(pv.id);
+                          const sel = prodFormProvIds.includes(sid);
+                          return (
+                            <TouchableOpacity
+                              key={pv.id}
+                              style={[styles.catChip, sel && styles.catChipActive]}
+                              onPress={() =>
+                                setProdFormProvIds((prev) =>
+                                  prev.includes(sid)
+                                    ? prev.filter((x) => x !== sid)
+                                    : [...prev, sid]
+                                )
+                              }
+                            >
+                              <Text style={[styles.catChipText, sel && styles.catChipTextActive]}>
+                                {sel ? "✓ " : ""}
+                                {pv.nombre}
+                              </Text>
+                            </TouchableOpacity>
+                          );
+                        })}
+                      </ScrollView>
+                    )}
+                  </View>
+
+                  {/* Descripción */}
+                  <View>
+                    <Text style={styles.fieldLabelSmall}>DESCRIPCIÓN</Text>
+                    <TextInput
+                      style={[
+                        styles.input,
+                        { marginTop: 4, height: 68, textAlignVertical: "top", paddingTop: 8 },
+                      ]}
+                      multiline
+                      placeholder="Ej: Harina de maíz precocida, marca PAN..."
+                      placeholderTextColor={THEME.mutedForeground}
+                      value={prodFormDesc}
+                      onChangeText={setProdFormDesc}
+                      maxLength={500}
+                    />
+                  </View>
+
+                  {/* IVA Incluido (idéntico al bloque de PC) */}
+                  <TouchableOpacity
+                    activeOpacity={0.8}
+                    onPress={() => setProdFormIvaIncluido((v) => !v)}
+                    style={{
+                      flexDirection: "row",
+                      alignItems: "center",
+                      justifyContent: "space-between",
+                      backgroundColor: THEME.inputBg,
+                      borderWidth: 1,
+                      borderColor: prodFormIvaIncluido ? THEME.primary : THEME.border,
+                      borderRadius: 10,
+                      paddingHorizontal: 12,
+                      paddingVertical: 10,
+                    }}
+                  >
+                    <View style={{ flex: 1, paddingRight: 10 }}>
+                      <Text style={{ fontSize: 13, fontWeight: "700", color: THEME.foreground }}>
+                        IVA Incluido
+                      </Text>
+                      <Text style={{ fontSize: 11, color: THEME.mutedForeground, marginTop: 2 }}>
+                        {prodFormIvaIncluido
+                          ? "El precio ya incluye el IVA (16%)"
+                          : "El IVA se calculará en el punto de venta"}
+                      </Text>
+                    </View>
+                    <View
+                      style={{
+                        width: 44,
+                        height: 26,
+                        borderRadius: 13,
+                        backgroundColor: prodFormIvaIncluido ? THEME.primary : THEME.muted,
+                        justifyContent: "center",
+                        paddingHorizontal: 3,
+                      }}
+                    >
+                      <View
+                        style={{
+                          width: 20,
+                          height: 20,
+                          borderRadius: 10,
+                          backgroundColor: "#fff",
+                          alignSelf: prodFormIvaIncluido ? "flex-end" : "flex-start",
+                        }}
+                      />
+                    </View>
+                  </TouchableOpacity>
+                </View>
+              )}
+
+              {/* ==================== PASO 2: PRECIOS Y PRESENTACIONES (create & edit) ==================== */}
+              {prodModalMode !== "view" && prodFormStep === 2 && (
+                <View style={{ gap: 12 }}>
+                  <Text style={{ fontSize: 11.5, color: THEME.mutedForeground }}>
+                    Escribe el costo y precio por presentación (Caja, Bolsa...) o por unidad; todos los valores se sincronizan automáticamente.
+                  </Text>
+
+                  {/* ── SECCIÓN PRESENTACIONES / CAJAS (idéntica a renderPresentaciones en PC) ── */}
+                  <View
+                    style={{
+                      backgroundColor: THEME.inputBg,
+                      borderWidth: 1,
+                      borderColor: THEME.border,
+                      borderRadius: 10,
+                      padding: 10,
+                      gap: 8,
+                    }}
+                  >
+                    <Text style={styles.fieldLabelSmall}>
+                      PRESENTACIONES AL MAYOR (CAJA, BOLSA, PAQUETE...)
+                    </Text>
+
+                    {/* Sugerencias rápidas de nombre de presentación */}
+                    <ScrollView
+                      horizontal
+                      showsHorizontalScrollIndicator={false}
+                      contentContainerStyle={{ gap: 5 }}
+                    >
+                      {PRESENTACIONES_SUGERIDAS.map((sug) => {
+                        const active =
+                          prodNuevaPresNombre.trim().toLowerCase() === sug.toLowerCase();
+                        return (
+                          <TouchableOpacity
+                            key={sug}
+                            style={[
+                              styles.catChip,
+                              { paddingVertical: 4, paddingHorizontal: 9 },
+                              active && styles.catChipActive,
+                            ]}
+                            onPress={() => setProdNuevaPresNombre(sug)}
+                          >
+                            <Text
+                              style={[
+                                styles.catChipText,
+                                { fontSize: 11 },
+                                active && styles.catChipTextActive,
+                              ]}
+                            >
+                              {sug}
+                            </Text>
+                          </TouchableOpacity>
+                        );
+                      })}
+                    </ScrollView>
+
+                    {/* Fila de alta de nueva presentación */}
+                    <View style={{ flexDirection: "row", gap: 6 }}>
+                      <View style={{ flex: 1.3 }}>
+                        <Text style={{ fontSize: 10, fontWeight: "700", color: THEME.mutedForeground }}>
+                          Presentación
+                        </Text>
+                        <TextInput
+                          style={[styles.input, { height: 38, backgroundColor: THEME.card, marginTop: 2 }]}
+                          placeholder="Caja, Bolsa..."
+                          placeholderTextColor={THEME.mutedForeground}
+                          value={prodNuevaPresNombre}
+                          onChangeText={setProdNuevaPresNombre}
+                        />
+                      </View>
+                      <View style={{ width: 78 }}>
+                        <Text style={{ fontSize: 10, fontWeight: "700", color: THEME.mutedForeground }}>
+                          Unidades
+                        </Text>
+                        <TextInput
+                          style={[
+                            styles.input,
+                            { height: 38, backgroundColor: THEME.card, marginTop: 2, textAlign: "center" },
+                          ]}
+                          placeholder="24"
+                          placeholderTextColor={THEME.mutedForeground}
+                          keyboardType="numeric"
+                          value={prodNuevaPresUnidades}
+                          onChangeText={setProdNuevaPresUnidades}
+                        />
+                      </View>
+                    </View>
+
+                    <View style={{ flexDirection: "row", gap: 6, alignItems: "center" }}>
+                      <TextInput
+                        style={[
+                          styles.input,
+                          { flex: 1, height: 38, backgroundColor: THEME.card },
+                          prodVerifNuevaPres.estado === "ocupado" && { borderColor: THEME.danger },
+                          prodVerifNuevaPres.estado === "libre" && { borderColor: THEME.success },
+                        ]}
+                        placeholder="Código de barras de la caja (Opcional)"
+                        placeholderTextColor={THEME.mutedForeground}
+                        value={prodNuevaPresCodigo}
+                        onChangeText={setProdNuevaPresCodigo}
+                      />
+                      <TouchableOpacity
+                        style={[styles.outlineSmallBtn, { height: 38, paddingHorizontal: 10 }]}
+                        onPress={() =>
+                          openBarcodeScanner("unico", (code) => {
+                            setProdNuevaPresCodigo(code);
+                            showToast(`Código de caja ${code} capturado`, "success");
+                          })
+                        }
+                      >
+                        <Feather name="camera" size={14} color={THEME.primary600} />
+                      </TouchableOpacity>
+                      <TouchableOpacity
+                        style={[styles.primarySmallBtn, { height: 38, paddingHorizontal: 12 }]}
+                        onPress={agregarPresentacionDesdePicker}
+                      >
+                        <Feather name="plus" size={14} color="#fff" />
+                        <Text style={styles.primarySmallBtnText}>Agregar</Text>
+                      </TouchableOpacity>
+                    </View>
+
+                    {prodVerifNuevaPres.estado !== "vacio" &&
+                      prodVerifNuevaPres.estado !== "verificando" && (
+                        <Text
+                          style={{
+                            fontSize: 10.5,
+                            fontWeight: "600",
+                            color:
+                              prodVerifNuevaPres.estado === "ocupado"
+                                ? THEME.dangerStrong
+                                : THEME.successStrong,
+                          }}
+                        >
+                          {prodVerifNuevaPres.estado === "ocupado" ? "⚠️ " : "✓ "}
+                          {prodVerifNuevaPres.mensaje}
+                        </Text>
+                      )}
+
+                    {/* Lista de Presentaciones Agregadas */}
+                    {prodFormPresentaciones.length === 0 ? (
+                      <View
+                        style={{
+                          paddingVertical: 12,
+                          alignItems: "center",
+                          borderWidth: 1,
+                          borderStyle: "dashed",
+                          borderColor: THEME.border,
+                          borderRadius: 8,
+                        }}
+                      >
+                        <Text style={{ fontSize: 11.5, color: THEME.mutedForeground }}>
+                          Sin presentaciones. El producto se vende y compra por Unidad.
+                        </Text>
+                      </View>
+                    ) : (
+                      prodFormPresentaciones.map((p) => {
+                        const unidadesNum = parseInt(p.unidades, 10);
+                        const ok = Number.isInteger(unidadesNum) && unidadesNum > 1;
+                        const modo = p.modo_venta ?? "derivado";
+                        const r = ok
+                          ? precioSegunModoProd(p, unidadesNum)
+                          : {
+                              precio: 0,
+                              precioUnitario: 0,
+                              costo: 0,
+                              margen: null,
+                              bajoCosto: false,
+                            };
+                        const costoCaja = ok
+                          ? redondear(prodPrecioUnidadCosto() * unidadesNum, prodDecCosto)
+                          : 0;
+
+                        return (
+                          <View
+                            key={p.key}
+                            style={{
+                              backgroundColor: THEME.card,
+                              borderWidth: 1,
+                              borderColor: THEME.border,
+                              borderRadius: 8,
+                              padding: 9,
+                              gap: 7,
+                            }}
+                          >
+                            {/* Fila 1: Nombre, Unidades, Activo y Eliminar */}
+                            <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
+                              <TextInput
+                                style={[styles.input, { flex: 1, height: 36 }]}
+                                placeholder="Caja, Bolsa..."
+                                value={p.nombre}
+                                onChangeText={(v) =>
+                                  actualizarPresentacionProd(p.key, { nombre: v })
+                                }
+                              />
+                              <View style={{ width: 68 }}>
+                                <TextInput
+                                  style={[styles.input, { height: 36, textAlign: "center" }]}
+                                  placeholder="Uds"
+                                  keyboardType="numeric"
+                                  value={p.unidades}
+                                  onChangeText={(v) =>
+                                    actualizarPresentacionProd(p.key, { unidades: v })
+                                  }
+                                />
+                              </View>
+                              <TouchableOpacity
+                                style={[
+                                  styles.outlineSmallBtn,
+                                  { height: 36, paddingHorizontal: 8 },
+                                  p.activo && {
+                                    backgroundColor: THEME.secondary,
+                                    borderColor: THEME.primary,
+                                  },
+                                ]}
+                                onPress={() =>
+                                  actualizarPresentacionProd(p.key, { activo: !p.activo })
+                                }
+                              >
+                                <Text
+                                  style={{
+                                    fontSize: 10.5,
+                                    fontWeight: "700",
+                                    color: p.activo ? THEME.primary600 : THEME.mutedForeground,
+                                  }}
+                                >
+                                  {p.activo ? "Activa" : "Inactiva"}
+                                </Text>
+                              </TouchableOpacity>
+                              <TouchableOpacity
+                                onPress={() => eliminarPresentacionProd(p.key)}
+                                style={{ padding: 4 }}
+                              >
+                                <Feather name="trash-2" size={16} color={THEME.dangerStrong} />
+                              </TouchableOpacity>
+                            </View>
+
+                            {/* Fila 2: Código de barras de la caja + Cámara */}
+                            <View style={{ flexDirection: "row", gap: 6, alignItems: "center" }}>
+                              <TextInput
+                                style={[
+                                  styles.input,
+                                  { flex: 1, height: 34, fontSize: 12, fontFamily: "monospace" },
+                                ]}
+                                placeholder="Código de barras de la caja (opcional)"
+                                placeholderTextColor={THEME.mutedForeground}
+                                value={p.codigoBarras}
+                                onChangeText={(v) =>
+                                  actualizarPresentacionProd(p.key, { codigoBarras: v })
+                                }
+                              />
+                              <TouchableOpacity
+                                style={[styles.outlineSmallBtn, { height: 34, paddingHorizontal: 9 }]}
+                                onPress={() =>
+                                  openBarcodeScanner("unico", (code) => {
+                                    actualizarPresentacionProd(p.key, { codigoBarras: code });
+                                  })
+                                }
+                              >
+                                <Feather name="camera" size={13} color={THEME.primary600} />
+                              </TouchableOpacity>
+                            </View>
+
+                            {/* Fila 3: Modo de precio (Derivado | Precio fijo | Por margen) */}
+                            <View style={{ flexDirection: "row", gap: 5 }}>
+                              {(
+                                [
+                                  { id: "derivado", label: "Derivado" },
+                                  { id: "fijo", label: "Precio fijo" },
+                                  { id: "margen", label: "Por margen %" },
+                                ] as const
+                              ).map((mOpt) => {
+                                const sel = modo === mOpt.id;
+                                return (
+                                  <TouchableOpacity
+                                    key={mOpt.id}
+                                    onPress={() =>
+                                      actualizarPresentacionProd(p.key, { modo_venta: mOpt.id })
+                                    }
+                                    style={{
+                                      flex: 1,
+                                      paddingVertical: 5,
+                                      borderRadius: 6,
+                                      borderWidth: 1,
+                                      alignItems: "center",
+                                      borderColor: sel ? THEME.primary : THEME.border,
+                                      backgroundColor: sel ? THEME.accent : THEME.inputBg,
+                                    }}
+                                  >
+                                    <Text
+                                      style={{
+                                        fontSize: 10.5,
+                                        fontWeight: "700",
+                                        color: sel ? THEME.primary600 : THEME.mutedForeground,
+                                      }}
+                                    >
+                                      {mOpt.label}
+                                    </Text>
+                                  </TouchableOpacity>
+                                );
+                              })}
+                            </View>
+
+                            {/* Fila 4: Costo compra de la caja y Precio venta de la caja (bidireccionales) */}
+                            <View style={{ flexDirection: "row", gap: 8 }}>
+                              <View style={{ flex: 1 }}>
+                                <Text
+                                  style={{
+                                    fontSize: 10,
+                                    fontWeight: "700",
+                                    color: THEME.mutedForeground,
+                                  }}
+                                >
+                                  Costo caja ({prodCostoMoneda?.codigo ?? "USD"})
+                                </Text>
+                                <TextInput
+                                  style={[styles.input, { height: 36, marginTop: 2 }]}
+                                  keyboardType="decimal-pad"
+                                  placeholder="0.00"
+                                  value={ok && costoCaja > 0 ? String(costoCaja) : ""}
+                                  onChangeText={(val) =>
+                                    cambiarPrecioPresentacionCosto(val, unidadesNum)
+                                  }
+                                />
+                                {ok && prodCostoMoneda && prodPrecioUnidadCosto() > 0 && (
+                                  <Text
+                                    style={{
+                                      fontSize: 10,
+                                      color: THEME.mutedForeground,
+                                      marginTop: 2,
+                                    }}
+                                  >
+                                    = {prodCostoMoneda.simbolo}
+                                    {prodPrecioUnidadCosto().toFixed(prodDecCosto)} / unid.
+                                  </Text>
+                                )}
+                              </View>
+
+                              <View style={{ flex: 1 }}>
+                                <Text
+                                  style={{
+                                    fontSize: 10,
+                                    fontWeight: "700",
+                                    color: THEME.mutedForeground,
+                                  }}
+                                >
+                                  {modo === "margen"
+                                    ? "Margen caja (%)"
+                                    : `Precio venta (${prodVentaMoneda?.codigo ?? "USD"})`}
+                                </Text>
+                                {modo === "margen" ? (
+                                  <TextInput
+                                    style={[styles.input, { height: 36, marginTop: 2 }]}
+                                    keyboardType="decimal-pad"
+                                    placeholder="15"
+                                    value={p.margen_override}
+                                    onChangeText={(val) =>
+                                      actualizarPresentacionProd(p.key, { margen_override: val })
+                                    }
+                                  />
+                                ) : modo === "fijo" ? (
+                                  <TextInput
+                                    style={[styles.input, { height: 36, marginTop: 2 }]}
+                                    keyboardType="decimal-pad"
+                                    placeholder="0.00"
+                                    value={p.precio_override}
+                                    onChangeText={(val) =>
+                                      actualizarPresentacionProd(p.key, { precio_override: val })
+                                    }
+                                  />
+                                ) : (
+                                  <TextInput
+                                    style={[styles.input, { height: 36, marginTop: 2 }]}
+                                    keyboardType="decimal-pad"
+                                    placeholder="0.00"
+                                    value={ok && r.precio > 0 ? String(r.precio) : ""}
+                                    onChangeText={(val) =>
+                                      cambiarPrecioPresentacionVenta(val, unidadesNum)
+                                    }
+                                  />
+                                )}
+                                {ok && r.precio > 0 && prodVentaMoneda && (
+                                  <Text
+                                    style={{
+                                      fontSize: 10,
+                                      color: r.bajoCosto
+                                        ? THEME.dangerStrong
+                                        : THEME.mutedForeground,
+                                      marginTop: 2,
+                                    }}
+                                  >
+                                    = {prodVentaMoneda.simbolo}
+                                    {r.precioUnitario.toFixed(prodDecVenta)} / unid.
+                                    {r.margen !== null ? ` · ${r.margen}%` : ""}
+                                    {r.bajoCosto ? " (Bajo costo)" : ""}
+                                  </Text>
+                                )}
+                              </View>
+                            </View>
+                          </View>
+                        );
+                      })
+                    )}
+                  </View>
+
+                  {/* ── MARGEN DE GANANCIA (%) + MARGEN REAL + BOTÓN REDONDEAR ── */}
+                  <View
+                    style={{
+                      backgroundColor: THEME.inputBg,
+                      borderWidth: 1,
+                      borderColor: THEME.border,
+                      borderRadius: 10,
+                      padding: 10,
+                      gap: 8,
+                    }}
+                  >
+                    <View style={{ flexDirection: "row", gap: 10 }}>
+                      <View style={{ flex: 1 }}>
+                        <Text style={{ fontSize: 12, fontWeight: "700", color: THEME.foreground }}>
+                          Margen de ganancia (%)
+                        </Text>
+                        <Text style={{ fontSize: 10, color: THEME.mutedForeground, marginBottom: 4 }}>
+                          Autocalcula el precio de venta
+                        </Text>
+                        <TextInput
+                          style={[styles.input, { height: 38, backgroundColor: THEME.card }]}
+                          keyboardType="decimal-pad"
+                          placeholder="0"
+                          placeholderTextColor={THEME.mutedForeground}
+                          value={prodFormGanancia}
+                          onChangeText={handleProdMargenChange}
+                        />
+                      </View>
+                      <View style={{ flex: 1 }}>
+                        <Text
+                          style={{
+                            fontSize: 12,
+                            fontWeight: "700",
+                            color: THEME.warningStrong,
+                          }}
+                        >
+                          Margen real
+                        </Text>
+                        <Text style={{ fontSize: 10, color: THEME.mutedForeground, marginBottom: 4 }}>
+                          Venta vs. costo en {prodVentaMoneda?.codigo || "USD"}
+                        </Text>
+                        <View
+                          style={{
+                            height: 38,
+                            borderRadius: 8,
+                            borderWidth: 1,
+                            borderColor: THEME.warningBorder,
+                            backgroundColor: THEME.warningSoft,
+                            justifyContent: "center",
+                            paddingHorizontal: 10,
+                          }}
+                        >
+                          <Text
+                            style={{
+                              fontSize: 13,
+                              fontWeight: "800",
+                              color: THEME.warningStrong,
+                              fontFamily: "monospace",
+                            }}
+                          >
+                            {prodMargenReal == null ? "—" : `${prodMargenReal.toFixed(2)} %`}
+                          </Text>
+                        </View>
+                      </View>
+                    </View>
+
+                    {prodPrecioRedondeadoSugerido && prodVentaMoneda && (
+                      <TouchableOpacity
+                        style={[
+                          styles.outlineSmallBtn,
+                          {
+                            alignSelf: "flex-start",
+                            borderColor: THEME.primary,
+                            backgroundColor: THEME.secondary,
+                          },
+                        ]}
+                        onPress={() =>
+                          handleProdPrecioVentaChange(
+                            String(prodVentaMoneda.id),
+                            prodPrecioRedondeadoSugerido.precio.toFixed(prodDecVenta)
+                          )
+                        }
+                      >
+                        <Feather name="zap" size={12} color={THEME.primary600} />
+                        <Text
+                          style={{
+                            fontSize: 11,
+                            fontWeight: "700",
+                            color: THEME.primary600,
+                          }}
+                        >
+                          Redondear a múltiplo de {prodPrecioRedondeadoSugerido.multiplo} →{" "}
+                          {prodVentaMoneda.simbolo}{" "}
+                          {prodPrecioRedondeadoSugerido.precio.toFixed(prodDecVenta)}
+                        </Text>
+                      </TouchableOpacity>
+                    )}
+                  </View>
+
+                  {/* ── TARJETAS DE PRECIOS UNITARIOS POR MONEDA (idénticas a renderMonedaCard en PC) ── */}
+                  <Text style={styles.fieldLabelSmall}>PRECIOS UNITARIOS POR MONEDA</Text>
+                  {monedas.map((m) => {
+                    const mIdStr = String(m.id);
+                    const esRefCompra = String(prodFormMonedaCostoId) === mIdStr;
+                    const esRefVenta = String(prodFormMonedaPrecioId) === mIdStr;
+                    const esAlgunaRef = esRefCompra || esRefVenta;
+                    const vals = prodFormPreciosPorMoneda[mIdStr] || {
+                      precioCompra: "",
+                      precioVenta: "",
+                    };
+
+                    return (
+                      <View
+                        key={m.id}
+                        style={{
+                          borderRadius: 10,
+                          borderWidth: 1.5,
+                          borderColor: esAlgunaRef ? THEME.primary : THEME.border,
+                          backgroundColor: esAlgunaRef ? THEME.accent : THEME.card,
+                          padding: 10,
+                          gap: 8,
+                        }}
+                      >
+                        {/* Cabecera de la moneda + selectores Moneda de compra / Moneda de venta */}
+                        <View
+                          style={{
+                            flexDirection: "row",
+                            justifyContent: "space-between",
+                            alignItems: "center",
+                            flexWrap: "wrap",
+                            gap: 6,
+                          }}
+                        >
+                          <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
+                            <View
+                              style={{
+                                paddingHorizontal: 7,
+                                paddingVertical: 3,
+                                borderRadius: 6,
+                                backgroundColor: esAlgunaRef ? THEME.primary : THEME.muted,
+                              }}
+                            >
+                              <Text
+                                style={{
+                                  fontSize: 11,
+                                  fontWeight: "800",
+                                  color: esAlgunaRef ? "#fff" : THEME.mutedForeground,
+                                }}
+                              >
+                                {m.simbolo} {m.codigo}
+                              </Text>
+                            </View>
+                            <Text
+                              style={{
+                                fontSize: 12.5,
+                                fontWeight: "700",
+                                color: THEME.foreground,
+                              }}
+                            >
+                              {m.nombre}
+                            </Text>
+                            {m.es_base === 1 && (
+                              <Text style={{ fontSize: 10, color: THEME.mutedForeground }}>
+                                (Base)
+                              </Text>
+                            )}
+                          </View>
+
+                          {/* Radios: Moneda de compra | Moneda de venta */}
+                          <View style={{ flexDirection: "row", gap: 6 }}>
+                            <TouchableOpacity
+                              onPress={() => handleSelectProdCostoMoneda(mIdStr)}
+                              style={{
+                                flexDirection: "row",
+                                alignItems: "center",
+                                gap: 4,
+                                paddingHorizontal: 8,
+                                paddingVertical: 4,
+                                borderRadius: 6,
+                                borderWidth: 1,
+                                borderColor: esRefCompra ? THEME.primary : THEME.border,
+                                backgroundColor: esRefCompra ? THEME.secondary : THEME.inputBg,
+                              }}
+                            >
+                              <Feather
+                                name={esRefCompra ? "check-circle" : "circle"}
+                                size={11}
+                                color={esRefCompra ? THEME.primary600 : THEME.mutedForeground}
+                              />
+                              <Text
+                                style={{
+                                  fontSize: 10.5,
+                                  fontWeight: "700",
+                                  color: esRefCompra ? THEME.primary600 : THEME.mutedForeground,
+                                }}
+                              >
+                                Moneda compra
+                              </Text>
+                            </TouchableOpacity>
+
+                            <TouchableOpacity
+                              onPress={() => handleSelectProdVentaMoneda(mIdStr)}
+                              style={{
+                                flexDirection: "row",
+                                alignItems: "center",
+                                gap: 4,
+                                paddingHorizontal: 8,
+                                paddingVertical: 4,
+                                borderRadius: 6,
+                                borderWidth: 1,
+                                borderColor: esRefVenta ? THEME.primary : THEME.border,
+                                backgroundColor: esRefVenta ? THEME.secondary : THEME.inputBg,
+                              }}
+                            >
+                              <Feather
+                                name={esRefVenta ? "check-circle" : "circle"}
+                                size={11}
+                                color={esRefVenta ? THEME.primary600 : THEME.mutedForeground}
+                              />
+                              <Text
+                                style={{
+                                  fontSize: 10.5,
+                                  fontWeight: "700",
+                                  color: esRefVenta ? THEME.primary600 : THEME.mutedForeground,
+                                }}
+                              >
+                                Moneda venta
+                              </Text>
+                            </TouchableOpacity>
+                          </View>
+                        </View>
+
+                        {/* Inputs: Precio de compra (COD) y Precio de venta (COD) */}
+                        <View style={{ flexDirection: "row", gap: 8 }}>
+                          <View style={{ flex: 1 }}>
+                            <View
+                              style={{
+                                flexDirection: "row",
+                                alignItems: "center",
+                                gap: 4,
+                                marginBottom: 3,
+                              }}
+                            >
+                              <Text
+                                style={{
+                                  fontSize: 10.5,
+                                  fontWeight: "700",
+                                  color: THEME.mutedForeground,
+                                }}
+                              >
+                                Precio compra ({m.codigo})
+                              </Text>
+                              {esRefCompra && (
+                                <Text
+                                  style={{
+                                    fontSize: 9.5,
+                                    fontWeight: "800",
+                                    color: THEME.primary600,
+                                  }}
+                                >
+                                  Ref.
+                                </Text>
+                              )}
+                            </View>
+                            <TextInput
+                              style={[
+                                styles.input,
+                                {
+                                  height: 38,
+                                  backgroundColor: esRefCompra ? THEME.card : THEME.inputBg,
+                                  opacity: esRefCompra ? 1 : 0.75,
+                                },
+                              ]}
+                              editable={esRefCompra}
+                              keyboardType="decimal-pad"
+                              placeholder={esRefCompra ? "0.00" : "Auto..."}
+                              placeholderTextColor={THEME.mutedForeground}
+                              value={vals.precioCompra}
+                              onChangeText={(v) => handleProdPrecioCompraChange(mIdStr, v)}
+                            />
+                          </View>
+
+                          <View style={{ flex: 1 }}>
+                            <View
+                              style={{
+                                flexDirection: "row",
+                                alignItems: "center",
+                                gap: 4,
+                                marginBottom: 3,
+                              }}
+                            >
+                              <Text
+                                style={{
+                                  fontSize: 10.5,
+                                  fontWeight: "700",
+                                  color: THEME.mutedForeground,
+                                }}
+                              >
+                                Precio venta ({m.codigo})
+                              </Text>
+                              {esRefVenta && (
+                                <Text
+                                  style={{
+                                    fontSize: 9.5,
+                                    fontWeight: "800",
+                                    color: THEME.primary600,
+                                  }}
+                                >
+                                  Ref.
+                                </Text>
+                              )}
+                            </View>
+                            <TextInput
+                              style={[
+                                styles.input,
+                                {
+                                  height: 38,
+                                  backgroundColor: esRefVenta ? THEME.card : THEME.inputBg,
+                                  opacity: esRefVenta ? 1 : 0.75,
+                                },
+                              ]}
+                              editable={esRefVenta}
+                              keyboardType="decimal-pad"
+                              placeholder={esRefVenta ? "0.00" : "Auto..."}
+                              placeholderTextColor={THEME.mutedForeground}
+                              value={vals.precioVenta}
+                              onChangeText={(v) => handleProdPrecioVentaChange(mIdStr, v)}
+                            />
+                          </View>
+                        </View>
+                      </View>
+                    );
+                  })}
+                </View>
+              )}
+
+              {/* ==================== PASO 3: EXISTENCIAS (create & edit) ==================== */}
+              {prodModalMode !== "view" && prodFormStep === 3 && (
+                <View style={{ gap: 12 }}>
+                  {/* StockConPresentaciones: cantidad + selector Unidad vs Presentaciones */}
+                  <View
+                    style={{
+                      backgroundColor: THEME.inputBg,
+                      borderWidth: 1,
+                      borderColor: THEME.border,
+                      borderRadius: 10,
+                      padding: 10,
+                      gap: 8,
+                    }}
+                  >
+                    <Text style={styles.fieldLabelSmall}>
+                      {prodModalMode === "create"
+                        ? "EXISTENCIAS INICIALES"
+                        : "EXISTENCIAS ACTUALES"}
+                    </Text>
+
+                    {/* Selector de Unidad o Presentación */}
+                    {prodFormPresentaciones.some(
+                      (p) => p.nombre.trim() && parseInt(p.unidades, 10) > 1
+                    ) && (
+                      <ScrollView
+                        horizontal
+                        showsHorizontalScrollIndicator={false}
+                        contentContainerStyle={{ gap: 6 }}
+                      >
+                        <TouchableOpacity
+                          style={[
+                            styles.catChip,
+                            !prodFormStockUnidadId && styles.catChipActive,
+                          ]}
+                          onPress={() => cambiarUnidadStockProd("")}
+                        >
+                          <Text
+                            style={[
+                              styles.catChipText,
+                              !prodFormStockUnidadId && styles.catChipTextActive,
+                            ]}
+                          >
+                            Unidades (×1)
+                          </Text>
+                        </TouchableOpacity>
+                        {prodFormPresentaciones
+                          .filter((p) => p.nombre.trim() && parseInt(p.unidades, 10) > 1)
+                          .map((p) => {
+                            const sel = prodFormStockUnidadId === p.key;
+                            return (
+                              <TouchableOpacity
+                                key={p.key}
+                                style={[styles.catChip, sel && styles.catChipActive]}
+                                onPress={() => cambiarUnidadStockProd(p.key)}
+                              >
+                                <Text
+                                  style={[styles.catChipText, sel && styles.catChipTextActive]}
+                                >
+                                  {p.nombre.trim()} (×{p.unidades})
+                                </Text>
+                              </TouchableOpacity>
+                            );
+                          })}
+                      </ScrollView>
+                    )}
+
+                    <View style={{ flexDirection: "row", gap: 10 }}>
+                      <View style={{ flex: 1 }}>
+                        <Text style={{ fontSize: 10.5, color: THEME.mutedForeground }}>
+                          Cantidad en{" "}
+                          {prodFormStockUnidadId
+                            ? prodFormPresentaciones.find(
+                                (p) => p.key === prodFormStockUnidadId
+                              )?.nombre || "presentación"
+                            : "Unidades"}
+                        </Text>
+                        <TextInput
+                          style={[styles.input, { marginTop: 4, backgroundColor: THEME.card }]}
+                          keyboardType="decimal-pad"
+                          value={prodFormStockTexto}
+                          onChangeText={teclearStockProd}
+                        />
+                        {factorDeStockProd(prodFormStockUnidadId) > 1 && (
+                          <Text
+                            style={{
+                              fontSize: 11,
+                              fontWeight: "700",
+                              color: THEME.primary600,
+                              marginTop: 4,
+                            }}
+                          >
+                            = {prodFormStock} unidades en total
+                          </Text>
+                        )}
+                      </View>
+
+                      <View style={{ flex: 1 }}>
+                        <Text style={{ fontSize: 10.5, color: THEME.mutedForeground }}>
+                          Existencias mínimas (alerta)
+                        </Text>
+                        <TextInput
+                          style={[styles.input, { marginTop: 4, backgroundColor: THEME.card }]}
+                          keyboardType="numeric"
+                          value={prodFormStockMin}
+                          onChangeText={setProdFormStockMin}
+                        />
+                      </View>
+                    </View>
+                  </View>
+
+                  {/* Switch Producto Activo */}
+                  <TouchableOpacity
+                    activeOpacity={0.8}
+                    onPress={() => setProdFormActivo((v) => !v)}
+                    style={{
+                      flexDirection: "row",
+                      alignItems: "center",
+                      justifyContent: "space-between",
+                      backgroundColor: THEME.inputBg,
+                      borderWidth: 1,
+                      borderColor: prodFormActivo ? THEME.primary : THEME.border,
+                      borderRadius: 10,
+                      paddingHorizontal: 12,
+                      paddingVertical: 10,
+                    }}
+                  >
+                    <Text style={{ fontSize: 13, fontWeight: "700", color: THEME.foreground }}>
+                      Producto Activo
+                    </Text>
+                    <View
+                      style={{
+                        width: 44,
+                        height: 26,
+                        borderRadius: 13,
+                        backgroundColor: prodFormActivo ? THEME.primary : THEME.muted,
+                        justifyContent: "center",
+                        paddingHorizontal: 3,
+                      }}
+                    >
+                      <View
+                        style={{
+                          width: 20,
+                          height: 20,
+                          borderRadius: 10,
+                          backgroundColor: "#fff",
+                          alignSelf: prodFormActivo ? "flex-end" : "flex-start",
+                        }}
+                      />
+                    </View>
+                  </TouchableOpacity>
+
+                  {/* Resumen del producto (idéntico al Paso 3 de PC en modo Crear) */}
+                  <View
+                    style={{
+                      backgroundColor: THEME.inputBg,
+                      borderWidth: 1,
+                      borderColor: THEME.border,
+                      borderRadius: 10,
+                      padding: 12,
+                      gap: 6,
+                    }}
+                  >
+                    <Text style={styles.fieldLabelSmall}>RESUMEN DEL PRODUCTO</Text>
+                    <View style={styles.summaryRow}>
+                      <Text style={styles.summaryLabel}>Código:</Text>
+                      <Text style={styles.summaryVal}>{prodFormCodigo || "—"}</Text>
+                    </View>
+                    <View style={styles.summaryRow}>
+                      <Text style={styles.summaryLabel}>Nombre:</Text>
+                      <Text style={styles.summaryVal}>{prodFormNombre || "—"}</Text>
+                    </View>
+                    <View style={styles.summaryRow}>
+                      <Text style={styles.summaryLabel}>Moneda de compra:</Text>
+                      <Text style={styles.summaryVal}>
+                        {prodCostoMoneda
+                          ? `${prodCostoMoneda.simbolo} ${prodCostoMoneda.codigo}`
+                          : "—"}
+                      </Text>
+                    </View>
+                    <View style={styles.summaryRow}>
+                      <Text style={styles.summaryLabel}>Precio de compra (Costo):</Text>
+                      <Text style={styles.summaryVal}>
+                        {prodCostoMoneda &&
+                        prodFormPreciosPorMoneda[String(prodCostoMoneda.id)]?.precioCompra
+                          ? `${prodCostoMoneda.simbolo} ${
+                              prodFormPreciosPorMoneda[String(prodCostoMoneda.id)].precioCompra
+                            }`
+                          : "—"}
+                      </Text>
+                    </View>
+                    <View style={styles.summaryRow}>
+                      <Text style={styles.summaryLabel}>Moneda de venta:</Text>
+                      <Text style={styles.summaryVal}>
+                        {prodVentaMoneda
+                          ? `${prodVentaMoneda.simbolo} ${prodVentaMoneda.codigo}`
+                          : "—"}
+                      </Text>
+                    </View>
+                    <View style={styles.summaryRow}>
+                      <Text style={styles.summaryLabel}>Precio de venta:</Text>
+                      <Text style={styles.summaryVal}>
+                        {prodVentaMoneda &&
+                        prodFormPreciosPorMoneda[String(prodVentaMoneda.id)]?.precioVenta
+                          ? `${prodVentaMoneda.simbolo} ${
+                              prodFormPreciosPorMoneda[String(prodVentaMoneda.id)].precioVenta
+                            }`
+                          : "—"}
+                      </Text>
+                    </View>
+                    <View style={styles.summaryRow}>
+                      <Text style={styles.summaryLabel}>Presentaciones:</Text>
+                      <Text style={styles.summaryVal}>
+                        {prodFormPresentaciones.length > 0
+                          ? prodFormPresentaciones
+                              .map((p) => `${p.nombre.trim() || "—"} ×${p.unidades || "?"}`)
+                              .join(", ")
+                          : "— (se vende por Unidad)"}
+                      </Text>
+                    </View>
+                    <View style={styles.summaryRow}>
+                      <Text style={styles.summaryLabel}>Existencias:</Text>
+                      <Text style={styles.summaryVal}>{prodFormStock} uds.</Text>
+                    </View>
+                  </View>
+                </View>
+              )}
+            </ScrollView>
+
+            {/* Footer de Navegación / Acciones idéntico a PC */}
+            <View
+              style={{
+                flexDirection: "row",
+                gap: 8,
+                paddingTop: 10,
+                borderTopWidth: 1,
+                borderTopColor: THEME.border,
+              }}
+            >
+              {prodModalMode === "view" ? (
+                <>
+                  <TouchableOpacity
+                    style={[styles.outlineSmallBtn, { flex: 1, height: 42, justifyContent: "center" }]}
+                    onPress={() => setProdModalOpen(false)}
+                  >
+                    <Text style={styles.outlineSmallBtnText}>Cerrar</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    style={[styles.primaryBtn, { flex: 1, height: 42, marginTop: 0 }]}
+                    onPress={() => setProdModalMode("edit")}
+                  >
+                    <Feather name="edit-2" size={14} color="#fff" />
+                    <Text style={styles.primaryBtnText}>Editar Producto</Text>
+                  </TouchableOpacity>
+                </>
+              ) : prodModalMode === "create" ? (
+                <>
+                  {prodFormStep > 1 ? (
+                    <TouchableOpacity
+                      style={[
+                        styles.outlineSmallBtn,
+                        { height: 42, paddingHorizontal: 12, justifyContent: "center" },
+                      ]}
+                      onPress={prevStepProd}
+                      disabled={savingProd}
+                    >
+                      <Feather name="chevron-left" size={14} color={THEME.foreground} />
+                      <Text style={styles.outlineSmallBtnText}>Anterior</Text>
+                    </TouchableOpacity>
+                  ) : null}
+
+                  <TouchableOpacity
+                    style={[
+                      styles.outlineSmallBtn,
+                      {
+                        flex: prodFormStep === 1 ? 1 : undefined,
+                        height: 42,
+                        paddingHorizontal: 14,
+                        justifyContent: "center",
+                      },
+                    ]}
+                    onPress={() => setProdModalOpen(false)}
+                    disabled={savingProd}
+                  >
+                    <Text style={styles.outlineSmallBtnText}>Cancelar</Text>
+                  </TouchableOpacity>
+
+                  {prodFormStep < 3 ? (
+                    <TouchableOpacity
+                      style={[styles.primaryBtn, { flex: 1, height: 42, marginTop: 0 }]}
+                      onPress={nextStepProd}
+                    >
+                      <Text style={styles.primaryBtnText}>Siguiente</Text>
+                      <Feather name="chevron-right" size={15} color="#fff" />
+                    </TouchableOpacity>
+                  ) : (
+                    <TouchableOpacity
+                      style={[styles.primaryBtn, { flex: 1, height: 42, marginTop: 0 }]}
+                      onPress={handleSaveProducto}
+                      disabled={savingProd}
+                    >
+                      {savingProd ? (
+                        <ActivityIndicator color="#fff" />
+                      ) : (
+                        <>
+                          <Feather name="check" size={16} color="#fff" />
+                          <Text style={styles.primaryBtnText}>Crear Producto</Text>
+                        </>
+                      )}
+                    </TouchableOpacity>
+                  )}
+                </>
+              ) : (
+                /* Modo Editar: Cancelar + Guardar desde cualquier pestaña (igual que en PC) */
+                <>
+                  <TouchableOpacity
+                    style={[styles.outlineSmallBtn, { flex: 1, height: 42, justifyContent: "center" }]}
+                    onPress={() => setProdModalOpen(false)}
+                    disabled={savingProd}
+                  >
+                    <Text style={styles.outlineSmallBtnText}>Cancelar</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    style={[styles.primaryBtn, { flex: 1.4, height: 42, marginTop: 0 }]}
+                    onPress={handleSaveProducto}
+                    disabled={savingProd || !prodFormNombre.trim()}
+                  >
+                    {savingProd ? (
+                      <ActivityIndicator color="#fff" />
+                    ) : (
+                      <>
+                        <Feather name="check" size={16} color="#fff" />
+                        <Text style={styles.primaryBtnText}>Guardar</Text>
+                      </>
+                    )}
+                  </TouchableOpacity>
+                </>
+              )}
+            </View>
+          </View>
+        </KeyboardAvoidingView>
+      </Modal>
+
+      {/* ==================== MODAL CATEGORÍA ==================== */}
+      <Modal
+        visible={catModalOpen}
+        transparent
+        animationType="slide"
+        onRequestClose={() => setCatModalOpen(false)}
+      >
+        <KeyboardAvoidingView
+          behavior={Platform.OS === "ios" ? "padding" : undefined}
+          style={styles.modalBackdrop}
+        >
+          <View style={styles.modalSheet}>
+            <View style={styles.modalHeader}>
+              <Text style={styles.modalTitle}>
+                {editingCat ? "Editar Categoría" : "Nueva Categoría"}
+              </Text>
+              <TouchableOpacity onPress={() => setCatModalOpen(false)}>
+                <Feather name="x" size={20} color={THEME.mutedForeground} />
+              </TouchableOpacity>
+            </View>
+            <Text style={styles.fieldLabelSmall}>NOMBRE DE CATEGORÍA *</Text>
+            <TextInput
+              style={styles.input}
+              placeholder="Ej. Víveres, Bebidas..."
+              value={catFormNombre}
+              onChangeText={setCatFormNombre}
+            />
+            <Text style={[styles.fieldLabelSmall, { marginTop: 10 }]}>DESCRIPCIÓN</Text>
+            <TextInput
+              style={styles.input}
+              placeholder="Descripción opcional"
+              value={catFormDesc}
+              onChangeText={setCatFormDesc}
+            />
+            <TouchableOpacity
+              style={[styles.primaryBtn, { marginTop: 14 }]}
+              onPress={handleSaveCategoria}
+              disabled={savingCat}
+            >
+              <Text style={styles.primaryBtnText}>
+                {savingCat ? "Guardando..." : "Guardar Categoría"}
+              </Text>
+            </TouchableOpacity>
+          </View>
+        </KeyboardAvoidingView>
+      </Modal>
+
+      {/* ==================== MODAL MARCA ==================== */}
+      <Modal
+        visible={marcaModalOpen}
+        transparent
+        animationType="slide"
+        onRequestClose={() => setMarcaModalOpen(false)}
+      >
+        <KeyboardAvoidingView
+          behavior={Platform.OS === "ios" ? "padding" : undefined}
+          style={styles.modalBackdrop}
+        >
+          <View style={styles.modalSheet}>
+            <View style={styles.modalHeader}>
+              <Text style={styles.modalTitle}>{editingMarca ? "Editar Marca" : "Nueva Marca"}</Text>
+              <TouchableOpacity onPress={() => setMarcaModalOpen(false)}>
+                <Feather name="x" size={20} color={THEME.mutedForeground} />
+              </TouchableOpacity>
+            </View>
+            <Text style={styles.fieldLabelSmall}>NOMBRE DE LA MARCA *</Text>
+            <TextInput
+              style={styles.input}
+              placeholder="Ej. Polar, Nestlé..."
+              value={marcaFormNombre}
+              onChangeText={setMarcaFormNombre}
+            />
+            <Text style={[styles.fieldLabelSmall, { marginTop: 10 }]}>DESCRIPCIÓN</Text>
+            <TextInput
+              style={styles.input}
+              placeholder="Descripción opcional"
+              value={marcaFormDesc}
+              onChangeText={setMarcaFormDesc}
+            />
+            <TouchableOpacity
+              style={[styles.primaryBtn, { marginTop: 14 }]}
+              onPress={handleSaveMarca}
+              disabled={savingMarca}
+            >
+              <Text style={styles.primaryBtnText}>
+                {savingMarca ? "Guardando..." : "Guardar Marca"}
+              </Text>
+            </TouchableOpacity>
+          </View>
+        </KeyboardAvoidingView>
+      </Modal>
+
+      {/* ==================== MODAL PROVEEDOR ==================== */}
+      <Modal
+        visible={provModalOpen}
+        transparent
+        animationType="slide"
+        onRequestClose={() => setProvModalOpen(false)}
+      >
+        <KeyboardAvoidingView
+          behavior={Platform.OS === "ios" ? "padding" : undefined}
+          style={styles.modalBackdrop}
+        >
+          <View style={[styles.modalSheet, { maxHeight: "88%" }]}>
+            <View style={styles.modalHeader}>
+              <Text style={styles.modalTitle}>
+                {editingProv ? "Editar Proveedor" : "Nuevo Proveedor"}
+              </Text>
+              <TouchableOpacity onPress={() => setProvModalOpen(false)}>
+                <Feather name="x" size={20} color={THEME.mutedForeground} />
+              </TouchableOpacity>
+            </View>
+            <ScrollView contentContainerStyle={{ gap: 8, paddingBottom: 16 }} keyboardShouldPersistTaps="handled">
+              <Text style={styles.fieldLabelSmall}>NOMBRE / RAZÓN SOCIAL *</Text>
+              <TextInput style={styles.input} value={provFormNombre} onChangeText={setProvFormNombre} placeholder="Ej. Distribuidora Central C.A." />
+              <View style={{ flexDirection: "row", gap: 8 }}>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.fieldLabelSmall}>RIF / DOCUMENTO</Text>
+                  <TextInput style={styles.input} value={provFormDoc} onChangeText={setProvFormDoc} placeholder="J-12345678-9" />
+                </View>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.fieldLabelSmall}>TELÉFONO</Text>
+                  <TextInput style={styles.input} value={provFormTel} onChangeText={setProvFormTel} placeholder="+58..." />
+                </View>
+              </View>
+              <View style={{ flexDirection: "row", gap: 8 }}>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.fieldLabelSmall}>PERSONA CONTACTO</Text>
+                  <TextInput style={styles.input} value={provFormContacto} onChangeText={setProvFormContacto} />
+                </View>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.fieldLabelSmall}>CIUDAD</Text>
+                  <TextInput style={styles.input} value={provFormCiudad} onChangeText={setProvFormCiudad} />
+                </View>
+              </View>
+              <Text style={styles.fieldLabelSmall}>EMAIL</Text>
+              <TextInput style={styles.input} value={provFormEmail} onChangeText={setProvFormEmail} keyboardType="email-address" autoCapitalize="none" />
+              <Text style={styles.fieldLabelSmall}>DIRECCIÓN</Text>
+              <TextInput style={styles.input} value={provFormDir} onChangeText={setProvFormDir} />
+              <TouchableOpacity
+                style={[styles.primaryBtn, { marginTop: 10 }]}
+                onPress={handleSaveProveedor}
+                disabled={savingProv}
+              >
+                <Text style={styles.primaryBtnText}>
+                  {savingProv ? "Guardando..." : "Guardar Proveedor"}
+                </Text>
+              </TouchableOpacity>
+            </ScrollView>
+          </View>
+        </KeyboardAvoidingView>
+      </Modal>
+
+      {/* ==================== MODAL NUEVA COMPRA ==================== */}
+      <Modal
+        visible={nuevaCompraModalOpen}
+        transparent
+        animationType="slide"
+        onRequestClose={() => setNuevaCompraModalOpen(false)}
+      >
+        <KeyboardAvoidingView
+          behavior={Platform.OS === "ios" ? "padding" : undefined}
+          style={styles.modalBackdrop}
+        >
+          <View style={[styles.modalSheet, { maxHeight: "92%" }]}>
+            <View style={styles.modalHeader}>
+              <Text style={styles.modalTitle}>Registrar Nueva Compra</Text>
+              <TouchableOpacity onPress={() => setNuevaCompraModalOpen(false)}>
+                <Feather name="x" size={20} color={THEME.mutedForeground} />
+              </TouchableOpacity>
+            </View>
+
+            <ScrollView contentContainerStyle={{ gap: 10, paddingBottom: 20 }} keyboardShouldPersistTaps="handled">
+              <Text style={styles.fieldLabelSmall}>PROVEEDOR</Text>
+              <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 6 }}>
+                <TouchableOpacity
+                  style={[styles.catChip, !ncProveedorId && styles.catChipActive]}
+                  onPress={() => setNcProveedorId("")}
+                >
+                  <Text style={[styles.catChipText, !ncProveedorId && styles.catChipTextActive]}>Sin Proveedor</Text>
+                </TouchableOpacity>
+                {proveedoresList.map((pv: any) => {
+                  const sel = String(ncProveedorId) === String(pv.id);
+                  return (
+                    <TouchableOpacity
+                      key={pv.id}
+                      style={[styles.catChip, sel && styles.catChipActive]}
+                      onPress={() => setNcProveedorId(String(pv.id))}
+                    >
+                      <Text style={[styles.catChipText, sel && styles.catChipTextActive]}>{pv.nombre}</Text>
+                    </TouchableOpacity>
+                  );
+                })}
+              </ScrollView>
+
+              <Text style={styles.fieldLabelSmall}>MONEDA DE COMPRA</Text>
+              <View style={{ flexDirection: "row", gap: 6 }}>
+                {monedas.map((m) => {
+                  const sel = String(ncMonedaId) === String(m.id);
+                  return (
+                    <TouchableOpacity
+                      key={m.id}
+                      style={[styles.posModeTab, sel && styles.posModeTabActive]}
+                      onPress={() => setNcMonedaId(String(m.id))}
+                    >
+                      <Text style={[styles.posModeTabText, sel && styles.posModeTabTextActive]}>
+                        {m.codigo} ({m.simbolo})
+                      </Text>
+                    </TouchableOpacity>
+                  );
+                })}
+              </View>
+
+              <Text style={styles.fieldLabelSmall}>MODALIDAD DE PAGO</Text>
+              <View style={{ flexDirection: "row", gap: 6 }}>
+                {(["contado", "parcial", "credito"] as const).map((tp) => (
+                  <TouchableOpacity
+                    key={tp}
+                    style={[styles.posModeTab, ncTipoPago === tp && styles.posModeTabActive]}
+                    onPress={() => setNcTipoPago(tp)}
+                  >
+                    <Text style={[styles.posModeTabText, ncTipoPago === tp && styles.posModeTabTextActive]}>
+                      {tp === "contado" ? "Contado" : tp === "parcial" ? "Parcial" : "A Crédito"}
+                    </Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+
+              {ncTipoPago !== "credito" && (
+                <>
+                  <Text style={styles.fieldLabelSmall}>MÉTODO DE PAGO / CAJA</Text>
+                  <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 6 }}>
+                    {metodosPago.map((mp) => {
+                      const sel = String(ncMetodoPagoId) === String(mp.id);
+                      return (
+                        <TouchableOpacity
+                          key={mp.id}
+                          style={[styles.metodoChip, sel && styles.metodoChipActive]}
+                          onPress={() => setNcMetodoPagoId(String(mp.id))}
+                        >
+                          <Text style={[styles.metodoChipText, sel && styles.metodoChipTextActive]}>
+                            {mp.nombre} ({mp.moneda_codigo})
+                          </Text>
+                        </TouchableOpacity>
+                      );
+                    })}
+                  </ScrollView>
+                </>
+              )}
+
+              {ncTipoPago === "parcial" && (
+                <>
+                  <Text style={styles.fieldLabelSmall}>ABONO INICIAL</Text>
+                  <TextInput
+                    style={styles.input}
+                    keyboardType="decimal-pad"
+                    placeholder="0.00"
+                    value={ncAbonoInicial}
+                    onChangeText={setNcAbonoInicial}
+                  />
+                </>
+              )}
+
+              {/* Buscador + Escáner para agregar productos a la compra */}
+              <Text style={styles.fieldLabelSmall}>AGREGAR PRODUCTOS A LA COMPRA</Text>
+              <View style={{ flexDirection: "row", gap: 8 }}>
+                <View style={[styles.searchBox, { flex: 1 }]}>
+                  <Feather name="search" size={15} color={THEME.mutedForeground} />
+                  <TextInput
+                    style={styles.searchBoxInput}
+                    placeholder="Buscar producto para añadir..."
+                    value={ncSearchProd}
+                    onChangeText={setNcSearchProd}
+                  />
+                </View>
+                <TouchableOpacity
+                  style={styles.posScanTriggerBtn}
+                  onPress={() =>
+                    openBarcodeScanner("unico", async (code) => {
+                      const hit =
+                        productos.find((p) => p.codigo.toLowerCase() === code.toLowerCase()) ||
+                        (await findLocalProductoByBarcode(code))?.producto;
+                      if (hit) {
+                        addProductoToCompra(hit);
+                        showToast(`${hit.nombre} agregado a la compra`, "success");
+                      } else {
+                        showToast(`Código ${code} no registrado`, "error");
+                      }
+                    })
+                  }
+                >
+                  <Feather name="camera" size={15} color="#fff" />
+                  <Text style={styles.posScanTriggerBtnText}>Escanear</Text>
+                </TouchableOpacity>
+              </View>
+
+              {ncSearchProd.trim().length > 0 && (
+                <View style={{ maxHeight: 150, borderWidth: 1, borderColor: THEME.border, borderRadius: 8, backgroundColor: THEME.inputBg }}>
+                  <ScrollView nestedScrollEnabled keyboardShouldPersistTaps="handled">
+                    {productos
+                      .filter(
+                        (p) =>
+                          p.nombre.toLowerCase().includes(ncSearchProd.toLowerCase()) ||
+                          p.codigo.toLowerCase().includes(ncSearchProd.toLowerCase())
+                      )
+                      .slice(0, 12)
+                      .map((p) => (
+                        <TouchableOpacity
+                          key={p.id}
+                          style={{ padding: 9, borderBottomWidth: 1, borderBottomColor: THEME.border, flexDirection: "row", justifyContent: "space-between" }}
+                          onPress={() => {
+                            addProductoToCompra(p);
+                            setNcSearchProd("");
+                          }}
+                        >
+                          <Text style={{ fontSize: 12.5, fontWeight: "700", color: THEME.foreground }}>{p.nombre}</Text>
+                          <Text style={{ fontSize: 11, color: THEME.primary600, fontWeight: "700" }}>+ Añadir</Text>
+                        </TouchableOpacity>
+                      ))}
+                  </ScrollView>
+                </View>
+              )}
+
+              {/* Lista de ítems en la compra */}
+              {ncItems.map((it, idx) => (
+                <View
+                  key={it.producto.id}
+                  style={{
+                    backgroundColor: THEME.inputBg,
+                    borderWidth: 1,
+                    borderColor: THEME.border,
+                    borderRadius: 8,
+                    padding: 10,
+                    gap: 6,
+                  }}
+                >
+                  <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center" }}>
+                    <Text style={{ fontSize: 13, fontWeight: "800", color: THEME.foreground, flex: 1 }}>
+                      {it.producto.nombre}
+                    </Text>
+                    <TouchableOpacity onPress={() => setNcItems((prev) => prev.filter((_, i) => i !== idx))}>
+                      <Feather name="trash-2" size={15} color={THEME.dangerStrong} />
+                    </TouchableOpacity>
+                  </View>
+                  <View style={{ flexDirection: "row", gap: 8 }}>
+                    <View style={{ flex: 1 }}>
+                      <Text style={styles.fieldLabelSmall}>CANTIDAD</Text>
+                      <TextInput
+                        style={[styles.input, { backgroundColor: THEME.card, height: 38 }]}
+                        keyboardType="numeric"
+                        value={it.cantidadStr}
+                        onChangeText={(v) =>
+                          setNcItems((prev) =>
+                            prev.map((x, i) => (i === idx ? { ...x, cantidadStr: v } : x))
+                          )
+                        }
+                      />
+                    </View>
+                    <View style={{ flex: 1 }}>
+                      <Text style={styles.fieldLabelSmall}>COSTO UNITARIO</Text>
+                      <TextInput
+                        style={[styles.input, { backgroundColor: THEME.card, height: 38 }]}
+                        keyboardType="decimal-pad"
+                        value={it.costoUnitStr}
+                        onChangeText={(v) =>
+                          setNcItems((prev) =>
+                            prev.map((x, i) => (i === idx ? { ...x, costoUnitStr: v } : x))
+                          )
+                        }
+                      />
+                    </View>
+                  </View>
+                </View>
+              ))}
+
+              <TouchableOpacity
+                style={[styles.primaryBtn, { marginTop: 10 }]}
+                onPress={handleSaveCompra}
+                disabled={savingCompra}
+              >
+                {savingCompra ? (
+                  <ActivityIndicator color="#fff" />
+                ) : (
+                  <>
+                    <Feather name="check-circle" size={16} color="#fff" />
+                    <Text style={styles.primaryBtnText}>
+                      Confirmar Compra (
+                      {fmt(
+                        ncItems.reduce(
+                          (s, x) =>
+                            s +
+                            (parseFloat(x.cantidadStr) || 0) *
+                              (parseFloat(x.costoUnitStr.replace(",", ".")) || 0),
+                          0
+                        ),
+                        monedas.find((m) => String(m.id) === String(ncMonedaId))?.codigo || monedaSeleccionada
+                      )}
+                      )
+                    </Text>
+                  </>
+                )}
+              </TouchableOpacity>
+            </ScrollView>
+          </View>
+        </KeyboardAvoidingView>
+      </Modal>
+
+      {/* ==================== MODAL DETALLE DE COMPRA ==================== */}
+      <Modal
+        visible={!!compraDetailModal}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setCompraDetailModal(null)}
+      >
+        <View style={styles.modalBackdrop}>
+          <View style={styles.modalSheet}>
+            {compraDetailModal && (
+              <>
+                <View style={styles.modalHeader}>
+                  <View>
+                    <Text style={styles.modalTitle}>Compra {compraDetailModal.compra.numero}</Text>
+                    <Text style={styles.clientCardMeta}>
+                      {compraDetailModal.compra.proveedor_nombre || "Sin proveedor"} ·{" "}
+                      {String(compraDetailModal.compra.fecha || "").slice(0, 10)}
+                    </Text>
+                  </View>
+                  <TouchableOpacity onPress={() => setCompraDetailModal(null)}>
+                    <Feather name="x" size={20} color={THEME.mutedForeground} />
+                  </TouchableOpacity>
+                </View>
+                <ScrollView style={{ maxHeight: 340 }} contentContainerStyle={{ gap: 8 }}>
+                  {compraDetailModal.items.map((it: any, idx: number) => (
+                    <View
+                      key={idx}
+                      style={{
+                        flexDirection: "row",
+                        justifyContent: "space-between",
+                        paddingVertical: 6,
+                        borderBottomWidth: 1,
+                        borderBottomColor: THEME.border,
+                      }}
+                    >
+                      <View style={{ flex: 1 }}>
+                        <Text style={{ fontSize: 13, fontWeight: "700", color: THEME.foreground }}>
+                          {it.producto_nombre || `Producto #${it.producto_id}`}
+                        </Text>
+                        <Text style={styles.clientCardMeta}>
+                          {it.cantidad} x {fmt(Number(it.costo_unit) || 0, compraDetailModal.compra.moneda_codigo || monedaSeleccionada)}
+                        </Text>
+                      </View>
+                      <Text style={{ fontSize: 13, fontWeight: "800", color: THEME.primary600 }}>
+                        {fmt(Number(it.subtotal) || 0, compraDetailModal.compra.moneda_codigo || monedaSeleccionada)}
+                      </Text>
+                    </View>
+                  ))}
+                </ScrollView>
+
+                <View
+                  style={{
+                    flexDirection: "row",
+                    gap: 8,
+                    marginTop: 14,
+                    paddingTop: 10,
+                    borderTopWidth: 1,
+                    borderTopColor: THEME.border,
+                  }}
+                >
+                  <TouchableOpacity
+                    style={[
+                      styles.cartHeaderActionBtn,
+                      {
+                        flex: 1,
+                        backgroundColor: THEME.warningSoft,
+                        borderColor: THEME.warningBorder,
+                      },
+                    ]}
+                    onPress={() =>
+                      openRetornoDirectoFromCompra(
+                        compraDetailModal.compra,
+                        compraDetailModal.items
+                      )
+                    }
+                  >
+                    <Feather name="rotate-ccw" size={14} color={THEME.warningStrong} />
+                    <Text
+                      style={[
+                        styles.cartHeaderActionBtnText,
+                        { color: THEME.warningStrong },
+                      ]}
+                    >
+                      Devolver productos
+                    </Text>
+                  </TouchableOpacity>
+
+                  <TouchableOpacity
+                    style={[
+                      styles.cartHeaderActionBtn,
+                      {
+                        flex: 1,
+                        backgroundColor: THEME.dangerSoft,
+                        borderColor: THEME.dangerBorder,
+                      },
+                    ]}
+                    onPress={() => handleDeleteCompra(compraDetailModal.compra)}
+                  >
+                    <Feather name="trash-2" size={14} color={THEME.dangerStrong} />
+                    <Text
+                      style={[
+                        styles.cartHeaderActionBtnText,
+                        { color: THEME.dangerStrong },
+                      ]}
+                    >
+                      Eliminar compra
+                    </Text>
+                  </TouchableOpacity>
+                </View>
+              </>
+            )}
+          </View>
+        </View>
+      </Modal>
+
+      {/* ==================== MODAL NUEVO RETORNO ==================== */}
+      <Modal
+        visible={nuevoRetornoModalOpen}
+        transparent
+        animationType="slide"
+        onRequestClose={() => setNuevoRetornoModalOpen(false)}
+      >
+        <KeyboardAvoidingView
+          behavior={Platform.OS === "ios" ? "padding" : undefined}
+          style={styles.modalBackdrop}
+        >
+          <View style={[styles.modalSheet, { maxHeight: "90%" }]}>
+            <View style={styles.modalHeader}>
+              <Text style={styles.modalTitle}>Registrar Retorno / Devolución</Text>
+              <TouchableOpacity onPress={() => setNuevoRetornoModalOpen(false)}>
+                <Feather name="x" size={20} color={THEME.mutedForeground} />
+              </TouchableOpacity>
+            </View>
+            <ScrollView contentContainerStyle={{ gap: 10, paddingBottom: 16 }} keyboardShouldPersistTaps="handled">
+              <Text style={styles.fieldLabelSmall}>TIPO DE RETORNO</Text>
+              <View style={{ flexDirection: "row", gap: 8 }}>
+                {(["Cliente", "Proveedor"] as const).map((t) => (
+                  <TouchableOpacity
+                    key={t}
+                    style={[styles.posModeTab, nrTipo === t && styles.posModeTabActive]}
+                    onPress={() => setNrTipo(t)}
+                  >
+                    <Text style={[styles.posModeTabText, nrTipo === t && styles.posModeTabTextActive]}>{t}</Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+
+              <Text style={styles.fieldLabelSmall}>MOTIVO DE DEVOLUCIÓN</Text>
+              <TextInput style={styles.input} value={nrMotivo} onChangeText={setNrMotivo} />
+
+              <Text style={styles.fieldLabelSmall}>AGREGAR PRODUCTO DEVUELTO</Text>
+              <View style={{ flexDirection: "row", gap: 8 }}>
+                <View style={[styles.searchBox, { flex: 1 }]}>
+                  <Feather name="search" size={15} color={THEME.mutedForeground} />
+                  <TextInput
+                    style={styles.searchBoxInput}
+                    placeholder="Buscar producto..."
+                    value={nrSearchProd}
+                    onChangeText={setNrSearchProd}
+                  />
+                </View>
+                <TouchableOpacity
+                  style={styles.posScanTriggerBtn}
+                  onPress={() =>
+                    openBarcodeScanner("unico", async (code) => {
+                      const hit =
+                        productos.find((p) => p.codigo.toLowerCase() === code.toLowerCase()) ||
+                        (await findLocalProductoByBarcode(code))?.producto;
+                      if (hit) addProductoToRetorno(hit);
+                    })
+                  }
+                >
+                  <Feather name="camera" size={15} color="#fff" />
+                  <Text style={styles.posScanTriggerBtnText}>Escanear</Text>
+                </TouchableOpacity>
+              </View>
+
+              {nrSearchProd.trim().length > 0 && (
+                <View style={{ maxHeight: 140, borderWidth: 1, borderColor: THEME.border, borderRadius: 8, backgroundColor: THEME.inputBg }}>
+                  <ScrollView nestedScrollEnabled keyboardShouldPersistTaps="handled">
+                    {productos
+                      .filter(
+                        (p) =>
+                          p.nombre.toLowerCase().includes(nrSearchProd.toLowerCase()) ||
+                          p.codigo.toLowerCase().includes(nrSearchProd.toLowerCase())
+                      )
+                      .slice(0, 10)
+                      .map((p) => (
+                        <TouchableOpacity
+                          key={p.id}
+                          style={{ padding: 9, borderBottomWidth: 1, borderBottomColor: THEME.border, flexDirection: "row", justifyContent: "space-between" }}
+                          onPress={() => {
+                            addProductoToRetorno(p);
+                            setNrSearchProd("");
+                          }}
+                        >
+                          <Text style={{ fontSize: 12.5, fontWeight: "700", color: THEME.foreground }}>{p.nombre}</Text>
+                          <Text style={{ fontSize: 11, color: THEME.primary600, fontWeight: "700" }}>+ Añadir</Text>
+                        </TouchableOpacity>
+                      ))}
+                  </ScrollView>
+                </View>
+              )}
+
+              {nrItems.map((it, idx) => (
+                <View key={it.producto.id} style={{ backgroundColor: THEME.inputBg, padding: 10, borderRadius: 8, gap: 6 }}>
+                  <View style={{ flexDirection: "row", justifyContent: "space-between" }}>
+                    <Text style={{ fontSize: 13, fontWeight: "800" }}>{it.producto.nombre}</Text>
+                    <TouchableOpacity onPress={() => setNrItems((prev) => prev.filter((_, i) => i !== idx))}>
+                      <Feather name="trash-2" size={15} color={THEME.dangerStrong} />
+                    </TouchableOpacity>
+                  </View>
+                  <View style={{ flexDirection: "row", gap: 8 }}>
+                    <TextInput
+                      style={[styles.input, { flex: 1, backgroundColor: THEME.card, height: 36 }]}
+                      keyboardType="numeric"
+                      placeholder="Cantidad"
+                      value={it.cantidadStr}
+                      onChangeText={(v) =>
+                        setNrItems((prev) => prev.map((x, i) => (i === idx ? { ...x, cantidadStr: v } : x)))
+                      }
+                    />
+                    <TextInput
+                      style={[styles.input, { flex: 1, backgroundColor: THEME.card, height: 36 }]}
+                      keyboardType="decimal-pad"
+                      placeholder="Precio unit."
+                      value={it.precioUnitStr}
+                      onChangeText={(v) =>
+                        setNrItems((prev) => prev.map((x, i) => (i === idx ? { ...x, precioUnitStr: v } : x)))
+                      }
+                    />
+                  </View>
+                </View>
+              ))}
+
+              <TouchableOpacity
+                style={[styles.primaryBtn, { marginTop: 10 }]}
+                onPress={handleSaveRetorno}
+                disabled={savingRetorno}
+              >
+                <Text style={styles.primaryBtnText}>
+                  {savingRetorno ? "Registrando..." : "Confirmar Retorno"}
+                </Text>
+              </TouchableOpacity>
+            </ScrollView>
+          </View>
+        </KeyboardAvoidingView>
+      </Modal>
+
+      {/* ==================== MODAL NUEVA TRANSACCIÓN DE CAJA ==================== */}
+      <Modal
+        visible={nuevaTransModalOpen}
+        transparent
+        animationType="slide"
+        onRequestClose={() => setNuevaTransModalOpen(false)}
+      >
+        <KeyboardAvoidingView
+          behavior={Platform.OS === "ios" ? "padding" : undefined}
+          style={styles.modalBackdrop}
+        >
+          <View style={styles.modalSheet}>
+            <View style={styles.modalHeader}>
+              <Text style={styles.modalTitle}>Registrar Movimiento de Caja</Text>
+              <TouchableOpacity onPress={() => setNuevaTransModalOpen(false)}>
+                <Feather name="x" size={20} color={THEME.mutedForeground} />
+              </TouchableOpacity>
+            </View>
+            <Text style={styles.fieldLabelSmall}>TIPO DE MOVIMIENTO</Text>
+            <View style={{ flexDirection: "row", gap: 8, marginTop: 4 }}>
+              {(["Entrada", "Salida"] as const).map((t) => (
+                <TouchableOpacity
+                  key={t}
+                  style={[styles.posModeTab, ntTipo === t && styles.posModeTabActive]}
+                  onPress={() => setNtTipo(t)}
+                >
+                  <Text style={[styles.posModeTabText, ntTipo === t && styles.posModeTabTextActive]}>{t}</Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+            <Text style={[styles.fieldLabelSmall, { marginTop: 10 }]}>CAJA</Text>
+            <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 6, marginTop: 4 }}>
+              {(cajasCloud.length > 0 ? cajasCloud : cajas).map((c: any) => {
+                const sel = String(ntCajaId) === String(c.id);
+                return (
+                  <TouchableOpacity
+                    key={c.id}
+                    style={[styles.catChip, sel && styles.catChipActive]}
+                    onPress={() => setNtCajaId(String(c.id))}
+                  >
+                    <Text style={[styles.catChipText, sel && styles.catChipTextActive]}>
+                      {c.nombre} ({c.moneda_codigo})
+                    </Text>
+                  </TouchableOpacity>
+                );
+              })}
+            </ScrollView>
+            <Text style={[styles.fieldLabelSmall, { marginTop: 10 }]}>MONTO *</Text>
+            <TextInput style={styles.input} keyboardType="decimal-pad" placeholder="0.00" value={ntMonto} onChangeText={setNtMonto} />
+            <Text style={[styles.fieldLabelSmall, { marginTop: 10 }]}>DESCRIPCIÓN / CONCEPTO *</Text>
+            <TextInput style={styles.input} placeholder="Ej. Pago de servicios, ingreso de sencillo..." value={ntDesc} onChangeText={setNtDesc} />
+            <TouchableOpacity
+              style={[styles.primaryBtn, { marginTop: 14 }]}
+              onPress={handleSaveTransaccion}
+              disabled={savingTrans}
+            >
+              <Text style={styles.primaryBtnText}>
+                {savingTrans ? "Guardando..." : "Registrar Movimiento"}
+              </Text>
+            </TouchableOpacity>
+          </View>
+        </KeyboardAvoidingView>
+      </Modal>
+
+      {/* ==================== MODAL NUEVA CAJA ==================== */}
+      <Modal
+        visible={nuevaCajaModalOpen}
+        transparent
+        animationType="slide"
+        onRequestClose={() => setNuevaCajaModalOpen(false)}
+      >
+        <KeyboardAvoidingView
+          behavior={Platform.OS === "ios" ? "padding" : undefined}
+          style={styles.modalBackdrop}
+        >
+          <View style={styles.modalSheet}>
+            <View style={styles.modalHeader}>
+              <Text style={styles.modalTitle}>Crear Nueva Caja</Text>
+              <TouchableOpacity onPress={() => setNuevaCajaModalOpen(false)}>
+                <Feather name="x" size={20} color={THEME.mutedForeground} />
+              </TouchableOpacity>
+            </View>
+            <Text style={styles.fieldLabelSmall}>NOMBRE DE LA CAJA *</Text>
+            <TextInput style={styles.input} placeholder="Ej. Caja Principal USD" value={ncajaNombre} onChangeText={setNcajaNombre} />
+            <Text style={[styles.fieldLabelSmall, { marginTop: 10 }]}>MONEDA *</Text>
+            <View style={{ flexDirection: "row", gap: 6, marginTop: 4 }}>
+              {monedas.map((m) => {
+                const sel = String(ncajaMonedaId) === String(m.id);
+                return (
+                  <TouchableOpacity
+                    key={m.id}
+                    style={[styles.posModeTab, sel && styles.posModeTabActive]}
+                    onPress={() => setNcajaMonedaId(String(m.id))}
+                  >
+                    <Text style={[styles.posModeTabText, sel && styles.posModeTabTextActive]}>
+                      {m.codigo} ({m.simbolo})
+                    </Text>
+                  </TouchableOpacity>
+                );
+              })}
+            </View>
+            <TouchableOpacity
+              style={[styles.primaryBtn, { marginTop: 14 }]}
+              onPress={handleCreateNuevaCaja}
+              disabled={savingNuevaCaja}
+            >
+              <Text style={styles.primaryBtnText}>
+                {savingNuevaCaja ? "Creando..." : "Crear Caja"}
+              </Text>
+            </TouchableOpacity>
+          </View>
+        </KeyboardAvoidingView>
+      </Modal>
+
+      {/* ==================== MODAL MONEDA Y TASA ==================== */}
+      <Modal
+        visible={monedaModalOpen}
+        transparent
+        animationType="slide"
+        onRequestClose={() => setMonedaModalOpen(false)}
+      >
+        <KeyboardAvoidingView
+          behavior={Platform.OS === "ios" ? "padding" : undefined}
+          style={styles.modalBackdrop}
+        >
+          <View style={styles.modalSheet}>
+            <View style={styles.modalHeader}>
+              <Text style={styles.modalTitle}>
+                {editingMoneda ? `Tasa de ${editingMoneda.nombre} (${editingMoneda.codigo})` : "Nueva Moneda"}
+              </Text>
+              <TouchableOpacity onPress={() => setMonedaModalOpen(false)}>
+                <Feather name="x" size={20} color={THEME.mutedForeground} />
+              </TouchableOpacity>
+            </View>
+            <View style={{ flexDirection: "row", gap: 8 }}>
+              <View style={{ flex: 1.5 }}>
+                <Text style={styles.fieldLabelSmall}>NOMBRE</Text>
+                <TextInput style={styles.input} value={monFormNombre} onChangeText={setMonFormNombre} placeholder="Bolívares" />
+              </View>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.fieldLabelSmall}>CÓDIGO</Text>
+                <TextInput style={styles.input} value={monFormCodigo} onChangeText={setMonFormCodigo} placeholder="VES" autoCapitalize="characters" />
+              </View>
+              <View style={{ width: 65 }}>
+                <Text style={styles.fieldLabelSmall}>SÍMB.</Text>
+                <TextInput style={styles.input} value={monFormSimbolo} onChangeText={setMonFormSimbolo} placeholder="Bs" />
+              </View>
+            </View>
+
+            <Text style={[styles.fieldLabelSmall, { marginTop: 10 }]}>TASA DE CAMBIO OFICIAL / REFERENCIA *</Text>
+            <TextInput style={styles.input} keyboardType="decimal-pad" value={monFormTasa} onChangeText={setMonFormTasa} />
+
+            <TouchableOpacity
+              style={[
+                styles.outlineSmallBtn,
+                { marginTop: 10, height: 40 },
+                monFormUsaDirecta && { backgroundColor: THEME.secondary, borderColor: THEME.primary },
+              ]}
+              onPress={() => setMonFormUsaDirecta((v) => !v)}
+            >
+              <Feather
+                name={monFormUsaDirecta ? "check-square" : "square"}
+                size={15}
+                color={monFormUsaDirecta ? THEME.primary600 : THEME.foreground}
+              />
+              <Text style={styles.outlineSmallBtnText}>Usar Tasa Directa frente al USD</Text>
+            </TouchableOpacity>
+
+            {monFormUsaDirecta && (
+              <>
+                <Text style={[styles.fieldLabelSmall, { marginTop: 10 }]}>TASA DIRECTA POR 1 USD</Text>
+                <TextInput style={styles.input} keyboardType="decimal-pad" value={monFormTasaDirecta} onChangeText={setMonFormTasaDirecta} />
+              </>
+            )}
+
+            <TouchableOpacity
+              style={[styles.primaryBtn, { marginTop: 14 }]}
+              onPress={handleSaveMoneda}
+              disabled={savingMoneda}
+            >
+              <Text style={styles.primaryBtnText}>
+                {savingMoneda ? "Guardando..." : "Guardar Moneda y Tasa"}
+              </Text>
+            </TouchableOpacity>
+          </View>
+        </KeyboardAvoidingView>
+      </Modal>
+
+      {/* ==================== MODAL MÉTODO DE PAGO ==================== */}
+      <Modal
+        visible={mpModalOpen}
+        transparent
+        animationType="slide"
+        onRequestClose={() => setMpModalOpen(false)}
+      >
+        <KeyboardAvoidingView
+          behavior={Platform.OS === "ios" ? "padding" : undefined}
+          style={styles.modalBackdrop}
+        >
+          <View style={styles.modalSheet}>
+            <View style={styles.modalHeader}>
+              <Text style={styles.modalTitle}>
+                {editingMp ? "Editar Método de Pago" : "Nuevo Método de Pago"}
+              </Text>
+              <TouchableOpacity onPress={() => setMpModalOpen(false)}>
+                <Feather name="x" size={20} color={THEME.mutedForeground} />
+              </TouchableOpacity>
+            </View>
+            <Text style={styles.fieldLabelSmall}>NOMBRE DEL MÉTODO *</Text>
+            <TextInput style={styles.input} placeholder="Ej. Pago Móvil Banesco, Zelle..." value={mpFormNombre} onChangeText={setMpFormNombre} />
+
+            <Text style={[styles.fieldLabelSmall, { marginTop: 10 }]}>TIPO</Text>
+            <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 6, marginTop: 4 }}>
+              {["Efectivo", "Pago Móvil", "Transferencia", "Tarjeta", "Zelle", "Biopago", "Otro"].map((tp) => {
+                const sel = mpFormTipo === tp;
+                return (
+                  <TouchableOpacity
+                    key={tp}
+                    style={[styles.catChip, sel && styles.catChipActive]}
+                    onPress={() => setMpFormTipo(tp)}
+                  >
+                    <Text style={[styles.catChipText, sel && styles.catChipTextActive]}>{tp}</Text>
+                  </TouchableOpacity>
+                );
+              })}
+            </ScrollView>
+
+            <Text style={[styles.fieldLabelSmall, { marginTop: 10 }]}>CAJA VINCULADA *</Text>
+            <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 6, marginTop: 4 }}>
+              {(cajasCloud.length > 0 ? cajasCloud : cajas).map((c: any) => {
+                const sel = String(mpFormCajaId) === String(c.id);
+                return (
+                  <TouchableOpacity
+                    key={c.id}
+                    style={[styles.catChip, sel && styles.catChipActive]}
+                    onPress={() => setMpFormCajaId(String(c.id))}
+                  >
+                    <Text style={[styles.catChipText, sel && styles.catChipTextActive]}>
+                      {c.nombre} ({c.moneda_codigo})
+                    </Text>
+                  </TouchableOpacity>
+                );
+              })}
+            </ScrollView>
+
+            <TouchableOpacity
+              style={[styles.primaryBtn, { marginTop: 14 }]}
+              onPress={handleSaveMetodoPago}
+              disabled={savingMp}
+            >
+              <Text style={styles.primaryBtnText}>
+                {savingMp ? "Guardando..." : "Guardar Método de Pago"}
+              </Text>
+            </TouchableOpacity>
+          </View>
+        </KeyboardAvoidingView>
+      </Modal>
+
+      {/* ==================== MODAL USUARIO ADMIN ==================== */}
+      <Modal
+        visible={usuarioModalOpen}
+        transparent
+        animationType="slide"
+        onRequestClose={() => setUsuarioModalOpen(false)}
+      >
+        <KeyboardAvoidingView
+          behavior={Platform.OS === "ios" ? "padding" : undefined}
+          style={styles.modalBackdrop}
+        >
+          <View style={styles.modalSheet}>
+            <View style={styles.modalHeader}>
+              <Text style={styles.modalTitle}>
+                {editingUsuario ? "Editar Usuario" : "Nuevo Usuario"}
+              </Text>
+              <TouchableOpacity onPress={() => setUsuarioModalOpen(false)}>
+                <Feather name="x" size={20} color={THEME.mutedForeground} />
+              </TouchableOpacity>
+            </View>
+            <Text style={styles.fieldLabelSmall}>NOMBRE COMPLETO *</Text>
+            <TextInput style={styles.input} value={usrFormName} onChangeText={setUsrFormName} placeholder="Ej. María Pérez" />
+            <Text style={[styles.fieldLabelSmall, { marginTop: 10 }]}>CORREO ELECTRÓNICO *</Text>
+            <TextInput style={styles.input} value={usrFormEmail} onChangeText={setUsrFormEmail} autoCapitalize="none" keyboardType="email-address" placeholder="cajero@posbit.com" />
+            <Text style={[styles.fieldLabelSmall, { marginTop: 10 }]}>ROL EN EL SISTEMA</Text>
+            <View style={{ flexDirection: "row", gap: 6, marginTop: 4 }}>
+              {(["cajero", "admin", "usuario"] as const).map((r) => (
+                <TouchableOpacity
+                  key={r}
+                  style={[styles.posModeTab, usrFormRole === r && styles.posModeTabActive]}
+                  onPress={() => setUsrFormRole(r)}
+                >
+                  <Text style={[styles.posModeTabText, usrFormRole === r && styles.posModeTabTextActive]}>
+                    {r.toUpperCase()}
+                  </Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+            <Text style={[styles.fieldLabelSmall, { marginTop: 10 }]}>
+              {editingUsuario ? "NUEVA CONTRASEÑA (OPCIONAL)" : "CONTRASEÑA (MÍN. 8 CARACTERES) *"}
+            </Text>
+            <TextInput style={styles.input} secureTextEntry value={usrFormPassword} onChangeText={setUsrFormPassword} placeholder="••••••••" />
+            <TouchableOpacity
+              style={[styles.primaryBtn, { marginTop: 14 }]}
+              onPress={handleSaveUsuario}
+              disabled={savingUsuario}
+            >
+              <Text style={styles.primaryBtnText}>
+                {savingUsuario ? "Guardando..." : "Guardar Usuario"}
+              </Text>
+            </TouchableOpacity>
+          </View>
+        </KeyboardAvoidingView>
+      </Modal>
     </View>
   );
 }
@@ -9775,7 +17968,8 @@ const styles = StyleSheet.create({
   posModeSwitchRow: {
     flexDirection: "row",
     alignItems: "center",
-    gap: 8,
+    gap: 6,
+    flexWrap: "wrap",
   },
   posModeTab: {
     flex: 1,
@@ -10081,6 +18275,66 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "space-between",
     marginBottom: 10,
+  },
+  cartHeaderContainer: {
+    marginBottom: 10,
+    gap: 8,
+  },
+  cartHeaderTopRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 8,
+  },
+  cartScanHeaderBtn: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 5,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 8,
+    backgroundColor: THEME.primary,
+  },
+  cartScanHeaderBtnText: {
+    fontSize: 12,
+    fontWeight: "800",
+    color: "#ffffff",
+  },
+  cartHeaderTotalPill: {
+    backgroundColor: THEME.accent,
+    borderWidth: 1,
+    borderColor: THEME.primary,
+    borderRadius: 8,
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+  },
+  cartHeaderTotalPillText: {
+    fontSize: 13,
+    fontWeight: "900",
+    color: THEME.primary600,
+  },
+  cartHeaderActionsRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+  },
+  cartHeaderActionBtn: {
+    flex: 1,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 6,
+    paddingVertical: 7,
+    paddingHorizontal: 8,
+    borderRadius: 8,
+    backgroundColor: THEME.inputBg,
+    borderWidth: 1,
+    borderColor: THEME.border,
+  },
+  cartHeaderActionBtnText: {
+    fontSize: 11.5,
+    fontWeight: "700",
+    color: THEME.foreground,
   },
   clienteSelectorBox: {
     borderTopWidth: 1,
@@ -11114,5 +19368,546 @@ const styles = StyleSheet.create({
     fontSize: 12,
     color: THEME.mutedForeground,
     textAlign: "center",
+  },
+  posScanTriggerBtn: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    height: 38,
+    paddingHorizontal: 12,
+    borderRadius: 8,
+    backgroundColor: THEME.primary,
+    borderWidth: 1,
+    borderColor: THEME.primary600,
+  },
+  posScanTriggerBtnText: {
+    fontSize: 12.5,
+    fontWeight: "800",
+    color: "#ffffff",
+  },
+  posPriceCheckTriggerBtn: {
+    width: 38,
+    height: 38,
+    borderRadius: 8,
+    backgroundColor: THEME.secondary,
+    borderWidth: 1,
+    borderColor: THEME.primary,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  scannerModalRoot: {
+    flex: 1,
+    backgroundColor: "#0c0a09",
+  },
+  scannerModalRootLowLightGlow: {
+    backgroundColor: "#1c1917",
+  },
+  scannerTopHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    paddingHorizontal: 14,
+    paddingTop: Platform.OS === "ios" ? 50 : 16,
+    paddingBottom: 10,
+    backgroundColor: "rgba(12, 10, 9, 0.94)",
+    borderBottomWidth: 1,
+    borderBottomColor: "#292524",
+  },
+  scannerCloseBtn: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 5,
+    paddingHorizontal: 10,
+    paddingVertical: 7,
+    borderRadius: 8,
+    backgroundColor: "#292524",
+    borderWidth: 1,
+    borderColor: "#44403c",
+  },
+  scannerCloseBtnText: {
+    fontSize: 12.5,
+    fontWeight: "700",
+    color: "#ffffff",
+  },
+  scannerHeaderTitle: {
+    fontSize: 14.5,
+    fontWeight: "800",
+    color: "#ffffff",
+  },
+  scannerHeaderSub: {
+    fontSize: 10.5,
+    fontWeight: "600",
+    color: THEME.primary,
+    marginTop: 1,
+  },
+  scannerIconPillBtn: {
+    width: 36,
+    height: 36,
+    borderRadius: 99,
+    backgroundColor: "#292524",
+    borderWidth: 1,
+    borderColor: "#44403c",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  scannerIconPillBtnActive: {
+    backgroundColor: "#facc15",
+    borderColor: "#eab308",
+  },
+  scannerModeTabsRow: {
+    flexDirection: "row",
+    gap: 8,
+    paddingHorizontal: 14,
+    paddingVertical: 9,
+    backgroundColor: "#141210",
+    borderBottomWidth: 1,
+    borderBottomColor: "#292524",
+  },
+  scannerModeTab: {
+    flex: 1,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 5,
+    paddingVertical: 7,
+    borderRadius: 8,
+    backgroundColor: "#292524",
+    borderWidth: 1,
+    borderColor: "#3f3a36",
+  },
+  scannerModeTabActive: {
+    backgroundColor: THEME.primary,
+    borderColor: THEME.primary600,
+  },
+  scannerModeTabText: {
+    fontSize: 11.5,
+    fontWeight: "700",
+    color: "#d6d3ce",
+  },
+  scannerModeTabTextActive: {
+    color: "#ffffff",
+    fontWeight: "800",
+  },
+  scannerPermissionBox: {
+    flex: 1,
+    alignItems: "center",
+    justifyContent: "center",
+    paddingHorizontal: 28,
+    backgroundColor: "#0c0a09",
+  },
+  scannerPermissionIconCircle: {
+    width: 72,
+    height: 72,
+    borderRadius: 36,
+    backgroundColor: "rgba(249, 115, 22, 0.14)",
+    borderWidth: 1.5,
+    borderColor: THEME.primary,
+    alignItems: "center",
+    justifyContent: "center",
+    marginBottom: 16,
+  },
+  scannerPermissionTitle: {
+    fontSize: 17,
+    fontWeight: "800",
+    color: "#ffffff",
+    textAlign: "center",
+    marginBottom: 8,
+  },
+  scannerPermissionSub: {
+    fontSize: 13,
+    color: "#a8a29e",
+    textAlign: "center",
+    lineHeight: 19,
+    marginBottom: 20,
+  },
+  scannerGrantBtn: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    backgroundColor: THEME.primary,
+    paddingHorizontal: 20,
+    paddingVertical: 12,
+    borderRadius: 10,
+  },
+  scannerGrantBtnText: {
+    fontSize: 14,
+    fontWeight: "800",
+    color: "#ffffff",
+  },
+  scannerManualInputPermissionBtn: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    backgroundColor: "#292524",
+    borderWidth: 1.5,
+    borderColor: "#57534e",
+    paddingHorizontal: 20,
+    paddingVertical: 12,
+    borderRadius: 10,
+    marginTop: 12,
+  },
+  scannerManualInputPermissionBtnText: {
+    fontSize: 13.5,
+    fontWeight: "800",
+    color: "#ffffff",
+  },
+  scannerViewportContainer: {
+    flex: 1,
+    position: "relative",
+    overflow: "hidden",
+    backgroundColor: "#000000",
+  },
+  scannerSoftboxGlowBorder: {
+    ...StyleSheet.absoluteFillObject,
+    borderWidth: 18,
+    borderColor: "rgba(255, 255, 255, 0.88)",
+    borderRadius: 4,
+    zIndex: 4,
+  },
+  scannerInteractiveOverlay: {
+    flex: 1,
+    alignItems: "center",
+    justifyContent: "space-between",
+    paddingVertical: 14,
+    paddingHorizontal: 14,
+    zIndex: 5,
+  },
+  scannerTapFocusRing: {
+    position: "absolute",
+    width: 64,
+    height: 64,
+    borderRadius: 32,
+    borderWidth: 2,
+    borderColor: "#facc15",
+    backgroundColor: "rgba(250, 204, 21, 0.12)",
+    zIndex: 10,
+  },
+  scannerReticleBox: {
+    width: "88%",
+    maxWidth: 330,
+    height: 168,
+    borderRadius: 16,
+    borderWidth: 1.5,
+    borderColor: "rgba(249, 115, 22, 0.45)",
+    backgroundColor: "rgba(0, 0, 0, 0.14)",
+    alignItems: "center",
+    justifyContent: "center",
+    marginTop: 12,
+    position: "relative",
+    overflow: "hidden",
+  },
+  scannerReticleSuccess: {
+    borderColor: THEME.success,
+    backgroundColor: "rgba(16, 185, 129, 0.16)",
+  },
+  scannerReticleWarning: {
+    borderColor: THEME.warning,
+    backgroundColor: "rgba(245, 158, 11, 0.16)",
+  },
+  scannerReticleError: {
+    borderColor: THEME.danger,
+    backgroundColor: "rgba(239, 68, 68, 0.16)",
+  },
+  scannerCornerTL: {
+    position: "absolute",
+    top: 0,
+    left: 0,
+    width: 28,
+    height: 28,
+    borderTopWidth: 4,
+    borderLeftWidth: 4,
+    borderColor: THEME.primary,
+    borderTopLeftRadius: 14,
+  },
+  scannerCornerTR: {
+    position: "absolute",
+    top: 0,
+    right: 0,
+    width: 28,
+    height: 28,
+    borderTopWidth: 4,
+    borderRightWidth: 4,
+    borderColor: THEME.primary,
+    borderTopRightRadius: 14,
+  },
+  scannerCornerBL: {
+    position: "absolute",
+    bottom: 0,
+    left: 0,
+    width: 28,
+    height: 28,
+    borderBottomWidth: 4,
+    borderLeftWidth: 4,
+    borderColor: THEME.primary,
+    borderBottomLeftRadius: 14,
+  },
+  scannerCornerBR: {
+    position: "absolute",
+    bottom: 0,
+    right: 0,
+    width: 28,
+    height: 28,
+    borderBottomWidth: 4,
+    borderRightWidth: 4,
+    borderColor: THEME.primary,
+    borderBottomRightRadius: 14,
+  },
+  scannerLaserLine: {
+    width: "92%",
+    height: 2.5,
+    backgroundColor: THEME.primary,
+    borderRadius: 2,
+    shadowColor: THEME.primary,
+    shadowOffset: { width: 0, height: 0 },
+    shadowOpacity: 0.95,
+    shadowRadius: 8,
+    elevation: 6,
+  },
+  scannerReticleHintPill: {
+    position: "absolute",
+    bottom: 8,
+    paddingHorizontal: 10,
+    paddingVertical: 3,
+    borderRadius: 99,
+    backgroundColor: "rgba(12, 10, 9, 0.72)",
+  },
+  scannerReticleHintText: {
+    fontSize: 10.5,
+    fontWeight: "700",
+    color: "#f5f5f4",
+  },
+  scannerZoomBar: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    backgroundColor: "rgba(12, 10, 9, 0.78)",
+    paddingHorizontal: 8,
+    paddingVertical: 5,
+    borderRadius: 99,
+    borderWidth: 1,
+    borderColor: "rgba(255, 255, 255, 0.14)",
+  },
+  scannerZoomChip: {
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    borderRadius: 99,
+  },
+  scannerZoomChipActive: {
+    backgroundColor: THEME.primary,
+  },
+  scannerZoomChipText: {
+    fontSize: 11,
+    fontWeight: "700",
+    color: "#d6d3ce",
+  },
+  scannerZoomChipTextActive: {
+    color: "#ffffff",
+    fontWeight: "900",
+  },
+  scannerAssistToolbar: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    flexWrap: "wrap",
+    gap: 6,
+  },
+  scannerAssistBtn: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 5,
+    paddingHorizontal: 10,
+    paddingVertical: 7,
+    borderRadius: 8,
+    backgroundColor: "rgba(28, 25, 23, 0.85)",
+    borderWidth: 1,
+    borderColor: "rgba(255, 255, 255, 0.18)",
+  },
+  scannerAssistBtnActive: {
+    backgroundColor: "#facc15",
+    borderColor: "#eab308",
+  },
+  scannerAssistBtnText: {
+    fontSize: 11,
+    fontWeight: "800",
+    color: "#ffffff",
+  },
+  scannerManualFloatingBtn: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    borderRadius: 20,
+    backgroundColor: "rgba(28, 25, 23, 0.92)",
+    borderWidth: 1.5,
+    borderColor: "rgba(255, 255, 255, 0.3)",
+    marginTop: 6,
+  },
+  scannerManualFloatingBtnText: {
+    fontSize: 12,
+    fontWeight: "800",
+    color: "#ffffff",
+  },
+  scannerManualInputBar: {
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    backgroundColor: "#1c1917",
+    borderTopWidth: 1.5,
+    borderTopColor: "#3f3a36",
+  },
+  scannerManualInputHeaderTitle: {
+    fontSize: 12.5,
+    fontWeight: "800",
+    color: "#ffffff",
+  },
+  scannerManualTextInput: {
+    flex: 1,
+    height: 38,
+    backgroundColor: "#292524",
+    borderRadius: 8,
+    paddingHorizontal: 12,
+    fontSize: 13.5,
+    color: "#ffffff",
+    borderWidth: 1,
+    borderColor: "#44403c",
+  },
+  scannerManualSubmitBtn: {
+    height: 38,
+    paddingHorizontal: 14,
+    borderRadius: 8,
+    backgroundColor: THEME.primary,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  scannerManualSubmitBtnText: {
+    fontSize: 12.5,
+    fontWeight: "800",
+    color: "#ffffff",
+  },
+  scannerBottomDock: {
+    backgroundColor: "#141210",
+    borderTopWidth: 1,
+    borderTopColor: "#292524",
+    paddingHorizontal: 12,
+    paddingTop: 10,
+    paddingBottom: Platform.OS === "ios" ? 26 : 12,
+    gap: 10,
+  },
+  scannerResultCard: {
+    backgroundColor: THEME.card,
+    borderRadius: 12,
+    padding: 11,
+    borderWidth: 2,
+    borderColor: THEME.success,
+  },
+  scannerStatusPill: {
+    paddingHorizontal: 7,
+    paddingVertical: 2,
+    borderRadius: 5,
+  },
+  scannerQtyControlBox: {
+    flexDirection: "row",
+    alignItems: "center",
+    backgroundColor: THEME.inputBg,
+    borderRadius: 9,
+    borderWidth: 1,
+    borderColor: THEME.border,
+    padding: 3,
+  },
+  scannerRemoveBtn: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 4,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 6,
+    backgroundColor: THEME.dangerSoft,
+    borderWidth: 1,
+    borderColor: THEME.dangerBorder,
+  },
+  scannerRemoveBtnText: {
+    fontSize: 11,
+    fontWeight: "700",
+    color: THEME.dangerStrong,
+  },
+  scannerQtyBtn: {
+    width: 32,
+    height: 32,
+    borderRadius: 7,
+    backgroundColor: THEME.foreground,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  scannerQuickAddBtn: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 5,
+    backgroundColor: THEME.primary,
+    paddingHorizontal: 12,
+    paddingVertical: 9,
+    borderRadius: 8,
+  },
+  scannerQuickAddBtnText: {
+    fontSize: 12,
+    fontWeight: "800",
+    color: "#ffffff",
+  },
+  scannerEmptyPromptBox: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+    backgroundColor: "#1c1917",
+    borderRadius: 10,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    borderWidth: 1,
+    borderColor: "#292524",
+  },
+  scannerEmptyPromptText: {
+    flex: 1,
+    fontSize: 11.5,
+    color: "#a8a29e",
+    lineHeight: 16,
+  },
+  scannerCartSummaryBar: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    backgroundColor: "#1c1917",
+    borderRadius: 12,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    borderWidth: 1,
+    borderColor: "#292524",
+  },
+  scannerViewCartBtn: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 5,
+    paddingHorizontal: 12,
+    paddingVertical: 9,
+    borderRadius: 8,
+    backgroundColor: "#292524",
+    borderWidth: 1,
+    borderColor: "#44403c",
+  },
+  scannerViewCartBtnText: {
+    fontSize: 12.5,
+    fontWeight: "700",
+    color: "#ffffff",
+  },
+  scannerCheckoutBtn: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    paddingHorizontal: 15,
+    paddingVertical: 9,
+    borderRadius: 8,
+    backgroundColor: THEME.primary,
+  },
+  scannerCheckoutBtnText: {
+    fontSize: 13,
+    fontWeight: "800",
+    color: "#ffffff",
   },
 });

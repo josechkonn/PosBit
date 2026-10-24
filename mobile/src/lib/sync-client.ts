@@ -91,9 +91,12 @@ export async function loginMobile(
     cajas: data.cajas,
     metodos_pago: data.metodosPago,
     categorias: data.categorias,
+    marcas: data.marcas,
+    proveedores: data.proveedores,
     clientes: data.clientes,
     cliente_limites_credito: data.clienteLimitesCredito,
     productos: data.productos,
+    producto_proveedores: data.productoProveedores,
     producto_presentaciones: data.productoPresentaciones,
     creditos: data.creditos,
     abonos: data.abonos,
@@ -217,15 +220,29 @@ export async function syncMobileWithCloud(): Promise<{
     }
   };
 
-  const [pullRes, monedasDirect, cfgGlobalDirect, clientesDirect, creditosDirect, ventasDirect] =
-    await Promise.all([
-      fetch(syncUrl, { method: "GET", headers }),
-      fetchJsonSafe(`${serverUrl}/api/monedas`),
-      fetchJsonSafe(`${serverUrl}/api/configuracion-global`),
-      fetchJsonSafe(`${serverUrl}/api/clientes?limit=500`),
-      fetchJsonSafe(`${serverUrl}/api/creditos`),
-      fetchJsonSafe(`${serverUrl}/api/ventas?limit=150`),
-    ]);
+  const [
+    pullRes,
+    monedasDirect,
+    cfgGlobalDirect,
+    categoriasDirect,
+    marcasDirect,
+    proveedoresDirect,
+    productosDirect,
+    clientesDirect,
+    creditosDirect,
+    ventasDirect,
+  ] = await Promise.all([
+    fetch(syncUrl, { method: "GET", headers }),
+    fetchJsonSafe(`${serverUrl}/api/monedas`),
+    fetchJsonSafe(`${serverUrl}/api/configuracion-global`),
+    fetchJsonSafe(`${serverUrl}/api/categorias`),
+    fetchJsonSafe(`${serverUrl}/api/marcas`),
+    fetchJsonSafe(`${serverUrl}/api/proveedores?limit=200`),
+    fetchJsonSafe(`${serverUrl}/api/productos?limit=1000`),
+    fetchJsonSafe(`${serverUrl}/api/clientes?limit=500`),
+    fetchJsonSafe(`${serverUrl}/api/creditos`),
+    fetchJsonSafe(`${serverUrl}/api/ventas?limit=150`),
+  ]);
 
   const pullText = await pullRes.text();
   let delta: any;
@@ -246,7 +263,23 @@ export async function syncMobileWithCloud(): Promise<{
     await db.runAsync(`DELETE FROM abonos WHERE id LIKE 'local-%'`);
   }
 
-  const prods = delta.tables?.productos || [];
+  const prodsEnriquecidos = Array.isArray(productosDirect?.productos) && productosDirect.productos.length > 0
+    ? productosDirect.productos
+    : delta.tables?.productos || [];
+  const categoriasMerged =
+    Array.isArray(categoriasDirect) && categoriasDirect.length > 0
+      ? categoriasDirect
+      : delta.tables?.categorias;
+  const marcasMerged =
+    Array.isArray(marcasDirect) && marcasDirect.length > 0
+      ? marcasDirect
+      : delta.tables?.marcas;
+  const proveedoresMerged =
+    Array.isArray(proveedoresDirect?.data) && proveedoresDirect.data.length > 0
+      ? proveedoresDirect.data
+      : Array.isArray(proveedoresDirect) && proveedoresDirect.length > 0
+        ? proveedoresDirect
+        : delta.tables?.proveedores;
   const monedasMerged =
     Array.isArray(monedasDirect) && monedasDirect.length > 0
       ? monedasDirect
@@ -273,10 +306,12 @@ export async function syncMobileWithCloud(): Promise<{
     monedas: monedasMerged,
     cajas: delta.tables?.cajas,
     metodos_pago: delta.tables?.metodos_pago,
-    categorias: delta.tables?.categorias,
+    categorias: categoriasMerged,
+    marcas: marcasMerged,
+    proveedores: proveedoresMerged,
     clientes: clientesMerged,
     cliente_limites_credito: delta.tables?.cliente_limites_credito,
-    productos: prods,
+    productos: prodsEnriquecidos,
     producto_presentaciones: delta.tables?.producto_presentaciones,
     creditos: creditosMerged,
     abonos: delta.tables?.abonos,
@@ -290,7 +325,7 @@ export async function syncMobileWithCloud(): Promise<{
 
   return {
     ventasSubidas,
-    productosActualizados: prods.length,
+    productosActualizados: prodsEnriquecidos.length,
     fecha: nowIso,
   };
 }
@@ -801,4 +836,608 @@ export async function fetchReportesCloud(params: {
   } catch {
     return null;
   }
+}
+
+/**
+ * Helper genérico autenticado para peticiones REST hacia el backend PosBit
+ */
+export async function apiRequestMobile<T = any>(
+  path: string,
+  method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE" = "GET",
+  body?: any
+): Promise<T> {
+  const { serverUrl, token } = await getStoredSession();
+  if (!serverUrl || !token) {
+    throw new Error("Sesión no configurada. Conéctate al servidor primero.");
+  }
+  const url = path.startsWith("http") ? path : `${serverUrl}${path.startsWith("/") ? "" : "/"}${path}`;
+  const res = await fetch(url, {
+    method,
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${token}`,
+    },
+    body: body !== undefined ? JSON.stringify(body) : undefined,
+  });
+  const text = await res.text();
+  let json: any = {};
+  try {
+    json = text ? JSON.parse(text) : {};
+  } catch {
+    if (!res.ok) {
+      throw new Error(`Error HTTP ${res.status}`);
+    }
+  }
+  if (!res.ok) {
+    throw new Error(json?.error || `Error HTTP ${res.status}`);
+  }
+  return json as T;
+}
+
+/**
+ * PRODUCTOS CRUD (Crear / Editar / Eliminar / Verificar Código / Detalle Completo)
+ * Idéntico al flujo de src/components/producto/producto-modal.tsx en PC/Web
+ */
+export async function verificarCodigoProductoCloud(params: {
+  tipo?: "producto" | "caja";
+  codigos: string[];
+  excluirProductoId?: string | number | null;
+  excluirId?: string | null;
+}): Promise<Record<string, { disponible: boolean; mensaje: string }>> {
+  try {
+    const clean = params.codigos.map((c) => c.trim()).filter(Boolean);
+    if (clean.length === 0) return {};
+    const qs = new URLSearchParams();
+    qs.set("tipo", params.tipo || "producto");
+    for (const c of clean) qs.append("codigo", c);
+    if (params.excluirProductoId != null && String(params.excluirProductoId) !== "") {
+      qs.set("excluirProductoId", String(params.excluirProductoId));
+    }
+    if (params.excluirId) {
+      qs.set("excluirId", String(params.excluirId));
+    }
+    const res = await apiRequestMobile<{
+      resultados?: Record<string, { disponible: boolean; mensaje: string }>;
+    }>(`/api/productos/verificar-codigo?${qs.toString()}`, "GET");
+    return res?.resultados || {};
+  } catch {
+    return {};
+  }
+}
+
+export async function fetchProductoFullCloud(params: {
+  id?: string | number;
+  codigo?: string;
+}): Promise<any | null> {
+  try {
+    const search = params.codigo || (params.id ? String(params.id) : "");
+    const qs = new URLSearchParams();
+    if (search) qs.set("search", search);
+    qs.set("limit", "30");
+    const res = await apiRequestMobile<{ productos?: any[] }>(
+      `/api/productos?${qs.toString()}`,
+      "GET"
+    );
+    const list = Array.isArray(res?.productos) ? res.productos : [];
+    if (params.id != null) {
+      const exact = list.find((p) => String(p.id) === String(params.id));
+      if (exact) return exact;
+    }
+    if (params.codigo) {
+      const exactCod = list.find(
+        (p) => String(p.codigo || "").toLowerCase() === String(params.codigo).toLowerCase()
+      );
+      if (exactCod) return exactCod;
+    }
+    return list[0] || null;
+  } catch {
+    return null;
+  }
+}
+
+export async function saveProductoCloud(payload: {
+  id?: string | number | null;
+  codigo: string;
+  nombre: string;
+  descripcion?: string | null;
+  categoria_id?: string | number | null;
+  marca_id?: string | number | null;
+  proveedor_ids?: Array<string | number>;
+  proveedor_id?: string | number | null;
+  stock?: number;
+  stock_minimo?: number;
+  activo?: boolean;
+  iva_incluido?: boolean;
+  moneda_base_id?: string | number | null;
+  moneda_costo_id?: string | number | null;
+  precio_base: number;
+  costo_base: number;
+  margen_ganancia?: number;
+  precios?: Record<string, { precio: number; costo: number }>;
+  presentaciones?: Array<{
+    id?: string;
+    nombre: string;
+    unidades: number;
+    activo: boolean;
+    codigo: string | null;
+    modo_venta: "derivado" | "fijo" | "margen";
+    precio_override: number | null;
+    margen_override: number | null;
+  }>;
+}) {
+  const method = payload.id ? "PUT" : "POST";
+  const cleanProvIds = Array.from(
+    new Set(
+      (payload.proveedor_ids || (payload.proveedor_id ? [payload.proveedor_id] : []))
+        .map((x) => (x != null ? String(x).trim() : ""))
+        .filter((s) => s.length > 0 && s !== "null" && s !== "undefined" && s !== "NaN")
+    )
+  );
+  const provPrincipal = cleanProvIds[0] ?? null;
+
+  let data: any;
+  try {
+    data = await apiRequestMobile<any>("/api/productos", method, {
+      ...payload,
+      proveedor_ids: cleanProvIds,
+      proveedor_id: provPrincipal,
+    });
+  } catch (err: any) {
+    // Fallback si el servidor remoto aún tiene el bug legacy de parseInt en proveedor_ids con UUID
+    if (String(err?.message || "").toLowerCase().includes("uuid")) {
+      const { proveedor_ids: _ignoreIds, proveedor_id: _ignoreId, ...safePayload } = payload;
+      data = await apiRequestMobile<any>("/api/productos", method, safePayload);
+    } else {
+      throw err;
+    }
+  }
+
+  const db = await getMobileDb();
+  const prodId = data?.id ?? payload.id;
+
+  // Garantizar sincronización de descripción, categoría, marca y relación N:M de proveedores (UUID)
+  // contra cualquier versión del servidor en la nube mediante remote_push
+  if (prodId != null) {
+    try {
+      const nowIso = new Date(Date.now() + 1500).toISOString();
+      await apiRequestMobile("/api/sync", "POST", {
+        action: "remote_push",
+        payload: {
+          dispositivo_id: "mobile-pos",
+          desde: null,
+          hasta: nowIso,
+          tables: {
+            productos: [
+              {
+                ...data,
+                id: Number(prodId),
+                codigo: payload.codigo,
+                nombre: payload.nombre,
+                descripcion: payload.descripcion ?? null,
+                categoria_id: payload.categoria_id || null,
+                marca_id: payload.marca_id || null,
+                proveedor_id: provPrincipal,
+                actualizado_en: nowIso,
+              },
+            ],
+            producto_proveedores: cleanProvIds.map((pid) => ({
+              producto_id: Number(prodId),
+              proveedor_id: String(pid),
+            })),
+          },
+          eliminados: [],
+        },
+      });
+    } catch {
+      // Ignorar si remote_push no es necesario
+    }
+
+    await db.runAsync(`DELETE FROM producto_presentaciones WHERE producto_id = ?`, [Number(prodId)]);
+  }
+
+  // Consultar el producto enriquecido (con presentaciones, proveedores y nombres de categoría/marca)
+  const fullProd = await fetchProductoFullCloud({
+    id: prodId,
+    codigo: data?.codigo || payload.codigo,
+  });
+
+  const prodToSave = fullProd || {
+    ...data,
+    descripcion: payload.descripcion ?? data?.descripcion ?? null,
+    categoria_id: payload.categoria_id ?? data?.categoria_id ?? null,
+    marca_id: payload.marca_id ?? data?.marca_id ?? null,
+    proveedor_id: provPrincipal ?? data?.proveedor_id ?? null,
+  };
+  const presToSave = Array.isArray(prodToSave?.presentaciones)
+    ? prodToSave.presentaciones.map((pr: any) => ({
+        ...pr,
+        producto_id: Number(prodToSave.id),
+      }))
+    : [];
+
+  await saveCatalogOffline({
+    productos: prodToSave ? [prodToSave] : [],
+    producto_presentaciones: presToSave,
+  });
+  return prodToSave;
+}
+
+export async function deleteProductoCloud(id: string | number) {
+  await apiRequestMobile(`/api/productos?id=${encodeURIComponent(String(id))}`, "DELETE");
+  const db = await getMobileDb();
+  await db.runAsync(`DELETE FROM producto_presentaciones WHERE producto_id = ?`, [String(id)]);
+  await db.runAsync(`DELETE FROM productos WHERE id = ?`, [String(id)]);
+  return { success: true };
+}
+
+/**
+ * CATEGORÍAS CRUD
+ */
+export async function fetchCategoriasCloud(): Promise<any[]> {
+  try {
+    const list = await apiRequestMobile<any[]>("/api/categorias", "GET");
+    if (Array.isArray(list)) {
+      await saveCatalogOffline({ categorias: list });
+      return list;
+    }
+    return [];
+  } catch {
+    return [];
+  }
+}
+
+export async function saveCategoriaCloud(payload: {
+  id?: string | number | null;
+  nombre: string;
+  descripcion?: string | null;
+  activa?: boolean;
+}) {
+  const method = payload.id ? "PUT" : "POST";
+  const data = await apiRequestMobile<any>("/api/categorias", method, payload);
+  await saveCatalogOffline({ categorias: [data] });
+  return data;
+}
+
+export async function deleteCategoriaCloud(id: string | number) {
+  await apiRequestMobile(`/api/categorias?id=${encodeURIComponent(String(id))}`, "DELETE");
+  const db = await getMobileDb();
+  await db.runAsync(`DELETE FROM categorias WHERE id = ?`, [String(id)]);
+  return { success: true };
+}
+
+/**
+ * MARCAS CRUD
+ */
+export async function fetchMarcasCloud(): Promise<any[]> {
+  try {
+    const list = await apiRequestMobile<any[]>("/api/marcas", "GET");
+    if (Array.isArray(list)) {
+      await saveCatalogOffline({ marcas: list });
+      return list;
+    }
+    return [];
+  } catch {
+    return [];
+  }
+}
+
+export async function saveMarcaCloud(payload: {
+  id?: string | number | null;
+  nombre: string;
+  pais?: string | null;
+  descripcion?: string | null;
+  activo?: boolean;
+}) {
+  const method = payload.id ? "PUT" : "POST";
+  const data = await apiRequestMobile<any>("/api/marcas", method, {
+    ...payload,
+    pais: payload.pais ?? payload.descripcion ?? null,
+  });
+  await saveCatalogOffline({ marcas: [data] });
+  return data;
+}
+
+export async function deleteMarcaCloud(id: string | number) {
+  await apiRequestMobile(`/api/marcas?id=${encodeURIComponent(String(id))}`, "DELETE");
+  const db = await getMobileDb();
+  await db.runAsync(`DELETE FROM marcas WHERE id = ?`, [String(id)]);
+  return { success: true };
+}
+
+/**
+ * PROVEEDORES CRUD
+ */
+export async function fetchProveedoresCloud(search = ""): Promise<any[]> {
+  try {
+    const q = new URLSearchParams({ limit: "200" });
+    if (search.trim()) q.set("search", search.trim());
+    const res = await apiRequestMobile<any>(`/api/proveedores?${q.toString()}`, "GET");
+    const list = Array.isArray(res?.data) ? res.data : Array.isArray(res) ? res : [];
+    if (list.length > 0) {
+      await saveCatalogOffline({ proveedores: list });
+    }
+    return list;
+  } catch {
+    return [];
+  }
+}
+
+export async function saveProveedorCloud(payload: {
+  id?: string | number | null;
+  nombre: string;
+  rif?: string | null;
+  documento?: string | null;
+  contacto?: string | null;
+  telefono?: string | null;
+  email?: string | null;
+  direccion?: string | null;
+  ciudad?: string | null;
+  notas?: string | null;
+  activo?: boolean;
+}) {
+  const method = payload.id ? "PUT" : "POST";
+  const data = await apiRequestMobile<any>("/api/proveedores", method, {
+    ...payload,
+    rif: payload.rif ?? payload.documento ?? null,
+  });
+  await saveCatalogOffline({ proveedores: [data] });
+  return data;
+}
+
+export async function deleteProveedorCloud(id: string | number) {
+  await apiRequestMobile(`/api/proveedores?id=${encodeURIComponent(String(id))}`, "DELETE");
+  const db = await getMobileDb();
+  await db.runAsync(`DELETE FROM proveedores WHERE id = ?`, [String(id)]);
+  return { success: true };
+}
+
+/**
+ * COMPRAS (Listado + Registrar nueva compra con actualización de stock/costos)
+ */
+export async function fetchComprasCloud(): Promise<{ compras: any[]; items: any[] }> {
+  try {
+    const res = await apiRequestMobile<any>("/api/compras", "GET");
+    return {
+      compras: Array.isArray(res?.compras) ? res.compras : [],
+      items: Array.isArray(res?.items) ? res.items : [],
+    };
+  } catch {
+    return { compras: [], items: [] };
+  }
+}
+
+export async function crearCompraCloud(payload: {
+  proveedor_id?: string | number | null;
+  fecha?: string;
+  moneda_id: string | number;
+  metodo_pago_id?: string | number | null;
+  caja_id?: string | number | null;
+  tipo_pago: "contado" | "parcial" | "credito";
+  abono_inicial?: number;
+  observaciones?: string | null;
+  referencia?: string | null;
+  items: Array<{
+    producto_id: string | number;
+    cantidad: number;
+    costo_unit: number;
+    presentacion_id?: string | number | null;
+  }>;
+}) {
+  const res = await apiRequestMobile<any>("/api/compras", "POST", payload);
+  return res;
+}
+
+export async function eliminarCompraCloud(id: string | number) {
+  return await apiRequestMobile<any>(`/api/compras?id=${encodeURIComponent(String(id))}`, "DELETE");
+}
+
+export async function eliminarVentaCloud(id: string | number) {
+  const res = await apiRequestMobile<any>(`/api/ventas?id=${encodeURIComponent(String(id))}`, "DELETE");
+  const db = await getMobileDb();
+  await db.runAsync(`DELETE FROM ventas_remotas WHERE id = ?`, [String(id)]);
+  await db.runAsync(`DELETE FROM venta_items_remotos WHERE venta_id = ?`, [String(id)]);
+  return res;
+}
+
+/**
+ * RETORNOS / DEVOLUCIONES (Listado + Registrar nuevo retorno de cliente o proveedor + Retorno Directo desde Venta/Compra)
+ */
+export async function fetchRetornosCloud(): Promise<{ retornos: any[]; items: any[] }> {
+  try {
+    const res = await apiRequestMobile<any>("/api/retornos", "GET");
+    return {
+      retornos: Array.isArray(res?.retornos) ? res.retornos : [],
+      items: Array.isArray(res?.items) ? res.items : [],
+    };
+  } catch {
+    return { retornos: [], items: [] };
+  }
+}
+
+export async function crearRetornoCloud(payload: {
+  tipo: "Cliente" | "Proveedor";
+  venta_id?: string | number | null;
+  compra_id?: string | number | null;
+  cliente_id?: string | number | null;
+  proveedor_id?: string | number | null;
+  fecha?: string;
+  motivo?: string | null;
+  abonar_credito?: boolean;
+  observaciones?: string | null;
+  metodo_reembolso?: "efectivo" | "credito" | "cambio";
+  metodo_pago_id?: string | number | null;
+  caja_id?: string | number | null;
+  items: Array<{
+    producto_id: string | number;
+    cantidad: number;
+    precio_unit?: number;
+  }>;
+}) {
+  return await apiRequestMobile<any>("/api/retornos", "POST", payload);
+}
+
+/**
+ * TRANSACCIONES DE CAJA (Listado + Registrar Entrada/Salida manual)
+ */
+export async function fetchTransaccionesCloud(): Promise<any[]> {
+  try {
+    const res = await apiRequestMobile<any[]>("/api/transacciones", "GET");
+    return Array.isArray(res) ? res : [];
+  } catch {
+    return [];
+  }
+}
+
+export async function crearTransaccionCloud(payload: {
+  caja_id: string | number;
+  tipo: "Entrada" | "Salida";
+  monto: number;
+  descripcion: string;
+}) {
+  return await apiRequestMobile<any>("/api/transacciones", "POST", payload);
+}
+
+export async function crearCajaCloud(payload: { nombre: string; moneda_id: string | number }) {
+  return await apiRequestMobile<any>("/api/cajas", "POST", payload);
+}
+
+/**
+ * MONEDAS Y TASAS DE CAMBIO
+ */
+export async function saveMonedaCloud(payload: {
+  id?: string | number | null;
+  nombre: string;
+  codigo: string;
+  simbolo: string;
+  tasa: number;
+  es_base?: boolean;
+  decimales?: number;
+  usa_tasa_usd_directa?: boolean;
+  tasa_usd_directa?: number | null;
+}) {
+  const method = payload.id ? "PUT" : "POST";
+  const data = await apiRequestMobile<any>("/api/monedas", method, payload);
+  await saveCatalogOffline({ monedas: [data] });
+  return data;
+}
+
+/**
+ * MÉTODOS DE PAGO CRUD
+ */
+export async function fetchMetodosPagoCloud(): Promise<any[]> {
+  try {
+    const list = await apiRequestMobile<any[]>("/api/metodos-pago", "GET");
+    if (Array.isArray(list)) {
+      await saveCatalogOffline({ metodos_pago: list });
+      return list;
+    }
+    return [];
+  } catch {
+    return [];
+  }
+}
+
+export async function saveMetodoPagoCloud(payload: {
+  id?: string | number | null;
+  nombre: string;
+  tipo: string;
+  caja_id: string | number;
+  activo?: boolean;
+}) {
+  const method = payload.id ? "PUT" : "POST";
+  const data = await apiRequestMobile<any>("/api/metodos-pago", method, payload);
+  await saveCatalogOffline({ metodos_pago: [data] });
+  return data;
+}
+
+export async function deleteMetodoPagoCloud(id: string | number) {
+  await apiRequestMobile(`/api/metodos-pago?id=${encodeURIComponent(String(id))}`, "DELETE");
+  const db = await getMobileDb();
+  await db.runAsync(`DELETE FROM metodos_pago WHERE id = ?`, [String(id)]);
+  return { success: true };
+}
+
+/**
+ * CONFIGURACIÓN DE EMPRESA Y MOTOR DE CONVERSIÓN GLOBAL
+ */
+export async function fetchConfiguracionEmpresaCloud(): Promise<any[]> {
+  try {
+    const res = await apiRequestMobile<any[]>("/api/configuracion", "GET");
+    return Array.isArray(res) ? res : [];
+  } catch {
+    return [];
+  }
+}
+
+export async function saveConfiguracionClaveCloud(clave: string, valor: string, tipo = "empresa", descripcion = "") {
+  return await apiRequestMobile<any>("/api/configuracion", "POST", {
+    clave,
+    valor,
+    tipo,
+    descripcion,
+  });
+}
+
+export async function saveConfiguracionGlobalCloud(payload: {
+  modo_conversion_ventas?: "directa" | "triangulacion";
+  modo_conversion_compras?: "directa" | "triangulacion";
+  metodo_conversion_ventas?: "directa" | "triangulacion";
+  metodo_conversion_compras?: "directa" | "triangulacion";
+  moneda_transito_ventas_id?: string | null;
+  moneda_transito_compras_id?: string | null;
+  redondear_conversion_ventas?: boolean;
+  redondeo_activo?: boolean;
+  redondeo_multiplo?: number;
+  redondeo_no_bajar_de_costo?: boolean;
+  actualizar_precio_en_compra?: boolean;
+  auto_precio_compra?: boolean;
+  porcentaje_ganancia_defecto?: number;
+  iva_porcentaje?: number;
+}) {
+  const body = {
+    ...payload,
+    metodo_conversion_ventas: payload.metodo_conversion_ventas || payload.modo_conversion_ventas || "directa",
+    metodo_conversion_compras: payload.metodo_conversion_compras || payload.modo_conversion_compras || "directa",
+    auto_precio_compra: payload.auto_precio_compra ?? payload.actualizar_precio_en_compra ?? false,
+    redondeo_activo: payload.redondeo_activo ?? payload.redondear_conversion_ventas ?? false,
+    redondeo_multiplo: payload.redondeo_multiplo ?? (payload.redondear_conversion_ventas ? 1 : 0),
+    redondeo_no_bajar_de_costo: payload.redondeo_no_bajar_de_costo ?? true,
+  };
+  const data = await apiRequestMobile<any>("/api/configuracion-global", "PUT", body);
+  await saveCatalogOffline({ configuracion_global: data });
+  return data;
+}
+
+export async function recalcularPreciosGlobalCloud() {
+  return await apiRequestMobile<any>("/api/configuracion-global/recalcular-precios", "POST", {});
+}
+
+/**
+ * GESTIÓN DE USUARIOS (ADMIN)
+ */
+export async function fetchUsuariosAdminCloud(): Promise<{ users: any[]; currentUserId?: string }> {
+  try {
+    const res = await apiRequestMobile<any>("/api/admin/users?limit=100", "GET");
+    return {
+      users: Array.isArray(res?.users) ? res.users : [],
+      currentUserId: res?.currentUserId,
+    };
+  } catch {
+    return { users: [] };
+  }
+}
+
+export async function saveUsuarioAdminCloud(payload: {
+  id?: string | null;
+  name: string;
+  email: string;
+  role: "admin" | "cajero" | "usuario";
+  password?: string;
+}) {
+  const method = payload.id ? "PUT" : "POST";
+  return await apiRequestMobile<any>("/api/admin/users", method, payload);
+}
+
+export async function deleteUsuarioAdminCloud(id: string) {
+  return await apiRequestMobile<any>("/api/admin/users", "DELETE", { id });
 }
