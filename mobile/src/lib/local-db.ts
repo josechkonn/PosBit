@@ -398,6 +398,12 @@ export async function getMobileDb(): Promise<SQLite.SQLiteDatabase> {
       margen_override REAL
     );
 
+    CREATE TABLE IF NOT EXISTS producto_proveedores (
+      producto_id INTEGER NOT NULL,
+      proveedor_id TEXT NOT NULL,
+      PRIMARY KEY (producto_id, proveedor_id)
+    );
+
     CREATE TABLE IF NOT EXISTS creditos (
       id TEXT PRIMARY KEY,
       numero TEXT NOT NULL,
@@ -879,6 +885,18 @@ export async function saveCatalogOffline(data: {
       }
     }
 
+    if (Array.isArray(data.producto_proveedores)) {
+      for (const pp of data.producto_proveedores) {
+        if (!pp || pp.producto_id == null || !pp.proveedor_id) continue;
+        await db.runAsync(
+          `INSERT INTO producto_proveedores (producto_id, proveedor_id)
+           VALUES (?, ?)
+           ON CONFLICT(producto_id, proveedor_id) DO NOTHING`,
+          [Number(pp.producto_id), String(pp.proveedor_id)]
+        );
+      }
+    }
+
     if (Array.isArray(data.creditos)) {
       for (const cr of data.creditos) {
         if (!cr || !cr.id) continue;
@@ -1040,6 +1058,8 @@ export async function saveCatalogOffline(data: {
           await db.runAsync(`DELETE FROM venta_items_remotos WHERE venta_id = ?`, [String(del.registro_id)]);
         } else if (del.tabla === "producto_presentaciones") {
           await db.runAsync(`DELETE FROM producto_presentaciones WHERE id = ?`, [String(del.registro_id)]);
+        } else if (del.tabla === "producto_proveedores") {
+          await db.runAsync(`DELETE FROM producto_proveedores WHERE producto_id = ?`, [Number(del.registro_id)]);
         }
       }
     }

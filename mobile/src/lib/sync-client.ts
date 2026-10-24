@@ -111,6 +111,28 @@ export async function loginMobile(
 }
 
 /**
+ * Helper para fetch con timeout configurable para evitar que peticiones
+ * móviles colgadas dejen la sincronización bloqueada o en "Offline".
+ */
+export async function fetchWithTimeout(
+  url: string,
+  options: RequestInit = {},
+  timeoutMs = 12000
+): Promise<Response> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch(url, {
+      ...options,
+      signal: controller.signal,
+    });
+    return res;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
  * Sincroniza bidireccionalmente la App Móvil con el Servidor PosBit en la Nube:
  *   1. Sube todas las ventas creadas en modo offline (`sincronizado = 0`) a `/api/ventas` (con idempotencia)
  *   2. Sube todos los abonos creados en modo offline (`sincronizado = 0`) a `/api/creditos/[id]/abonos`
@@ -131,118 +153,101 @@ export async function syncMobileWithCloud(): Promise<{
     Authorization: `Bearer ${token}`,
   };
 
-  // 1. Subir ventas pendientes creadas en el teléfono
+  // 1. Subir ventas pendientes creadas en el teléfono de forma tolerante a fallos
   const todasVentas = await getVentasLocales();
   const pendientes = todasVentas.filter((v) => v.sincronizado === 0);
   let ventasSubidas = 0;
 
   for (const venta of pendientes) {
-    const items = JSON.parse(venta.items_json || "[]");
-    const pagos = venta.pagos_json ? JSON.parse(venta.pagos_json) : undefined;
-    const cobros_extra = venta.cobros_extra_json ? JSON.parse(venta.cobros_extra_json) : undefined;
-    const tipoPago = venta.tipo_pago || "Contado";
-    const obsBase = venta.observaciones ? `${venta.observaciones} · ` : "";
+    try {
+      const items = JSON.parse(venta.items_json || "[]");
+      const pagos = venta.pagos_json ? JSON.parse(venta.pagos_json) : undefined;
+      const cobros_extra = venta.cobros_extra_json ? JSON.parse(venta.cobros_extra_json) : undefined;
+      const tipoPago = venta.tipo_pago || "Contado";
+      const obsBase = venta.observaciones ? `${venta.observaciones} · ` : "";
 
-    const res = await fetch(`${serverUrl}/api/ventas`, {
-      method: "POST",
-      headers,
-      body: JSON.stringify({
-        origen_offline: true,
-        cliente_id: venta.cliente_id ? String(venta.cliente_id) : null,
-        cliente: venta.cliente_nombre,
-        tipo_pago: tipoPago,
-        fecha: venta.fecha,
-        moneda_id: venta.moneda_id,
-        metodo_pago_id: venta.metodo_pago_id,
-        caja_id: venta.caja_id,
-        descuento: venta.descuento || 0,
-        monto_pagado: venta.monto_pagado,
-        pagos,
-        cobros_extra,
-        observaciones: `${obsBase}Venta desde App Móvil (${venta.numero})`,
-        items: items.map((it: any) => ({
-          producto_id: it.producto_id,
-          cantidad: it.cantidad,
-          precio_unit: it.precio_unit,
-          subtotal: it.subtotal,
-          descuento: it.descuento || 0,
-          presentacion_id: it.presentacion_id || undefined,
-          presentacion_nombre: it.presentacion_nombre || undefined,
-          presentacion_unidades: it.presentacion_unidades || undefined,
-          cantidad_presentaciones: it.cantidad_presentaciones || undefined,
-          precio_presentacion: it.precio_presentacion || undefined,
-        })),
-      }),
-    });
+      const res = await fetchWithTimeout(`${serverUrl}/api/ventas`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          origen_offline: true,
+          cliente_id: venta.cliente_id ? String(venta.cliente_id) : null,
+          cliente: venta.cliente_nombre,
+          tipo_pago: tipoPago,
+          fecha: venta.fecha,
+          moneda_id: venta.moneda_id,
+          metodo_pago_id: venta.metodo_pago_id,
+          caja_id: venta.caja_id,
+          descuento: venta.descuento || 0,
+          monto_pagado: venta.monto_pagado,
+          pagos,
+          cobros_extra,
+          observaciones: `${obsBase}Venta desde App Móvil (${venta.numero})`,
+          items: items.map((it: any) => ({
+            producto_id: it.producto_id,
+            cantidad: it.cantidad,
+            precio_unit: it.precio_unit,
+            subtotal: it.subtotal,
+            descuento: it.descuento || 0,
+            presentacion_id: it.presentacion_id || undefined,
+            presentacion_nombre: it.presentacion_nombre || undefined,
+            presentacion_unidades: it.presentacion_unidades || undefined,
+            cantidad_presentaciones: it.cantidad_presentaciones || undefined,
+            precio_presentacion: it.precio_presentacion || undefined,
+          })),
+        }),
+      }, 10000);
 
-    if (res.ok) {
-      await markVentaSincronizada(venta.id);
-      ventasSubidas++;
+      if (res.ok) {
+        await markVentaSincronizada(venta.id);
+        ventasSubidas++;
+      }
+    } catch (err) {
+      console.warn(`[Sync] Advertencia subiendo venta local ${venta.id}:`, err);
     }
   }
 
-  // 2. Subir abonos pendientes creados en el teléfono
+  // 2. Subir abonos pendientes creados en el teléfono de forma tolerante a fallos
   const abonosPend = await getAbonosLocalesPendientes();
   for (const ab of abonosPend) {
     if (!ab.credito_id || String(ab.credito_id).startsWith("local-")) continue;
-    const lineas = ab.lineas_json ? JSON.parse(ab.lineas_json) : undefined;
-    const res = await fetch(`${serverUrl}/api/creditos/${ab.credito_id}/abonos`, {
-      method: "POST",
-      headers,
-      body: JSON.stringify({
-        fecha: ab.fecha,
-        monto: ab.monto,
-        moneda_id: ab.moneda_id,
-        metodo_pago_id: ab.metodo_pago_id,
-        caja_id: ab.caja_id,
-        lineas,
-        observaciones: ab.observaciones,
-      }),
-    });
-    if (res.ok) {
-      await markAbonoSincronizado(ab.id);
+    try {
+      const lineas = ab.lineas_json ? JSON.parse(ab.lineas_json) : undefined;
+      const res = await fetchWithTimeout(`${serverUrl}/api/creditos/${ab.credito_id}/abonos`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          fecha: ab.fecha,
+          monto: ab.monto,
+          moneda_id: ab.moneda_id,
+          metodo_pago_id: ab.metodo_pago_id,
+          caja_id: ab.caja_id,
+          lineas,
+          observaciones: ab.observaciones,
+        }),
+      }, 10000);
+      if (res.ok) {
+        await markAbonoSincronizado(ab.id);
+      }
+    } catch (err) {
+      console.warn(`[Sync] Advertencia subiendo abono local ${ab.id}:`, err);
     }
   }
 
-  // 3. Descargar catálogo, monedas, configuración de conversión, clientes y créditos en paralelo
+  // 3. Descargar delta incremental optimizado desde /api/sync?mode=mobile
+  // En vez de lanzar 10 peticiones pesadas en paralelo cada 45s (lo que agotaba sockets y dejaba la app Offline),
+  // PosBit envía todo el delta necesario en 1 sola petición SQL ultraligera con since.
   const lastSync = await getMeta("last_pull_iso");
   const syncUrl = lastSync
     ? `${serverUrl}/api/sync?mode=mobile&since=${encodeURIComponent(lastSync)}`
     : `${serverUrl}/api/sync?mode=mobile`;
 
-  const fetchJsonSafe = async (url: string) => {
-    try {
-      const r = await fetch(url, { method: "GET", headers });
-      if (!r.ok) return null;
-      return await r.json();
-    } catch {
-      return null;
-    }
-  };
-
-  const [
-    pullRes,
-    monedasDirect,
-    cfgGlobalDirect,
-    categoriasDirect,
-    marcasDirect,
-    proveedoresDirect,
-    productosDirect,
-    clientesDirect,
-    creditosDirect,
-    ventasDirect,
-  ] = await Promise.all([
-    fetch(syncUrl, { method: "GET", headers }),
-    fetchJsonSafe(`${serverUrl}/api/monedas`),
-    fetchJsonSafe(`${serverUrl}/api/configuracion-global`),
-    fetchJsonSafe(`${serverUrl}/api/categorias`),
-    fetchJsonSafe(`${serverUrl}/api/marcas`),
-    fetchJsonSafe(`${serverUrl}/api/proveedores?limit=200`),
-    fetchJsonSafe(`${serverUrl}/api/productos?limit=1000`),
-    fetchJsonSafe(`${serverUrl}/api/clientes?limit=500`),
-    fetchJsonSafe(`${serverUrl}/api/creditos`),
-    fetchJsonSafe(`${serverUrl}/api/ventas?limit=150`),
-  ]);
+  let pullRes: Response;
+  try {
+    pullRes = await fetchWithTimeout(syncUrl, { method: "GET", headers }, 15000);
+  } catch (netErr: any) {
+    throw new Error(`Conexión no disponible (${netErr?.message || "Timeout de red"})`);
+  }
 
   const pullText = await pullRes.text();
   let delta: any;
@@ -263,69 +268,36 @@ export async function syncMobileWithCloud(): Promise<{
     await db.runAsync(`DELETE FROM abonos WHERE id LIKE 'local-%'`);
   }
 
-  const prodsEnriquecidos = Array.isArray(productosDirect?.productos) && productosDirect.productos.length > 0
-    ? productosDirect.productos
-    : delta.tables?.productos || [];
-  const categoriasMerged =
-    Array.isArray(categoriasDirect) && categoriasDirect.length > 0
-      ? categoriasDirect
-      : delta.tables?.categorias;
-  const marcasMerged =
-    Array.isArray(marcasDirect) && marcasDirect.length > 0
-      ? marcasDirect
-      : delta.tables?.marcas;
-  const proveedoresMerged =
-    Array.isArray(proveedoresDirect?.data) && proveedoresDirect.data.length > 0
-      ? proveedoresDirect.data
-      : Array.isArray(proveedoresDirect) && proveedoresDirect.length > 0
-        ? proveedoresDirect
-        : delta.tables?.proveedores;
-  const monedasMerged =
-    Array.isArray(monedasDirect) && monedasDirect.length > 0
-      ? monedasDirect
-      : delta.tables?.monedas;
-  const clientesMerged =
-    Array.isArray(clientesDirect?.data) && clientesDirect.data.length > 0
-      ? clientesDirect.data
-      : delta.tables?.clientes;
-  const creditosMerged =
-    Array.isArray(creditosDirect?.creditos) && creditosDirect.creditos.length > 0
-      ? creditosDirect.creditos
-      : delta.tables?.creditos;
-  const ventasMerged =
-    Array.isArray(ventasDirect?.ventas) && ventasDirect.ventas.length > 0
-      ? ventasDirect.ventas
-      : delta.tables?.ventas;
-  const ventaItemsMerged =
-    Array.isArray(ventasDirect?.items) && ventasDirect.items.length > 0
-      ? ventasDirect.items
-      : delta.tables?.venta_items;
+  const deltaTables = delta.tables || {};
 
   await saveCatalogOffline({
-    configuracion_global: cfgGlobalDirect || delta.tables?.configuracion_global,
-    monedas: monedasMerged,
-    cajas: delta.tables?.cajas,
-    metodos_pago: delta.tables?.metodos_pago,
-    categorias: categoriasMerged,
-    marcas: marcasMerged,
-    proveedores: proveedoresMerged,
-    clientes: clientesMerged,
-    cliente_limites_credito: delta.tables?.cliente_limites_credito,
-    productos: prodsEnriquecidos,
-    producto_presentaciones: delta.tables?.producto_presentaciones,
-    creditos: creditosMerged,
-    abonos: delta.tables?.abonos,
-    ventas: ventasMerged,
-    venta_items: ventaItemsMerged,
+    configuracion_global: deltaTables.configuracion_global,
+    monedas: deltaTables.monedas,
+    cajas: deltaTables.cajas,
+    metodos_pago: deltaTables.metodos_pago,
+    categorias: deltaTables.categorias,
+    marcas: deltaTables.marcas,
+    proveedores: deltaTables.proveedores,
+    clientes: deltaTables.clientes,
+    cliente_limites_credito: deltaTables.cliente_limites_credito,
+    productos: deltaTables.productos,
+    producto_proveedores: deltaTables.producto_proveedores,
+    producto_presentaciones: deltaTables.producto_presentaciones,
+    creditos: deltaTables.creditos,
+    abonos: deltaTables.abonos,
+    ventas: deltaTables.ventas,
+    venta_items: deltaTables.venta_items,
     eliminados: delta.eliminados,
   });
 
   const nowIso = delta.hasta || new Date().toISOString();
   await setMeta("last_pull_iso", nowIso);
 
+  const prodsActualizados = Array.isArray(deltaTables.productos) ? deltaTables.productos.length : 0;
+
   return {
     ventasSubidas,
-    productosActualizados: prodsEnriquecidos.length,
+    productosActualizados: prodsActualizados,
     fecha: nowIso,
   };
 }

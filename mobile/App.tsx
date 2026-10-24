@@ -893,11 +893,12 @@ export default function App() {
     syncInFlightRef.current = true;
     setSyncing(true);
     try {
-      await syncMobileWithCloud();
+      const res = await syncMobileWithCloud();
       setSyncOnline(true);
+      if (res?.fecha) setLastSyncIso(res.fecha);
       await refreshLocalState(posSearchRef.current);
-    } catch (err) {
-      console.warn("Silent sync warning:", err);
+    } catch (err: any) {
+      console.warn("Silent sync warning:", err?.message || err);
       setSyncOnline(false);
     } finally {
       syncInFlightRef.current = false;
@@ -908,7 +909,8 @@ export default function App() {
   useEffect(() => {
     if (!session) return;
     runSilentSync();
-    const interval = setInterval(runSilentSync, 45_000);
+    // Auto-recuperación: Si está offline reintenta cada 8 segundos; si está online cada 45 segundos
+    const interval = setInterval(runSilentSync, syncOnline ? 45_000 : 8_000);
     const sub = AppState.addEventListener("change", (nextState) => {
       if (nextState === "active") runSilentSync();
     });
@@ -916,7 +918,7 @@ export default function App() {
       clearInterval(interval);
       sub.remove();
     };
-  }, [session, runSilentSync]);
+  }, [session, runSilentSync, syncOnline]);
 
   useEffect(() => {
     if (!session) return;
@@ -11397,15 +11399,28 @@ export default function App() {
                 />
                 <View>
                   <Text style={styles.sidebarBrandTitle}>PosBit</Text>
-                  <Text style={styles.sidebarBrandSub}>Inventario & POS v2.7 (0.1.30)</Text>
+                  <Text style={styles.sidebarBrandSub}>Inventario & POS v2.7 (0.1.34)</Text>
                 </View>
               </View>
-              <TouchableOpacity onPress={() => setDrawerOpen(false)}>
+              <TouchableOpacity onPress={() => setDrawerOpen(false)} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
                 <Feather name="x" size={20} color={THEME.sidebarForeground} />
               </TouchableOpacity>
             </View>
 
-            <ScrollView style={{ flex: 1, paddingHorizontal: 12, paddingVertical: 14 }}>
+            <ScrollView
+              style={{ flex: 1 }}
+              contentContainerStyle={{
+                paddingHorizontal: 12,
+                paddingTop: 14,
+                paddingBottom: 48,
+                flexGrow: 1,
+              }}
+              showsVerticalScrollIndicator={true}
+              nestedScrollEnabled={true}
+              keyboardShouldPersistTaps="handled"
+              bounces={true}
+              overScrollMode="always"
+            >
               {[
                 {
                   group: "PRINCIPAL",
@@ -18904,9 +18919,11 @@ const styles = StyleSheet.create({
     backgroundColor: "rgba(0,0,0,0.45)",
   },
   sidebarDrawer: {
-    width: 265,
+    width: 280,
     backgroundColor: THEME.sidebar,
     height: "100%",
+    maxHeight: "100%",
+    flexDirection: "column",
   },
   sidebarHeader: {
     paddingHorizontal: 18,
