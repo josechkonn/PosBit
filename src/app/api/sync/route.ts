@@ -36,6 +36,10 @@ export async function GET(request: Request) {
     const { searchParams } = new URL(request.url);
     const action = searchParams.get("action");
 
+    if (action === "ping") {
+      return NextResponse.json({ ok: true, timestamp: Date.now() });
+    }
+
     if (action === "status") {
       const config = await getSyncConfig();
       const includeHistory = searchParams.get("history") === "1";

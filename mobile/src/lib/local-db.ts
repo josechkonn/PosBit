@@ -1060,6 +1060,13 @@ export async function saveCatalogOffline(data: {
           await db.runAsync(`DELETE FROM producto_presentaciones WHERE id = ?`, [String(del.registro_id)]);
         } else if (del.tabla === "producto_proveedores") {
           await db.runAsync(`DELETE FROM producto_proveedores WHERE producto_id = ?`, [Number(del.registro_id)]);
+        } else if (del.tabla === "proveedores") {
+          await db.runAsync(`DELETE FROM proveedores WHERE id = ?`, [String(del.registro_id)]);
+          await db.runAsync(`DELETE FROM producto_proveedores WHERE proveedor_id = ?`, [String(del.registro_id)]);
+          await db.runAsync(`UPDATE productos SET proveedor_id = NULL WHERE proveedor_id = ?`, [String(del.registro_id)]);
+        } else if (del.tabla === "marcas") {
+          await db.runAsync(`DELETE FROM marcas WHERE id = ?`, [String(del.registro_id)]);
+          await db.runAsync(`UPDATE productos SET marca_id = NULL, marca_nombre = NULL WHERE marca_id = ?`, [String(del.registro_id)]);
         }
       }
     }
@@ -1135,6 +1142,20 @@ export async function getLocalMarcas(): Promise<LocalMarca[]> {
 export async function getLocalProveedores(): Promise<LocalProveedor[]> {
   const db = await getMobileDb();
   return await db.getAllAsync<LocalProveedor>(`SELECT * FROM proveedores ORDER BY nombre ASC`);
+}
+
+export async function deleteLocalProveedor(id: string | number): Promise<void> {
+  const db = await getMobileDb();
+  await db.withTransactionAsync(async () => {
+    await db.runAsync(`DELETE FROM proveedores WHERE id = ?`, [String(id)]);
+    await db.runAsync(`DELETE FROM producto_proveedores WHERE proveedor_id = ?`, [String(id)]);
+    await db.runAsync(`UPDATE productos SET proveedor_id = NULL WHERE proveedor_id = ?`, [String(id)]);
+  });
+}
+
+export async function deleteLocalMetodoPago(id: string | number): Promise<void> {
+  const db = await getMobileDb();
+  await db.runAsync(`DELETE FROM metodos_pago WHERE id = ?`, [String(id)]);
 }
 
 export async function getLocalProductos(search = ""): Promise<LocalProducto[]> {

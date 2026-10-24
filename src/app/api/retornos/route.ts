@@ -2,7 +2,8 @@ export const dynamic = 'force-dynamic';
 
 import { NextResponse } from "next/server";
 import { requireSession } from "@/lib/auth-server";
-import { query, queryOne, transaction } from "@/lib/db";
+import { query, queryOne, transaction, registrarEliminacionSync } from "@/lib/db";
+import { triggerBackgroundSync } from "@/lib/sync-engine";
 import { fechaLocalISO } from "@/lib/format";
 import { aBase, desdeBase, tasaUsd, tasaUsdDocumento, monedaDeProducto, monedaCostoDeProducto } from "@/lib/money";
 
@@ -427,8 +428,10 @@ export async function DELETE(request: Request) {
 
       await client.query(`DELETE FROM retorno_items WHERE retorno_id = $1`, [id]);
       await client.query(`DELETE FROM retornos WHERE id = $1`, [id]);
+      await registrarEliminacionSync("retornos", id, client);
     });
 
+    triggerBackgroundSync();
     return NextResponse.json({ success: true });
   } catch (error) {
     return NextResponse.json({ error: "Error al eliminar retorno" }, { status: 500 });

@@ -689,6 +689,16 @@ export async function applyDeltaToDb(
       }
     }
 
+    // Cargar también los tombstones que vienen en este mismo payload
+    for (const d of payload.eliminados || []) {
+      let set = deletedIdsByTable.get(d.tabla);
+      if (!set) {
+        set = new Set<string>();
+        deletedIdsByTable.set(d.tabla, set);
+      }
+      set.add(String(d.registro_id));
+    }
+
     const [
       existingMonedas,
       existingCajas,
@@ -892,6 +902,11 @@ export async function applyDeltaToDb(
       const seenKeysInBatch = new Map<string, number>();
 
       for (const rawRow of rawRows) {
+        const rawRowId = rawRow?.id != null ? String(rawRow.id) : null;
+        if (rawRowId && deletedIdsByTable.get(table)?.has(rawRowId)) {
+          continue;
+        }
+
         const row = translateForeignKeys(rawRow);
 
         if (table === "monedas" && row.codigo) {
@@ -1129,6 +1144,17 @@ export async function applyDeltaToDb(
           const idsToDelete = [rawId];
           if (mappedId && String(mappedId) !== rawId) {
             idsToDelete.push(String(mappedId));
+          }
+
+          if (tomb.tabla === "proveedores") {
+            await client.query(
+              `UPDATE productos SET proveedor_id = NULL WHERE proveedor_id::text = ANY($1::text[])`,
+              [idsToDelete]
+            );
+            await client.query(
+              `DELETE FROM producto_proveedores WHERE proveedor_id::text = ANY($1::text[])`,
+              [idsToDelete]
+            );
           }
 
           const delRes = await client.query(

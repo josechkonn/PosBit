@@ -9,6 +9,8 @@ import {
   markAbonoSincronizado,
   createOfflineAbono,
   getMobileDb,
+  deleteLocalProveedor,
+  deleteLocalMetodoPago,
 } from "./local-db";
 
 const KEY_SERVER_URL = "posbit_server_url";
@@ -117,7 +119,7 @@ export async function loginMobile(
 export async function fetchWithTimeout(
   url: string,
   options: RequestInit = {},
-  timeoutMs = 12000
+  timeoutMs = 8000
 ): Promise<Response> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -148,10 +150,28 @@ export async function syncMobileWithCloud(): Promise<{
     throw new Error("Sesión no configurada");
   }
 
+  const cleanServerUrl = serverUrl.trim().replace(/\/+$/, "");
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
     Authorization: `Bearer ${token}`,
   };
+
+  // 0. Sonda ultrarrápida de conectividad (ping check con timeout corto de 4 segundos)
+  try {
+    const probeRes = await fetchWithTimeout(
+      `${cleanServerUrl}/api/sync?action=ping`,
+      { method: "GET", headers },
+      4000
+    );
+    if (probeRes.status === 401) {
+      throw new Error("Sesión no autorizada o token expirado (HTTP 401)");
+    }
+  } catch (probeErr: any) {
+    if (probeErr?.message?.includes("401")) {
+      throw probeErr;
+    }
+    throw new Error(`Servidor fuera de línea (${probeErr?.message || "Sin conexión"})`);
+  }
 
   // 1. Subir ventas pendientes creadas en el teléfono de forma tolerante a fallos
   const todasVentas = await getVentasLocales();
@@ -166,7 +186,7 @@ export async function syncMobileWithCloud(): Promise<{
       const tipoPago = venta.tipo_pago || "Contado";
       const obsBase = venta.observaciones ? `${venta.observaciones} · ` : "";
 
-      const res = await fetchWithTimeout(`${serverUrl}/api/ventas`, {
+      const res = await fetchWithTimeout(`${cleanServerUrl}/api/ventas`, {
         method: "POST",
         headers,
         body: JSON.stringify({
@@ -196,13 +216,18 @@ export async function syncMobileWithCloud(): Promise<{
             precio_presentacion: it.precio_presentacion || undefined,
           })),
         }),
-      }, 10000);
+      }, 6000);
+
+      if (res.status === 401) {
+        throw new Error("Sesión no autorizada o token expirado (HTTP 401)");
+      }
 
       if (res.ok) {
         await markVentaSincronizada(venta.id);
         ventasSubidas++;
       }
-    } catch (err) {
+    } catch (err: any) {
+      if (err?.message?.includes("401")) throw err;
       console.warn(`[Sync] Advertencia subiendo venta local ${venta.id}:`, err);
     }
   }
@@ -213,7 +238,7 @@ export async function syncMobileWithCloud(): Promise<{
     if (!ab.credito_id || String(ab.credito_id).startsWith("local-")) continue;
     try {
       const lineas = ab.lineas_json ? JSON.parse(ab.lineas_json) : undefined;
-      const res = await fetchWithTimeout(`${serverUrl}/api/creditos/${ab.credito_id}/abonos`, {
+      const res = await fetchWithTimeout(`${cleanServerUrl}/api/creditos/${ab.credito_id}/abonos`, {
         method: "POST",
         headers,
         body: JSON.stringify({
@@ -225,28 +250,45 @@ export async function syncMobileWithCloud(): Promise<{
           lineas,
           observaciones: ab.observaciones,
         }),
-      }, 10000);
+      }, 6000);
+
+      if (res.status === 401) {
+        throw new Error("Sesión no autorizada o token expirado (HTTP 401)");
+      }
+
       if (res.ok) {
         await markAbonoSincronizado(ab.id);
       }
-    } catch (err) {
+    } catch (err: any) {
+      if (err?.message?.includes("401")) throw err;
       console.warn(`[Sync] Advertencia subiendo abono local ${ab.id}:`, err);
     }
   }
 
   // 3. Descargar delta incremental optimizado desde /api/sync?mode=mobile
-  // En vez de lanzar 10 peticiones pesadas en paralelo cada 45s (lo que agotaba sockets y dejaba la app Offline),
-  // PosBit envía todo el delta necesario en 1 sola petición SQL ultraligera con since.
   const lastSync = await getMeta("last_pull_iso");
   const syncUrl = lastSync
-    ? `${serverUrl}/api/sync?mode=mobile&since=${encodeURIComponent(lastSync)}`
-    : `${serverUrl}/api/sync?mode=mobile`;
+    ? `${cleanServerUrl}/api/sync?mode=mobile&since=${encodeURIComponent(lastSync)}`
+    : `${cleanServerUrl}/api/sync?mode=mobile`;
 
   let pullRes: Response;
   try {
-    pullRes = await fetchWithTimeout(syncUrl, { method: "GET", headers }, 15000);
+    pullRes = await fetchWithTimeout(syncUrl, { method: "GET", headers }, 8000);
   } catch (netErr: any) {
     throw new Error(`Conexión no disponible (${netErr?.message || "Timeout de red"})`);
+  }
+
+  // Fallback si la consulta delta incremental falla por timestamp obsoleto o error del servidor
+  if (pullRes.status >= 500 && lastSync) {
+    try {
+      pullRes = await fetchWithTimeout(`${cleanServerUrl}/api/sync?mode=mobile`, { method: "GET", headers }, 8000);
+    } catch {
+      // Ignorar fallback si la red cayó
+    }
+  }
+
+  if (pullRes.status === 401) {
+    throw new Error("Sesión no autorizada o token expirado (HTTP 401)");
   }
 
   const pullText = await pullRes.text();
@@ -816,21 +858,27 @@ export async function fetchReportesCloud(params: {
 export async function apiRequestMobile<T = any>(
   path: string,
   method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE" = "GET",
-  body?: any
+  body?: any,
+  timeoutMs = 8000
 ): Promise<T> {
   const { serverUrl, token } = await getStoredSession();
   if (!serverUrl || !token) {
     throw new Error("Sesión no configurada. Conéctate al servidor primero.");
   }
-  const url = path.startsWith("http") ? path : `${serverUrl}${path.startsWith("/") ? "" : "/"}${path}`;
-  const res = await fetch(url, {
-    method,
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${token}`,
+  const cleanServerUrl = serverUrl.trim().replace(/\/+$/, "");
+  const url = path.startsWith("http") ? path : `${cleanServerUrl}${path.startsWith("/") ? "" : "/"}${path}`;
+  const res = await fetchWithTimeout(
+    url,
+    {
+      method,
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${token}`,
+      },
+      body: body !== undefined ? JSON.stringify(body) : undefined,
     },
-    body: body !== undefined ? JSON.stringify(body) : undefined,
-  });
+    timeoutMs
+  );
   const text = await res.text();
   let json: any = {};
   try {
@@ -1157,9 +1205,14 @@ export async function saveProveedorCloud(payload: {
 }
 
 export async function deleteProveedorCloud(id: string | number) {
-  await apiRequestMobile(`/api/proveedores?id=${encodeURIComponent(String(id))}`, "DELETE");
-  const db = await getMobileDb();
-  await db.runAsync(`DELETE FROM proveedores WHERE id = ?`, [String(id)]);
+  // 1. Eliminar inmediatamente en SQLite local y desvincular productos para evitar ghost entities
+  await deleteLocalProveedor(id);
+  // 2. Notificar al servidor en la nube de forma tolerante a fallos
+  try {
+    await apiRequestMobile(`/api/proveedores?id=${encodeURIComponent(String(id))}`, "DELETE");
+  } catch (err) {
+    console.warn(`[deleteProveedorCloud] Advertencia al notificar eliminación al servidor:`, err);
+  }
   return { success: true };
 }
 
@@ -1323,9 +1376,14 @@ export async function saveMetodoPagoCloud(payload: {
 }
 
 export async function deleteMetodoPagoCloud(id: string | number) {
-  await apiRequestMobile(`/api/metodos-pago?id=${encodeURIComponent(String(id))}`, "DELETE");
-  const db = await getMobileDb();
-  await db.runAsync(`DELETE FROM metodos_pago WHERE id = ?`, [String(id)]);
+  // 1. Eliminar inmediatamente en SQLite local para evitar resurrección en pantalla
+  await deleteLocalMetodoPago(id);
+  // 2. Notificar al servidor en la nube de forma tolerante a fallos
+  try {
+    await apiRequestMobile(`/api/metodos-pago?id=${encodeURIComponent(String(id))}`, "DELETE");
+  } catch (err) {
+    console.warn(`[deleteMetodoPagoCloud] Advertencia al notificar eliminación al servidor:`, err);
+  }
   return { success: true };
 }
 

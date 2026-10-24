@@ -19,6 +19,7 @@ import {
   Animated,
   Alert,
   Vibration,
+  Dimensions,
   useWindowDimensions,
 } from "react-native";
 import {
@@ -301,6 +302,7 @@ function fmtDateTime(isoOrDate?: string | null): string {
 
 export default function App() {
   const { height: windowHeight } = useWindowDimensions();
+  const screenHeight = Math.max(windowHeight, Dimensions.get("screen").height);
   const [booting, setBooting] = useState(true);
   const [session, setSession] = useState<{
     serverUrl: string;
@@ -911,8 +913,8 @@ export default function App() {
   useEffect(() => {
     if (!session) return;
     runSilentSync();
-    // Auto-recuperación: Si está offline reintenta cada 8 segundos; si está online cada 45 segundos
-    const interval = setInterval(runSilentSync, syncOnline ? 45_000 : 8_000);
+    // Auto-recuperación moderada para evitar congelar el hilo de UI
+    const interval = setInterval(runSilentSync, syncOnline ? 60_000 : 30_000);
     const sub = AppState.addEventListener("change", (nextState) => {
       if (nextState === "active") runSilentSync();
     });
@@ -924,9 +926,10 @@ export default function App() {
 
   useEffect(() => {
     if (!session) return;
+    const delay = posSearch.trim() === "" ? 0 : 250;
     const t = setTimeout(() => {
       getLocalProductos(posSearch).then(setProductos);
-    }, 200);
+    }, delay);
     return () => clearTimeout(t);
   }, [posSearch, session]);
 
@@ -2958,26 +2961,42 @@ export default function App() {
   }, [route, loadReportes]);
 
   // ── CARGADORES Y CONTROLADORES DE TODOS LOS MÓDULOS WEB/ESCRITORIO ──
-  const loadCatalogExtras = useCallback(async () => {
-    const [locCats, locMrcs, locProvs] = await Promise.all([
-      getLocalCategorias(),
-      getLocalMarcas(),
-      getLocalProveedores(),
-    ]);
-    if (locCats.length > 0) setCategoriasCloud(locCats);
-    if (locMrcs.length > 0) setMarcasCloud(locMrcs);
-    if (locProvs.length > 0) setProveedoresList(locProvs);
+  const catalogExtrasLoadedRef = useRef(false);
+  const loadCatalogExtras = useCallback(async (force = false) => {
+    if (catalogExtrasLoadedRef.current && !force) {
+      return;
+    }
+    catalogExtrasLoadedRef.current = true;
+    try {
+      const [locCats, locMrcs, locProvs] = await Promise.all([
+        getLocalCategorias(),
+        getLocalMarcas(),
+        getLocalProveedores(),
+      ]);
+      if (locCats.length > 0) setCategoriasCloud(locCats);
+      if (locMrcs.length > 0) setMarcasCloud(locMrcs);
+      if (locProvs.length > 0) setProveedoresList(locProvs);
 
-    const [cats, mrcs, provs] = await Promise.all([
-      fetchCategoriasCloud(),
-      fetchMarcasCloud(),
-      fetchProveedoresCloud(),
-    ]);
-    if (cats.length > 0) setCategoriasCloud(cats);
-    if (mrcs.length > 0) setMarcasCloud(mrcs);
-    if (provs.length > 0) setProveedoresList(provs);
-    await refreshLocalState(posSearch);
-  }, [refreshLocalState, posSearch]);
+      // Carga remota en segundo plano sin congelar la UI ni re-consultar todo el estado local
+      fetchCategoriasCloud()
+        .then((cats) => {
+          if (cats && cats.length > 0) setCategoriasCloud(cats);
+        })
+        .catch(() => {});
+      fetchMarcasCloud()
+        .then((mrcs) => {
+          if (mrcs && mrcs.length > 0) setMarcasCloud(mrcs);
+        })
+        .catch(() => {});
+      fetchProveedoresCloud()
+        .then((provs) => {
+          if (provs && provs.length > 0) setProveedoresList(provs);
+        })
+        .catch(() => {});
+    } catch (e) {
+      console.warn("loadCatalogExtras error:", e);
+    }
+  }, []);
 
   const loadCompras = useCallback(async () => {
     setComprasLoading(true);
@@ -3073,7 +3092,14 @@ export default function App() {
     } else if (route === "proveedores") {
       loadProveedores();
     } else if (route === "metodos_pago") {
-      fetchMetodosPagoCloud().then(() => refreshLocalState(posSearch));
+      fetchMetodosPagoCloud()
+        .then((mps) => {
+          if (mps && mps.length > 0) setMetodosPago(mps);
+          else getLocalMetodosPago().then(setMetodosPago);
+        })
+        .catch(() => {
+          getLocalMetodosPago().then(setMetodosPago);
+        });
       loadCajas();
     } else if (route === "config" || route === "monedas") {
       loadConfigAndEmpresa();
@@ -3091,8 +3117,6 @@ export default function App() {
     loadConfigAndEmpresa,
     loadUsuariosAdmin,
     loadCajas,
-    refreshLocalState,
-    posSearch,
   ]);
 
   // 1. PRODUCTOS CRUD (Clon 1:1 de src/components/producto/producto-modal.tsx en PC/Web)
@@ -3830,8 +3854,8 @@ export default function App() {
       setProdVerifNuevaPres({ estado: "vacio", mensaje: "" });
       setProdVerifCajas({});
 
-      // Asegurar que categorías, marcas y proveedores estén cargados
-      if (categoriasCloud.length === 0 || marcasCloud.length === 0 || proveedoresList.length === 0) {
+      // Asegurar que categorías, marcas y proveedores estén cargados (solo si no se han cargado antes)
+      if (!catalogExtrasLoadedRef.current) {
         loadCatalogExtras();
       }
 
@@ -3889,9 +3913,6 @@ export default function App() {
     },
     [
       monedas,
-      categoriasCloud.length,
-      marcasCloud.length,
-      proveedoresList.length,
       loadCatalogExtras,
       applyProductoDataToForm,
     ]
@@ -4097,7 +4118,8 @@ export default function App() {
         presentaciones: presentacionesClean,
       });
       setProdModalOpen(false);
-      await refreshLocalState(posSearch);
+      getLocalProductos(posSearchRef.current).then(setProductos);
+      runSilentSync();
       showToast(
         prodModalMode === "edit"
           ? "Producto actualizado exitosamente"
@@ -4136,8 +4158,7 @@ export default function App() {
     prodFormStockMin,
     prodFormActivo,
     prodFormIvaIncluido,
-    refreshLocalState,
-    posSearch,
+    runSilentSync,
     showToast,
   ]);
 
@@ -4152,11 +4173,14 @@ export default function App() {
             text: "Eliminar",
             style: "destructive",
             onPress: async () => {
+              // Actualización optimista inmediata en la UI
+              setProductos((prev) => prev.filter((p) => String(p.id) !== String(prod.id)));
+              showToast("Producto eliminado", "info");
               try {
                 await deleteProductoCloud(prod.id);
-                await refreshLocalState(posSearch);
-                showToast("Producto eliminado", "info");
+                runSilentSync();
               } catch (e: any) {
+                getLocalProductos(posSearchRef.current).then(setProductos);
                 showToast(e?.message || "No se pudo eliminar el producto", "error");
               }
             },
@@ -4164,7 +4188,7 @@ export default function App() {
         ]
       );
     },
-    [refreshLocalState, posSearch, showToast]
+    [runSilentSync, showToast]
   );
 
   // 2. CATEGORÍAS CRUD (con autoselección cuando se crea desde el modal de Producto)
@@ -4189,7 +4213,7 @@ export default function App() {
         activa: true,
       });
       setCatModalOpen(false);
-      await loadCatalogExtras();
+      await loadCatalogExtras(true);
       if (!editingCat && saved?.id) {
         setProdFormCatId(String(saved.id));
       }
@@ -4209,11 +4233,14 @@ export default function App() {
           text: "Eliminar",
           style: "destructive",
           onPress: async () => {
+            // Actualización optimista inmediata en la UI
+            setCategoriasCloud((prev) => prev.filter((c) => String(c.id) !== String(cat.id)));
+            setCategorias((prev) => prev.filter((c) => String(c.id) !== String(cat.id)));
+            showToast("Categoría eliminada", "info");
             try {
               await deleteCategoriaCloud(cat.id);
-              await loadCatalogExtras();
-              showToast("Categoría eliminada", "info");
             } catch (e: any) {
+              loadCatalogExtras(true);
               showToast(e?.message || "No se pudo eliminar", "error");
             }
           },
@@ -4245,7 +4272,7 @@ export default function App() {
         activo: true,
       });
       setMarcaModalOpen(false);
-      await loadCatalogExtras();
+      await loadCatalogExtras(true);
       if (!editingMarca && saved?.id) {
         setProdFormMarcaId(String(saved.id));
       }
@@ -4265,11 +4292,13 @@ export default function App() {
           text: "Eliminar",
           style: "destructive",
           onPress: async () => {
+            // Actualización optimista inmediata en la UI
+            setMarcasCloud((prev) => prev.filter((m) => String(m.id) !== String(marca.id)));
+            showToast("Marca eliminada", "info");
             try {
               await deleteMarcaCloud(marca.id);
-              await loadCatalogExtras();
-              showToast("Marca eliminada", "info");
             } catch (e: any) {
+              loadCatalogExtras(true);
               showToast(e?.message || "No se pudo eliminar la marca", "error");
             }
           },
@@ -4346,11 +4375,13 @@ export default function App() {
           text: "Eliminar",
           style: "destructive",
           onPress: async () => {
+            // Actualización optimista inmediata en la UI
+            setProveedoresList((prev) => prev.filter((p) => String(p.id) !== String(prov.id)));
+            showToast("Proveedor eliminado", "info");
             try {
               await deleteProveedorCloud(prov.id);
-              await loadProveedores();
-              showToast("Proveedor eliminado", "info");
             } catch (e: any) {
+              await loadProveedores();
               showToast(e?.message || "No se pudo eliminar el proveedor", "error");
             }
           },
@@ -4750,13 +4781,16 @@ export default function App() {
             text: "Eliminar Venta",
             style: "destructive",
             onPress: async () => {
+              // Actualización optimista inmediata en la UI
+              setVentasLocales((prev) => prev.filter((item) => String(item.id) !== String(v.id)));
+              setVentasRemotas((prev) => prev.filter((item) => String(item.id) !== String(v.id)));
+              setVentaDetailModal(null);
+              showToast(`Venta ${v.numero} eliminada y stock revertido`, "info");
               try {
                 await eliminarVentaCloud(v.id);
-                setVentaDetailModal(null);
-                await runSilentSync();
-                await refreshLocalState(posSearch);
-                showToast(`Venta ${v.numero} eliminada y stock revertido`, "info");
+                runSilentSync();
               } catch (e: any) {
+                runSilentSync();
                 showToast(e?.message || "No se pudo eliminar la venta", "error");
               }
             },
@@ -4764,7 +4798,7 @@ export default function App() {
         ]
       );
     },
-    [runSilentSync, refreshLocalState, posSearch, showToast]
+    [runSilentSync, showToast]
   );
 
   const handleDeleteCompra = useCallback(
@@ -4778,14 +4812,16 @@ export default function App() {
             text: "Eliminar Compra",
             style: "destructive",
             onPress: async () => {
+              // Actualización optimista inmediata en la UI
+              setComprasList((prev) => prev.filter((item) => String(item.id) !== String(c.id)));
+              setCompraDetailModal(null);
+              showToast(`Compra ${c.numero} eliminada`, "info");
               try {
                 await eliminarCompraCloud(c.id);
-                setCompraDetailModal(null);
-                await loadCompras();
-                await runSilentSync();
-                await refreshLocalState(posSearch);
-                showToast(`Compra ${c.numero} eliminada`, "info");
+                loadCompras();
+                runSilentSync();
               } catch (e: any) {
+                loadCompras();
                 showToast(e?.message || "No se pudo eliminar la compra", "error");
               }
             },
@@ -4793,7 +4829,7 @@ export default function App() {
         ]
       );
     },
-    [loadCompras, runSilentSync, refreshLocalState, posSearch, showToast]
+    [loadCompras, runSilentSync, showToast]
   );
 
   // 7. TRANSACCIONES DE CAJA Y NUEVA CAJA
@@ -4956,15 +4992,21 @@ export default function App() {
         activo: mpFormActivo,
       });
       setMpModalOpen(false);
-      await fetchMetodosPagoCloud();
-      await refreshLocalState(posSearch);
+      fetchMetodosPagoCloud()
+        .then((mps) => {
+          if (mps && mps.length > 0) setMetodosPago(mps);
+          else getLocalMetodosPago().then(setMetodosPago);
+        })
+        .catch(() => {
+          getLocalMetodosPago().then(setMetodosPago);
+        });
       showToast(editingMp ? "Método de pago actualizado" : "Método de pago creado", "success");
     } catch (e: any) {
       showToast(e?.message || "Error al guardar método de pago", "error");
     } finally {
       setSavingMp(false);
     }
-  }, [editingMp, mpFormNombre, mpFormTipo, mpFormCajaId, mpFormActivo, refreshLocalState, posSearch, showToast]);
+  }, [editingMp, mpFormNombre, mpFormTipo, mpFormCajaId, mpFormActivo, showToast]);
 
   const handleDeleteMetodoPago = useCallback(
     (mp: LocalMetodoPago) => {
@@ -4974,18 +5016,20 @@ export default function App() {
           text: "Eliminar",
           style: "destructive",
           onPress: async () => {
+            // Actualización optimista inmediata en la UI
+            setMetodosPago((prev) => prev.filter((m) => String(m.id) !== String(mp.id)));
+            showToast("Método de pago eliminado", "info");
             try {
               await deleteMetodoPagoCloud(mp.id);
-              await refreshLocalState(posSearch);
-              showToast("Método de pago eliminado", "info");
             } catch (e: any) {
+              getLocalMetodosPago().then(setMetodosPago);
               showToast(e?.message || "No se pudo eliminar", "error");
             }
           },
         },
       ]);
     },
-    [refreshLocalState, posSearch, showToast]
+    [showToast]
   );
 
   // 10. CONFIGURACIÓN GLOBAL, EMPRESA Y USUARIOS
@@ -5095,11 +5139,13 @@ export default function App() {
           text: "Eliminar",
           style: "destructive",
           onPress: async () => {
+            // Actualización optimista inmediata en la UI
+            setUsuariosList((prev) => prev.filter((u) => String(u.id) !== String(usr.id)));
+            showToast("Usuario eliminado", "info");
             try {
               await deleteUsuarioAdminCloud(String(usr.id));
-              await loadUsuariosAdmin();
-              showToast("Usuario eliminado", "info");
             } catch (e: any) {
+              await loadUsuariosAdmin();
               showToast(e?.message || "No se pudo eliminar el usuario", "error");
             }
           },
@@ -11392,11 +11438,33 @@ export default function App() {
         visible={drawerOpen}
         transparent
         animationType="fade"
-        statusBarTranslucent
+        statusBarTranslucent={true}
         onRequestClose={() => setDrawerOpen(false)}
       >
-        <View style={[styles.drawerOverlay, { height: windowHeight }]}>
-          <View style={[styles.sidebarDrawer, { height: windowHeight, maxHeight: windowHeight }]}>
+        <View
+          style={[
+            styles.drawerOverlay,
+            {
+              position: "absolute",
+              top: 0,
+              bottom: 0,
+              left: 0,
+              right: 0,
+              height: screenHeight,
+              minHeight: screenHeight,
+            },
+          ]}
+        >
+          <View
+            style={[
+              styles.sidebarDrawer,
+              {
+                height: screenHeight,
+                minHeight: screenHeight,
+                paddingBottom: Platform.OS === "android" ? 32 : 24,
+              },
+            ]}
+          >
             <View
               style={[
                 styles.sidebarHeader,
@@ -11412,7 +11480,7 @@ export default function App() {
                 <View style={{ flex: 1, minWidth: 0 }}>
                   <Text style={styles.sidebarBrandTitle}>PosBit</Text>
                   <Text style={styles.sidebarBrandSub} numberOfLines={1}>
-                    Inventario & POS v2.7 (0.1.35)
+                    Inventario & POS v2.7 (0.1.36)
                   </Text>
                 </View>
               </View>
@@ -11543,7 +11611,7 @@ export default function App() {
             <View
               style={[
                 styles.sidebarFooter,
-                { paddingBottom: Platform.OS === "android" ? 18 : 26 },
+                { paddingBottom: Platform.OS === "android" ? 32 : 24 },
               ]}
             >
               <View style={styles.sidebarUserRow}>
@@ -11566,7 +11634,7 @@ export default function App() {
           </View>
 
           <TouchableOpacity
-            style={{ flex: 1 }}
+            style={{ flex: 1, height: screenHeight, minHeight: screenHeight }}
             activeOpacity={1}
             onPress={() => setDrawerOpen(false)}
           />
@@ -18936,6 +19004,11 @@ const styles = StyleSheet.create({
   },
   // Sidebar Drawer (#1c1917 idéntico a Desktop)
   drawerOverlay: {
+    position: "absolute",
+    top: 0,
+    bottom: 0,
+    left: 0,
+    right: 0,
     flex: 1,
     flexDirection: "row",
     backgroundColor: "rgba(0,0,0,0.45)",

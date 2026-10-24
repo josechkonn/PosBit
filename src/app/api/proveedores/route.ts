@@ -2,7 +2,8 @@ export const dynamic = 'force-dynamic';
 
 import { NextResponse } from "next/server";
 import { requireSession } from "@/lib/auth-server";
-import { query, queryOne, execute } from "@/lib/db";
+import { query, queryOne, execute, registrarEliminacionSync } from "@/lib/db";
+import { triggerBackgroundSync } from "@/lib/sync-engine";
 
 export async function GET(request: Request) {
   try {
@@ -56,6 +57,7 @@ export async function POST(request: Request) {
       [nombre, contacto || null, email || null, telefono || null, ciudad || null, direccion || null, rif || null, activo !== false]
     );
 
+    triggerBackgroundSync();
     return NextResponse.json(result, { status: 201 });
   } catch (error) {
     return NextResponse.json({ error: "Error al crear proveedor" }, { status: 500 });
@@ -99,6 +101,7 @@ export async function PUT(request: Request) {
       return NextResponse.json({ error: "Proveedor no encontrado" }, { status: 404 });
     }
 
+    triggerBackgroundSync();
     return NextResponse.json(result);
   } catch (error) {
     return NextResponse.json({ error: "Error al actualizar proveedor" }, { status: 500 });
@@ -120,7 +123,11 @@ export async function DELETE(request: Request) {
       return NextResponse.json({ error: "No se puede eliminar: tiene compras asociadas" }, { status: 400 });
     }
 
+    await execute(`UPDATE productos SET proveedor_id = NULL WHERE proveedor_id = $1`, [id]);
+    await execute(`DELETE FROM producto_proveedores WHERE proveedor_id = $1`, [id]);
     await execute(`DELETE FROM proveedores WHERE id = $1`, [id]);
+    await registrarEliminacionSync("proveedores", id);
+    triggerBackgroundSync();
     return NextResponse.json({ success: true });
   } catch (error) {
     return NextResponse.json({ error: "Error al eliminar proveedor" }, { status: 500 });

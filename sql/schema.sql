@@ -968,10 +968,7 @@ FROM monedas m
 WHERE m.activo = true
 ON CONFLICT (nombre) DO NOTHING;
 
--- Metodos de pago iniciales (uno por tipo por caja)
--- Exclusiones del negocio: no se crean "Transferencia USD" ni "Efectivo VES"
--- (efectivo en Bs.); esos métodos se usan en cajas que ya existan o se
--- agregan manualmente desde el módulo de Métodos de Pago.
+-- Metodos de pago iniciales (uno por tipo por caja) SOLO si la tabla esta completamente vacia
 INSERT INTO metodos_pago (nombre, tipo, caja_id)
 SELECT
     t.tipo_nombre || ' ' || m.codigo,
@@ -983,6 +980,7 @@ JOIN cajas c ON c.moneda_id = m.id
 WHERE m.activo = true
   AND NOT (t.tipo_nombre = 'Transferencia' AND m.codigo = 'USD')
   AND NOT (t.tipo_nombre = 'Efectivo' AND m.codigo = 'VES')
+  AND NOT EXISTS (SELECT 1 FROM metodos_pago)
 ON CONFLICT (nombre, caja_id) DO NOTHING;
 
 -- Exclusiones del negocio: se eliminan si existieran de una version anterior
