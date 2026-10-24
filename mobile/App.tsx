@@ -19,6 +19,7 @@ import {
   Animated,
   Alert,
   Vibration,
+  useWindowDimensions,
 } from "react-native";
 import {
   CameraView,
@@ -299,6 +300,7 @@ function fmtDateTime(isoOrDate?: string | null): string {
 }
 
 export default function App() {
+  const { height: windowHeight } = useWindowDimensions();
   const [booting, setBooting] = useState(true);
   const [session, setSession] = useState<{
     serverUrl: string;
@@ -5666,99 +5668,103 @@ export default function App() {
     <View style={styles.appContainer}>
       <StatusBar barStyle="dark-content" backgroundColor={THEME.card} />
 
-      {/* ── Topbar idéntico a PosBit v2.6 Web ── */}
+      {/* ── Topbar idéntico a PosBit v2.6 Web con layout protegido anti-desborde ── */}
       <View style={styles.topbar}>
         <View style={styles.topbarOrangeLine} />
-        <TouchableOpacity
-          style={styles.menuIconBtn}
-          onPress={() => setDrawerOpen(true)}
-          accessibilityLabel="Abrir menú"
-        >
-          <Feather name="menu" size={20} color={THEME.foreground} />
-        </TouchableOpacity>
 
-        <TouchableOpacity
-          style={styles.topbarBrand}
-          onPress={() => setRoute(route === "pos" ? "dashboard" : "pos")}
-        >
-          <Image
-            source={require("./assets/logo.png")}
-            style={{ width: 28, height: 28, borderRadius: 7 }}
-            resizeMode="contain"
-          />
-          <View>
-            <Text style={styles.topbarTitle} numberOfLines={1}>
-              {routeTitle[route]}
-            </Text>
-            <Text style={styles.topbarSubtitle} numberOfLines={1}>
-              PosBit · {monedaSeleccionada}
-            </Text>
-          </View>
-        </TouchableOpacity>
-
-        <View style={{ flex: 1 }} />
-
-        {/* CloudSyncBadge idéntico a la web */}
-        <TouchableOpacity
-          style={[
-            styles.cloudBadge,
-            syncing
-              ? styles.cloudBadgeSyncing
-              : !syncOnline
-              ? styles.cloudBadgeOffline
-              : pendingSyncCount > 0
-              ? styles.cloudBadgePending
-              : styles.cloudBadgeOk,
-          ]}
-          onPress={runSilentSync}
-        >
-          <View
-            style={[
-              styles.cloudDot,
-              {
-                backgroundColor: syncing
-                  ? THEME.primary
-                  : !syncOnline
-                  ? THEME.danger
-                  : pendingSyncCount > 0
-                  ? THEME.warning
-                  : THEME.success,
-              },
-            ]}
-          />
-          <Text
-            style={[
-              styles.cloudBadgeText,
-              {
-                color: syncing
-                  ? THEME.primary600
-                  : !syncOnline
-                  ? THEME.dangerStrong
-                  : pendingSyncCount > 0
-                  ? THEME.warningStrong
-                  : THEME.successStrong,
-              },
-            ]}
-          >
-            {syncing
-              ? "Sinc..."
-              : !syncOnline
-              ? "Offline"
-              : pendingSyncCount > 0
-              ? `${pendingSyncCount} pend.`
-              : "En línea"}
-          </Text>
-        </TouchableOpacity>
-
-        {route !== "pos" && (
+        {/* Lado Izquierdo: Menú Hamburguesa + Título de Pantalla con flexShrink */}
+        <View style={{ flexDirection: "row", alignItems: "center", gap: 8, flex: 1, minWidth: 0 }}>
           <TouchableOpacity
-            style={styles.topbarPosShortBtn}
-            onPress={() => setRoute("pos")}
+            style={styles.menuIconBtn}
+            onPress={() => setDrawerOpen(true)}
+            accessibilityLabel="Abrir menú"
           >
-            <Feather name="shopping-cart" size={14} color="#fff" />
-            <Text style={styles.topbarPosShortBtnText}>POS</Text>
+            <Feather name="menu" size={20} color={THEME.foreground} />
           </TouchableOpacity>
-        )}
+
+          <TouchableOpacity
+            style={[styles.topbarBrand, { flex: 1, minWidth: 0 }]}
+            onPress={() => setRoute(route === "pos" ? "dashboard" : "pos")}
+          >
+            <Image
+              source={require("./assets/logo.png")}
+              style={{ width: 28, height: 28, borderRadius: 7 }}
+              resizeMode="contain"
+            />
+            <View style={{ flex: 1, minWidth: 0 }}>
+              <Text style={styles.topbarTitle} numberOfLines={1} ellipsizeMode="tail">
+                {routeTitle[route]}
+              </Text>
+              <Text style={styles.topbarSubtitle} numberOfLines={1} ellipsizeMode="tail">
+                PosBit · {monedaSeleccionada}
+              </Text>
+            </View>
+          </TouchableOpacity>
+        </View>
+
+        {/* Lado Derecho: CloudSyncBadge + Botón Rápido POS (Siempre visibles y nunca se salen del contenedor) */}
+        <View style={{ flexDirection: "row", alignItems: "center", gap: 6, flexShrink: 0 }}>
+          <TouchableOpacity
+            style={[
+              styles.cloudBadge,
+              syncing
+                ? styles.cloudBadgeSyncing
+                : !syncOnline
+                ? styles.cloudBadgeOffline
+                : pendingSyncCount > 0
+                ? styles.cloudBadgePending
+                : styles.cloudBadgeOk,
+            ]}
+            onPress={runSilentSync}
+          >
+            <View
+              style={[
+                styles.cloudDot,
+                {
+                  backgroundColor: syncing
+                    ? THEME.primary
+                    : !syncOnline
+                    ? THEME.danger
+                    : pendingSyncCount > 0
+                    ? THEME.warning
+                    : THEME.success,
+                },
+              ]}
+            />
+            <Text
+              style={[
+                styles.cloudBadgeText,
+                {
+                  color: syncing
+                    ? THEME.primary600
+                    : !syncOnline
+                    ? THEME.dangerStrong
+                    : pendingSyncCount > 0
+                    ? THEME.warningStrong
+                    : THEME.successStrong,
+                },
+              ]}
+            >
+              {syncing
+                ? "Sinc..."
+                : !syncOnline
+                ? "Offline"
+                : pendingSyncCount > 0
+                ? `${pendingSyncCount} pend.`
+                : "En línea"}
+            </Text>
+          </TouchableOpacity>
+
+          {route !== "pos" && (
+            <TouchableOpacity
+              style={styles.topbarPosShortBtn}
+              onPress={() => setRoute("pos")}
+            >
+              <Feather name="shopping-cart" size={13} color="#fff" />
+              <Text style={styles.topbarPosShortBtnText}>POS</Text>
+            </TouchableOpacity>
+          )}
+        </View>
       </View>
 
       {/* Toast flotante absoluto (en Modal transparente para flotar por encima de cualquier otro Modal nativo) */}
@@ -11386,23 +11392,35 @@ export default function App() {
         visible={drawerOpen}
         transparent
         animationType="fade"
+        statusBarTranslucent
         onRequestClose={() => setDrawerOpen(false)}
       >
-        <View style={styles.drawerOverlay}>
-          <View style={styles.sidebarDrawer}>
-            <View style={styles.sidebarHeader}>
-              <View style={{ flexDirection: "row", alignItems: "center", gap: 10 }}>
+        <View style={[styles.drawerOverlay, { height: windowHeight }]}>
+          <View style={[styles.sidebarDrawer, { height: windowHeight, maxHeight: windowHeight }]}>
+            <View
+              style={[
+                styles.sidebarHeader,
+                { paddingTop: Platform.OS === "android" ? (StatusBar.currentHeight || 24) + 12 : 18 },
+              ]}
+            >
+              <View style={{ flexDirection: "row", alignItems: "center", gap: 10, flex: 1, minWidth: 0 }}>
                 <Image
                   source={require("./assets/logo.png")}
                   style={{ width: 34, height: 34, borderRadius: 8 }}
                   resizeMode="contain"
                 />
-                <View>
+                <View style={{ flex: 1, minWidth: 0 }}>
                   <Text style={styles.sidebarBrandTitle}>PosBit</Text>
-                  <Text style={styles.sidebarBrandSub}>Inventario & POS v2.7 (0.1.34)</Text>
+                  <Text style={styles.sidebarBrandSub} numberOfLines={1}>
+                    Inventario & POS v2.7 (0.1.35)
+                  </Text>
                 </View>
               </View>
-              <TouchableOpacity onPress={() => setDrawerOpen(false)} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
+              <TouchableOpacity
+                onPress={() => setDrawerOpen(false)}
+                hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
+                style={{ padding: 4 }}
+              >
                 <Feather name="x" size={20} color={THEME.sidebarForeground} />
               </TouchableOpacity>
             </View>
@@ -11411,13 +11429,12 @@ export default function App() {
               style={{ flex: 1 }}
               contentContainerStyle={{
                 paddingHorizontal: 12,
-                paddingTop: 14,
-                paddingBottom: 48,
-                flexGrow: 1,
+                paddingTop: 12,
+                paddingBottom: 32,
               }}
               showsVerticalScrollIndicator={true}
-              nestedScrollEnabled={true}
               keyboardShouldPersistTaps="handled"
+              scrollEnabled={true}
               bounces={true}
               overScrollMode="always"
             >
@@ -11523,7 +11540,12 @@ export default function App() {
               ))}
             </ScrollView>
 
-            <View style={styles.sidebarFooter}>
+            <View
+              style={[
+                styles.sidebarFooter,
+                { paddingBottom: Platform.OS === "android" ? 18 : 26 },
+              ]}
+            >
               <View style={styles.sidebarUserRow}>
                 <View style={styles.avatarCircle}>
                   <Text style={styles.avatarCircleText}>
@@ -17773,8 +17795,8 @@ const styles = StyleSheet.create({
     borderBottomColor: THEME.border,
     flexDirection: "row",
     alignItems: "center",
+    justifyContent: "space-between",
     paddingHorizontal: 12,
-    gap: 10,
   },
   topbarOrangeLine: {
     position: "absolute",
@@ -18921,9 +18943,8 @@ const styles = StyleSheet.create({
   sidebarDrawer: {
     width: 280,
     backgroundColor: THEME.sidebar,
-    height: "100%",
-    maxHeight: "100%",
     flexDirection: "column",
+    overflow: "hidden",
   },
   sidebarHeader: {
     paddingHorizontal: 18,
