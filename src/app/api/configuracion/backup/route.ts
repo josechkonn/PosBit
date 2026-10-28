@@ -2,7 +2,7 @@ export const dynamic = "force-dynamic";
 
 import { NextResponse } from "next/server";
 import { requireSession } from "@/lib/auth-server";
-import { pool, transaction } from "@/lib/db";
+import { pool, transaction, syncAllSerialSequences } from "@/lib/db";
 
 const TABLES_ORDER = [
   "configuracion",
@@ -193,26 +193,8 @@ export async function POST(request: Request) {
           await client.query(`UPDATE sync_config SET actualizado_en = NOW() WHERE id = 1`);
         } catch {}
 
-        // 3. Sincronizar secuencias seriales en PostgreSQL
-        const serialTables = [
-          { table: "productos", col: "id" },
-          { table: "producto_costos_historicos", col: "id" },
-          { table: "configuracion_global", col: "id" },
-        ];
-
-        for (const { table, col } of serialTables) {
-          try {
-            await client.query(`
-              SELECT setval(
-                pg_get_serial_sequence('${table}', '${col}'),
-                COALESCE((SELECT MAX("${col}") FROM "${table}"), 1),
-                (SELECT MAX("${col}") FROM "${table}") IS NOT NULL
-              );
-            `);
-          } catch {
-            // Ignorar si la secuencia no aplica
-          }
-        }
+        // 3. Sincronizar todas las secuencias seriales en PostgreSQL
+        await syncAllSerialSequences(client);
       } finally {
         if (replicaEnabled) {
           await client.query("SET session_replication_role = 'origin'");

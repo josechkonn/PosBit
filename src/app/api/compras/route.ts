@@ -2,7 +2,7 @@ export const dynamic = 'force-dynamic';
 
 import { NextResponse } from "next/server";
 import { requireSession } from "@/lib/auth-server";
-import { query, queryOne, execute, transaction, registrarEliminacionSync } from "@/lib/db";
+import { query, queryOne, execute, transaction, registrarEliminacionSync, generarNumeroUnico } from "@/lib/db";
 import { fechaLocalISO } from "@/lib/format";
 import {
   aBase,
@@ -271,12 +271,13 @@ export async function POST(request: Request) {
         saldoPendienteBase = Math.max(totalBase - abonoBase, 0);
       }
 
+      const numeroCompra = await generarNumeroUnico(client, "compras", "OC");
       const compraRes = await client.query(
         `INSERT INTO compras (numero, proveedor_id, fecha, moneda_id, metodo_pago_id, caja_id, subtotal, total, total_base, tasa, estado, observaciones, referencia, estado_pago, saldo_pendiente, descuento_pct, descuento_monto)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
          RETURNING *`,
         [
-          generarNumero(),
+          numeroCompra,
           proveedor_id,
           fecha || fechaLocalISO(),
           moneda_id,

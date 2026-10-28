@@ -2,7 +2,7 @@ export const dynamic = 'force-dynamic';
 
 import { NextResponse } from "next/server";
 import { requireSession } from "@/lib/auth-server";
-import { query, queryOne, transaction, registrarEliminacionSync } from "@/lib/db";
+import { query, queryOne, transaction, registrarEliminacionSync, generarNumeroUnico } from "@/lib/db";
 import { triggerBackgroundSync } from "@/lib/sync-engine";
 import { fechaLocalISO } from "@/lib/format";
 import { aBase, desdeBase, tasaUsd, tasaUsdDocumento, monedaDeProducto, monedaCostoDeProducto } from "@/lib/money";
@@ -206,7 +206,7 @@ export async function POST(request: Request) {
       // Unidades de la moneda del documento por 1 USD (con la tasa efectiva)
       const tasaUsdDoc = tasaUsdDocumento(docMoneda, docTasa, monedasCatalogo);
 
-      const numero = generarNumero(tipo);
+      const numero = await generarNumeroUnico(client, "retornos", tipo === "Proveedor" ? "DEV" : "RET");
       const retornoRes = await client.query(
         `INSERT INTO retornos (numero, tipo, venta_id, compra_id, cliente_id, proveedor_id, fecha, motivo, estado)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'Procesado')

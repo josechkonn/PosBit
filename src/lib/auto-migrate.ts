@@ -111,7 +111,9 @@ export async function ensureSchemaAndMigrate(customPool?: Pool | PoolClient): Pr
       `);
 
       if (tableCheck.rows.length === 0) {
-        // Base de datos nueva o vacía: schema.sql se encargará de crear todo
+        // Base de datos nueva o vacía: schema.sql se encargará de crear todo;
+        // limpiar migrationPromise para que la llamada post-schema ejecute la migración a UUID.
+        migrationPromise = null;
         return;
       }
 
@@ -428,6 +430,37 @@ export async function ensureSchemaAndMigrate(customPool?: Pool | PoolClient): Pr
           UPDATE configuracion SET valor = 'Promedio' WHERE clave = 'inventario_metodo_costeo' AND valor = 'FIFO';
         END $$;
       `);
+
+      // ── Sincronizar todas las secuencias seriales de PostgreSQL ───────────
+      try {
+        await client.query(`
+          DO $$
+          DECLARE
+            rec record;
+            max_id bigint;
+          BEGIN
+            FOR rec IN
+              SELECT c.table_name,
+                     c.column_name,
+                     pg_get_serial_sequence(format('%I.%I', c.table_schema, c.table_name), c.column_name) AS seq_name
+              FROM information_schema.columns c
+              WHERE c.table_schema = 'public'
+                AND c.column_name = 'id'
+                AND c.data_type IN ('integer', 'bigint', 'smallint')
+                AND pg_get_serial_sequence(format('%I.%I', c.table_schema, c.table_name), c.column_name) IS NOT NULL
+            LOOP
+              EXECUTE format('SELECT COALESCE(MAX(%I), 0) FROM %I', rec.column_name, rec.table_name) INTO max_id;
+              IF max_id > 0 THEN
+                PERFORM setval(rec.seq_name, max_id, true);
+              ELSE
+                PERFORM setval(rec.seq_name, 1, false);
+              END IF;
+            END LOOP;
+          END $$;
+        `);
+      } catch (seqErr) {
+        console.warn("Aviso al sincronizar secuencias:", (seqErr as Error)?.message || seqErr);
+      }
 
       // ── Corrección de fechas adelantadas por desfase UTC ──────────────────
       await corrigeFechasDesfasadasUTC(client);

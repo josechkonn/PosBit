@@ -2,7 +2,7 @@ export const dynamic = 'force-dynamic';
 
 import { NextResponse } from "next/server";
 import { requireSession } from "@/lib/auth-server";
-import { query, queryOne, execute, transaction, registrarEliminacionSync } from "@/lib/db";
+import { query, queryOne, execute, transaction, registrarEliminacionSync, generarNumeroUnico } from "@/lib/db";
 import { fechaLocalISO } from "@/lib/format";
 import { aBase, convertir, redondear, tasaUsd, tasaUsdDocumento, monedaDeProducto, monedaCostoDeProducto, tasaMostrada, tasaPar, desdeBase } from "@/lib/money";
 import { triggerBackgroundSync } from "@/lib/sync-engine";
@@ -574,12 +574,13 @@ export async function POST(request: Request) {
       }
 
       const estadoVenta = esCredito ? "Credito" : "Pagada";
+      const numeroVenta = await generarNumeroUnico(client, "ventas", "VTA");
 
       const ventaRes = await client.query(
         `INSERT INTO ventas (numero, cliente, cliente_id, tipo_pago, fecha, moneda_id, metodo_pago_id, caja_id, subtotal, descuento, impuesto, cobros_extra, total, total_base, descuento_base, cobros_extra_base, tasa, estado, observaciones) 
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19) 
          RETURNING *`,
-         [generarNumero(), clienteNombre, cliente_id || null, esCredito ? "Credito" : "Contado", fechaVenta, effectiveMonedaId, metodoVentaId, cajaVentaId, subtotalTotal, descuentoVenta, impuestoTotal, cobrosExtraVenta, total, totalBase, descuentoBase, cobrosExtraBase, tasaAplicada, estadoVenta, observaciones || null]
+         [numeroVenta, clienteNombre, cliente_id || null, esCredito ? "Credito" : "Contado", fechaVenta, effectiveMonedaId, metodoVentaId, cajaVentaId, subtotalTotal, descuentoVenta, impuestoTotal, cobrosExtraVenta, total, totalBase, descuentoBase, cobrosExtraBase, tasaAplicada, estadoVenta, observaciones || null]
       );
 
       const venta = ventaRes.rows[0];
@@ -680,11 +681,12 @@ export async function POST(request: Request) {
         // El crédito queda en la moneda de la venta (USD, VES o COP):
         // monto_total = total de la venta, saldo = lo que falta por pagar.
         // 'Parcial' cuando ya se recibió un pago inicial, 'Pendiente' si no.
+        const numeroCredito = await generarNumeroUnico(client, "creditos", "CRE");
         const creditoRes = await client.query(
           `INSERT INTO creditos (numero, cliente_id, venta_id, fecha, monto_total, saldo, estado, moneda_id, total_base, saldo_base) 
            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $9) 
            RETURNING id`,
-          [generarNumeroCredito(), cliente_id, venta.id, venta.fecha, total, deuda, pagado > 0.009 ? "Parcial" : "Pendiente", moneda_id, deudaBase]
+          [numeroCredito, cliente_id, venta.id, venta.fecha, total, deuda, pagado > 0.009 ? "Parcial" : "Pendiente", moneda_id, deudaBase]
         );
 
         // El pago inicial queda registrado como abono contra ese crédito

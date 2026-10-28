@@ -1,5 +1,5 @@
 import { Pool, PoolClient } from "pg";
-import { pool, query, queryOne, transaction } from "./db";
+import { pool, query, queryOne, transaction, syncAllSerialSequences } from "./db";
 
 export interface SyncConfig {
   id: number;
@@ -1178,25 +1178,9 @@ export async function applyDeltaToDb(
       }
     }
 
-    // Sincronizar secuencias seriales de PostgreSQL solo cuando se modificaron tablas con secuencias
-    const serialTables = [
-      { table: "productos", col: "id" },
-      { table: "producto_costos_historicos", col: "id" },
-      { table: "configuracion_global", col: "id" },
-    ];
-    for (const { table, col } of serialTables) {
-      if (!payload.tables?.[table]?.length) continue;
-      try {
-        await client.query(`
-          SELECT setval(
-            pg_get_serial_sequence('${table}', '${col}'),
-            COALESCE((SELECT MAX("${col}") FROM "${table}"), 1),
-            (SELECT MAX("${col}") FROM "${table}") IS NOT NULL
-          );
-        `);
-      } catch {
-        // Ignorar si la tabla usa UUID
-      }
+    // Sincronizar todas las secuencias seriales de PostgreSQL cuando se aplicaron filas
+    if (hasTableRows) {
+      await syncAllSerialSequences(client);
     }
   } finally {
     if (replicaEnabled) {
