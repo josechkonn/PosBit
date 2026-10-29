@@ -4,7 +4,9 @@ import { useState, useEffect, useCallback, useMemo } from "react";
 import { HandCoins, CheckCircle2, Wallet } from "lucide-react";
 import { StatusBadge } from "@/components/ui/badge";
 import { PageHeader } from "@/components/ui/page-header";
+import { SearchBar } from "@/components/ui/search-bar";
 import { Select } from "@/components/ui/select";
+import { Pagination } from "@/components/ui/pagination";
 import { Table, Td, Tr, HeaderConfig } from "@/components/ui/table";
 import { AbonoModal } from "@/components/credito/abono-modal";
 import { KpiCard } from "@/components/ui/kpi-card";
@@ -43,47 +45,105 @@ interface Summary {
   pagados: string;
 }
 
+interface PaginationInfo {
+  page: number;
+  limit: number;
+  total: number;
+  totalPages: number;
+  cursor?: string | null;
+  hasMore?: boolean;
+}
+
+const PAGE_SIZE = 20;
+
 export default function CreditosPage() {
   const { toast } = useToast();
   const [creditos, setCreditos] = useState<Credito[]>([]);
   const [summary, setSummary] = useState<Summary>({ por_cobrar: [], pendientes: "0", pagados: "0" });
   const [loading, setLoading] = useState(true);
   const [estadoFilter, setEstadoFilter] = useState("Todos");
+  const [search, setSearch] = useState("");
+  const [currentPage, setCurrentPage] = useState(1);
+  const [pagination, setPagination] = useState<PaginationInfo>({
+    page: 1,
+    limit: PAGE_SIZE,
+    total: 0,
+    totalPages: 1,
+  });
 
   const [abonoOpen, setAbonoOpen] = useState(false);
   const [selectedCredito, setSelectedCredito] = useState<Credito | null>(null);
 
-  const fetchCreditos = useCallback(async () => {
-    setLoading(true);
-    try {
-      const res = await fetch(`/api/creditos?estado=${estadoFilter}`);
-      if (res.ok) {
-        const data = await res.json();
-        setCreditos(data.creditos || []);
-        setSummary(data.summary || { por_cobrar: [], pendientes: "0", pagados: "0" });
+  const fetchCreditos = useCallback(
+    async (opts?: { silent?: boolean; page?: number; search?: string; estado?: string }) => {
+      const isSilent = opts?.silent ?? false;
+      const pageToFetch = opts?.page !== undefined ? opts.page : currentPage;
+      const searchToFetch = opts?.search !== undefined ? opts.search : search;
+      const estadoToFetch = opts?.estado !== undefined ? opts.estado : estadoFilter;
+
+      if (!isSilent) {
+        setLoading(true);
       }
-    } catch (error) {
-      console.error("Error al obtener créditos:", error);
-    } finally {
-      setLoading(false);
-    }
-  }, [estadoFilter]);
 
+      try {
+        const params = new URLSearchParams();
+        if (estadoToFetch && estadoToFetch !== "Todos") {
+          params.set("estado", estadoToFetch);
+        }
+        if (searchToFetch.trim()) {
+          params.set("search", searchToFetch.trim());
+        }
+        params.set("page", String(pageToFetch));
+        params.set("limit", String(PAGE_SIZE));
+
+        const res = await fetch(`/api/creditos?${params.toString()}`);
+        if (res.status === 401) {
+          window.location.href = "/login";
+          return;
+        }
+
+        if (res.ok) {
+          const data = await res.json();
+          setCreditos(data.creditos || []);
+          setSummary(data.summary || { por_cobrar: [], pendientes: "0", pagados: "0" });
+          if (data.pagination) {
+            setPagination(data.pagination);
+          }
+        }
+      } catch (error) {
+        console.error("Error al obtener créditos:", error);
+      } finally {
+        if (!isSilent) {
+          setLoading(false);
+        }
+      }
+    },
+    [currentPage, search, estadoFilter]
+  );
+
+  // Carga inicial y cambio de filtros con debounce para búsqueda
   useEffect(() => {
-    fetchCreditos();
+    const timer = setTimeout(() => {
+      fetchCreditos({ page: currentPage, search, estado: estadoFilter });
+    }, 250);
+    return () => clearTimeout(timer);
+  }, [currentPage, search, estadoFilter, fetchCreditos]);
 
+  // Actualización en segundo plano silenciosa (no resetea el DOM ni muestra "Cargando...")
+  useEffect(() => {
     const handleRefresh = () => {
       if (typeof document !== "undefined" && document.visibilityState === "hidden") return;
-      fetchCreditos();
+      if (abonoOpen) return;
+      fetchCreditos({ silent: true });
     };
 
-    const interval = setInterval(handleRefresh, 8000);
+    const interval = setInterval(handleRefresh, 15000);
     window.addEventListener("focus", handleRefresh);
     return () => {
       clearInterval(interval);
       window.removeEventListener("focus", handleRefresh);
     };
-  }, [fetchCreditos]);
+  }, [fetchCreditos, abonoOpen]);
 
   const openAbono = (credito: Credito) => {
     setSelectedCredito(credito);
@@ -96,7 +156,7 @@ export default function CreditosPage() {
   };
 
   const handleSuccess = (message: string) => {
-    fetchCreditos();
+    fetchCreditos({ silent: true });
     toast(message, "success");
   };
 
@@ -153,13 +213,32 @@ export default function CreditosPage() {
         />
       </div>
 
-      <div className="mb-4 w-48">
-        <Select value={estadoFilter} onChange={(e) => setEstadoFilter(e.target.value)}>
-          <option value="Todos">Todos los estados</option>
-          <option value="Pendiente">Pendiente</option>
-          <option value="Parcial">Parcial</option>
-          <option value="Pagado">Pagado</option>
-        </Select>
+      <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center">
+        <div className="flex-1">
+          <SearchBar
+            placeholder="Buscar por N° crédito, cliente, documento o N° venta..."
+            value={search}
+            onChange={(e) => {
+              setSearch(e.target.value);
+              setCurrentPage(1);
+            }}
+          />
+        </div>
+        <div className="w-full sm:w-48">
+          <Select
+            value={estadoFilter}
+            onChange={(e) => {
+              setEstadoFilter(e.target.value);
+              setCurrentPage(1);
+            }}
+            className="cursor-pointer"
+          >
+            <option value="Todos">Todos los estados</option>
+            <option value="Pendiente">Pendientes</option>
+            <option value="Parcial">Parciales</option>
+            <option value="Pagado">Pagados</option>
+          </Select>
+        </div>
       </div>
 
       <Table headers={headers}>
@@ -172,9 +251,9 @@ export default function CreditosPage() {
         ) : sorted.length === 0 ? (
           <Tr>
             <Td colSpan={9} className="text-center py-8 text-muted-foreground">
-              {estadoFilter === "Todos"
-                ? "No hay créditos registrados"
-                : `No hay créditos con estado "${estadoFilter}"`}
+              {search || estadoFilter !== "Todos"
+                ? "No se encontraron créditos para los filtros seleccionados"
+                : "No hay créditos registrados"}
             </Td>
           </Tr>
         ) : (
@@ -209,7 +288,7 @@ export default function CreditosPage() {
                   {c.estado !== "Pagado" ? (
                     <button
                       onClick={() => openAbono(c)}
-                      className="rounded bg-primary/10 px-2.5 py-1 text-xs font-semibold text-primary hover:bg-primary/20 transition-colors"
+                      className="cursor-pointer rounded bg-primary/10 px-2.5 py-1 text-xs font-semibold text-primary hover:bg-primary/20 transition-colors"
                     >
                       Registrar Abono
                     </button>
@@ -222,6 +301,15 @@ export default function CreditosPage() {
           })
         )}
       </Table>
+
+      <Pagination
+        currentPage={pagination.page}
+        totalPages={pagination.totalPages}
+        totalItems={pagination.total}
+        pageSize={pagination.limit}
+        noun="créditos"
+        onPageChange={(page) => setCurrentPage(page)}
+      />
 
       <AbonoModal
         open={abonoOpen}

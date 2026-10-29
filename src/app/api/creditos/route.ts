@@ -18,19 +18,48 @@ export async function GET(request: Request) {
     const { searchParams } = new URL(request.url);
     const estado = searchParams.get("estado");
     const clienteId = searchParams.get("cliente_id");
+    const search = searchParams.get("search");
+    const cursor = searchParams.get("cursor");
+    const page = Math.max(1, parseInt(searchParams.get("page") || "1", 10));
+    const limit = Math.max(1, Math.min(100, parseInt(searchParams.get("limit") || "20", 10)));
+    const offset = (page - 1) * limit;
 
-    let where = "";
+    const conditions: string[] = [];
     const params: any[] = [];
+
     if (estado && estado !== "Todos") {
       params.push(estado);
-      where += `WHERE cr.estado = $${params.length}`;
-    }
-    if (clienteId) {
-      params.push(clienteId);
-      where += where ? ` AND cr.cliente_id = $${params.length}` : `WHERE cr.cliente_id = $${params.length}`;
+      conditions.push(`cr.estado = $${params.length}`);
     }
 
-    const creditos = await query(
+    if (clienteId) {
+      params.push(clienteId);
+      conditions.push(`cr.cliente_id = $${params.length}`);
+    }
+
+    if (search && search.trim()) {
+      const q = `%${search.trim()}%`;
+      params.push(q);
+      const pIdx = params.length;
+      conditions.push(
+        `(cr.numero ILIKE $${pIdx} OR cl.nombre ILIKE $${pIdx} OR cl.documento ILIKE $${pIdx} OR cl.telefono ILIKE $${pIdx} OR v.numero ILIKE $${pIdx})`
+      );
+    }
+
+    // Cursor opcional: si viene un ID de cursor
+    if (cursor) {
+      params.push(cursor);
+      conditions.push(`cr.id < $${params.length}`);
+    }
+
+    const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
+
+    params.push(limit);
+    const limitParam = `$${params.length}`;
+    params.push(offset);
+    const offsetParam = `$${params.length}`;
+
+    const creditosRows = await query(
       `SELECT cr.*,
         cl.nombre as cliente_nombre,
         cl.telefono as cliente_telefono,
@@ -40,15 +69,22 @@ export async function GET(request: Request) {
         mo.codigo as moneda_codigo,
         mo.simbolo as moneda_simbolo,
         COALESCE((SELECT COUNT(*) FROM abonos a WHERE a.credito_id = cr.id), 0) as abonos_count,
-        GREATEST(cr.monto_total - cr.saldo, 0) as abonado
+        GREATEST(cr.monto_total - cr.saldo, 0) as abonado,
+        COUNT(*) OVER() AS total_filtrado
       FROM creditos cr
       JOIN clientes cl ON cr.cliente_id = cl.id
       LEFT JOIN ventas v ON cr.venta_id = v.id
       JOIN monedas mo ON cr.moneda_id = mo.id
       ${where}
-      ORDER BY CASE cr.estado WHEN 'Pendiente' THEN 0 WHEN 'Parcial' THEN 1 ELSE 2 END, cr.fecha DESC, cr.id DESC`,
+      ORDER BY CASE cr.estado WHEN 'Pendiente' THEN 0 WHEN 'Parcial' THEN 1 ELSE 2 END, cr.fecha DESC, cr.id DESC
+      LIMIT ${limitParam} OFFSET ${offsetParam}`,
       params
     );
+
+    const total = Number((creditosRows[0] as any)?.total_filtrado ?? 0);
+    const creditos = (creditosRows as any[]).map(({ total_filtrado, ...rest }) => rest);
+    const totalPages = Math.ceil(total / limit) || 1;
+    const nextCursor = creditos.length === limit ? creditos[creditos.length - 1].id : null;
 
     const summaryRow = await queryOne<{ pendientes: string; pagados: string }>(`
       SELECT
@@ -88,8 +124,19 @@ export async function GET(request: Request) {
         pendientes: summaryRow?.pendientes ?? "0",
         pagados: summaryRow?.pagados ?? "0",
       },
+      pagination: {
+        page,
+        limit,
+        total,
+        totalPages,
+        cursor: nextCursor,
+        hasMore: page < totalPages,
+      },
     });
   } catch (error) {
+    if ((error as any)?.status === 401 || (error as any)?.name === "AuthError") {
+      return NextResponse.json({ error: "No autorizado" }, { status: 401 });
+    }
     return NextResponse.json({ error: "Error al obtener créditos" }, { status: 500 });
   }
 }
