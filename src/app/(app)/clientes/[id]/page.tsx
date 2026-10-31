@@ -260,8 +260,8 @@ export default function ClientePerfilPage() {
     }
   }, [id]);
 
-  const fetchVentas = useCallback(async () => {
-    setLoadingVentas(true);
+  const fetchVentas = useCallback(async (opts?: { silent?: boolean }) => {
+    if (!opts?.silent) setLoadingVentas(true);
     try {
       const res = await fetch(`/api/ventas?cliente_id=${id}`);
       if (res.ok) {
@@ -272,12 +272,12 @@ export default function ClientePerfilPage() {
     } catch (error) {
       console.error("Error al obtener ventas:", error);
     } finally {
-      setLoadingVentas(false);
+      if (!opts?.silent) setLoadingVentas(false);
     }
   }, [id]);
 
-  const fetchCreditos = useCallback(async () => {
-    setLoadingCreditos(true);
+  const fetchCreditos = useCallback(async (opts?: { silent?: boolean }) => {
+    if (!opts?.silent) setLoadingCreditos(true);
     try {
       const res = await fetch(`/api/creditos?cliente_id=${id}`);
       if (res.ok) {
@@ -287,12 +287,12 @@ export default function ClientePerfilPage() {
     } catch (error) {
       console.error("Error al obtener créditos:", error);
     } finally {
-      setLoadingCreditos(false);
+      if (!opts?.silent) setLoadingCreditos(false);
     }
   }, [id]);
 
-  const fetchRetornos = useCallback(async () => {
-    setLoadingRetornos(true);
+  const fetchRetornos = useCallback(async (opts?: { silent?: boolean }) => {
+    if (!opts?.silent) setLoadingRetornos(true);
     try {
       const res = await fetch(`/api/retornos?cliente_id=${id}`);
       if (res.ok) {
@@ -303,7 +303,7 @@ export default function ClientePerfilPage() {
     } catch (error) {
       console.error("Error al obtener retornos:", error);
     } finally {
-      setLoadingRetornos(false);
+      if (!opts?.silent) setLoadingRetornos(false);
     }
   }, [id]);
 
@@ -313,22 +313,51 @@ export default function ClientePerfilPage() {
     fetchVentas();
     fetchCreditos();
     fetchRetornos();
+  }, [id, fetchDetalle, fetchVentas, fetchCreditos, fetchRetornos]);
 
+  useEffect(() => {
+    if (!id) return;
     const refreshAll = () => {
       if (typeof document !== "undefined" && document.visibilityState === "hidden") return;
+      if (
+        editOpen ||
+        creditoOpen ||
+        pagoDeudaOpen ||
+        detailOpen ||
+        pagoOpen ||
+        retornoDirectoOpen ||
+        abonoOpen ||
+        retornoDetailOpen
+      ) {
+        return;
+      }
       fetchDetalle();
-      fetchVentas();
-      fetchCreditos();
-      fetchRetornos();
+      fetchVentas({ silent: true });
+      fetchCreditos({ silent: true });
+      fetchRetornos({ silent: true });
     };
 
-    const interval = setInterval(refreshAll, 8000);
+    const interval = setInterval(refreshAll, 15000);
     window.addEventListener("focus", refreshAll);
     return () => {
       clearInterval(interval);
       window.removeEventListener("focus", refreshAll);
     };
-  }, [id, fetchDetalle, fetchVentas, fetchCreditos, fetchRetornos]);
+  }, [
+    id,
+    editOpen,
+    creditoOpen,
+    pagoDeudaOpen,
+    detailOpen,
+    pagoOpen,
+    retornoDirectoOpen,
+    abonoOpen,
+    retornoDetailOpen,
+    fetchDetalle,
+    fetchVentas,
+    fetchCreditos,
+    fetchRetornos,
+  ]);
 
   /* ─── Derivados ─────────────────────────────────────────────────── */
 
@@ -405,7 +434,8 @@ export default function ClientePerfilPage() {
         toast("Venta eliminada/anulada exitosamente", "success");
         setDetailOpen(false);
         setSelectedVenta(null);
-        fetchVentas();
+        fetchVentas({ silent: true });
+        fetchCreditos({ silent: true });
         fetchDetalle();
       } else {
         const data = await res.json();
@@ -432,7 +462,9 @@ export default function ClientePerfilPage() {
         toast("Retorno eliminado correctamente", "success");
         setRetornoDetailOpen(false);
         setSelectedRetorno(null);
-        fetchRetornos();
+        fetchRetornos({ silent: true });
+        fetchVentas({ silent: true });
+        fetchCreditos({ silent: true });
         fetchDetalle();
       } else {
         const data = await res.json();
@@ -1054,8 +1086,8 @@ export default function ClientePerfilPage() {
           setPagoVenta(null);
         }}
         onSuccess={() => {
-          fetchVentas();
-          fetchCreditos();
+          fetchVentas({ silent: true });
+          fetchCreditos({ silent: true });
           fetchDetalle();
         }}
       />
@@ -1076,8 +1108,9 @@ export default function ClientePerfilPage() {
         onSuccess={(msg) => {
           setRetornoDirectoOpen(false);
           setRetornoVenta(null);
-          fetchVentas();
-          fetchRetornos();
+          fetchVentas({ silent: true });
+          fetchRetornos({ silent: true });
+          fetchCreditos({ silent: true });
           fetchDetalle();
           toast(msg, "success");
         }}
@@ -1092,8 +1125,8 @@ export default function ClientePerfilPage() {
         }}
         onSuccess={(msg) => {
           toast(msg, "success");
-          fetchCreditos();
-          fetchVentas();
+          fetchCreditos({ silent: true });
+          fetchVentas({ silent: true });
           fetchDetalle();
         }}
       />
@@ -1122,8 +1155,8 @@ export default function ClientePerfilPage() {
         onSuccess={(msg) => {
           setPagoDeudaOpen(false);
           toast(msg, "success");
-          fetchCreditos();
-          fetchVentas();
+          fetchCreditos({ silent: true });
+          fetchVentas({ silent: true });
           fetchDetalle();
         }}
       />
