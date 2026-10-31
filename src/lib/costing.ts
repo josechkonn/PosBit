@@ -21,6 +21,7 @@
 import {
   aBase,
   convertirConMetodo as convertirPorMetodo,
+  decimalesDeMoneda,
   monedaCostoDeProducto,
   monedaDeProducto,
   redondear,
@@ -278,7 +279,12 @@ export async function procesarItemCompra(
     );
     const margen = margenEfectivo;
     const precioBruto = precioVentaDesdeCosto(cppEnMonedaVenta, margen);
-    const { precio, redondeado } = aplicarReglasRedondeo(precioBruto, cfg, cppEnMonedaVenta);
+    const { precio, redondeado } = aplicarReglasRedondeo(
+      precioBruto,
+      cfg,
+      cppEnMonedaVenta,
+      decimalesDeMoneda(monedaVenta)
+    );
 
     resultado.precio_anterior = Number(producto.precio_base) || 0;
     resultado.precio_nuevo = precio;
@@ -510,7 +516,8 @@ export async function recalcularPreciosMasivo(
     const { precio, redondeado } = aplicarReglasRedondeo(
       precioVentaDesdeCosto(cppEnMonedaVenta, margen),
       cfg,
-      cppEnMonedaVenta
+      cppEnMonedaVenta,
+      decimalesDeMoneda(monedaVenta)
     );
     const anterior = Number(producto.precio_base) || 0;
     if (Math.abs(precio - anterior) > 1e-9) {

@@ -13,7 +13,8 @@ import { MetodoPagoSelect, ordenarMetodosPorMoneda } from "@/components/ui/metod
 import { Combobox } from "@/components/ui/combobox";
 import { useToast } from "@/components/ui/toast";
 import { fmt, fmtDateTime, fmtNumber, fechaLocalISO } from "@/lib/format";
-import { redondear, tasaUsd, tasaUsdDocumento, tasaMostrada, tasaPar, precioPresentacionEnMoneda } from "@/lib/money";
+import { redondear, decimalesDeMoneda, redondearSegunMoneda, tasaUsd, tasaUsdDocumento, tasaMostrada, tasaPar, precioPresentacionEnMoneda } from "@/lib/money";
+import { useReglasConversion } from "@/lib/use-reglas-conversion";
 import { ReceiptPrinter } from "@/components/pos/receipt-printer";
 import { ClienteModal } from "@/components/cliente/cliente-modal";
 
@@ -197,6 +198,7 @@ export default function PuntoDeVentaPage() {
   const [cajas, setCajas] = useState<Caja[]>([]);
   const [clientes, setClientes] = useState<Cliente[]>([]);
   const [failedImages, setFailedImages] = useState<Record<number, boolean>>({});
+  const { reglas: reglasConversionPos } = useReglasConversion(monedas);
 
   // Catálogo paginado con carga diferida (scroll infinito por offset)
   const [searchDebounced, setSearchDebounced] = useState("");
@@ -601,16 +603,17 @@ export default function PuntoDeVentaPage() {
 
     const precioBaseNum = parseFloat(String(producto.precio_base)) || 0;
     if (tasaUsd(prodMoneda, monedas) <= 0) return precioBaseNum;
-    return redondear(
-      precioBaseNum * factorPrecio(prodMoneda, targetMoneda),
-      Number(targetMoneda.decimales ?? 2)
-    );
+    const dec = decimalesDeMoneda(targetMoneda);
+    const bruto = precioBaseNum * factorPrecio(prodMoneda, targetMoneda);
+    return String(prodMoneda.id) === String(targetMoneda.id)
+      ? redondear(bruto, dec)
+      : redondearSegunMoneda(bruto, targetMoneda, reglasConversionPos.redondeo, dec);
   };
 
   const getPrecio = (producto: Producto): number => getPrecioEnMoneda(producto, monedaSeleccionada);
 
   const decMoneda = (codMoneda: string): number =>
-    Number(monedas.find((m) => m.codigo === codMoneda)?.decimales ?? 2);
+    decimalesDeMoneda(monedas.find((m) => m.codigo === codMoneda) ?? codMoneda);
 
   /** Código de la moneda en la que el producto define sus precios. */
   const codMonedaProducto = (producto: Producto): string =>
@@ -640,7 +643,7 @@ export default function PuntoDeVentaPage() {
     if (!desde || !hasta) return redondear(pres.precio, dec);
     return precioPresentacionEnMoneda(pres.precio, desde, hasta, monedas, {
       [String(hasta.id)]: tasaUsdDocumento(hasta, tasaDocDe(hasta), monedas),
-    }, dec);
+    }, dec, reglasConversionPos.redondeo);
   };
 
   /** UNIDADES que representa esta línea (el inventario siempre es en unidades). */
@@ -671,8 +674,16 @@ export default function PuntoDeVentaPage() {
   };
 
   /** Subtotal BRUTO de la línea (sin descontar) en la moneda dada. */
-  const totalLineaEnMoneda = (item: CartItem, codMoneda: string): number =>
-    redondear(importeLineaEnMoneda(item, codMoneda), decMoneda(codMoneda));
+  const totalLineaEnMoneda = (item: CartItem, codMoneda: string): number => {
+    const dec = decMoneda(codMoneda);
+    const desde = monedas.find((m) => m.codigo === codMonedaProducto(item.product));
+    const hasta = monedas.find((m) => m.codigo === codMoneda);
+    const bruto = importeLineaEnMoneda(item, codMoneda);
+    if (desde && hasta && String(desde.id) !== String(hasta.id)) {
+      return redondearSegunMoneda(bruto, hasta, reglasConversionPos.redondeo, dec);
+    }
+    return redondear(bruto, dec);
+  };
 
   /** Subtotal de la línea = precio de venta × cantidad de su unidad de venta. */
   const totalLinea = (item: CartItem): number => totalLineaEnMoneda(item, monedaSeleccionada);
@@ -1008,12 +1019,13 @@ export default function PuntoDeVentaPage() {
 
     // El saldo se lleva con los decimales de la MONEDA DE LA VENTA: con 2 fijos
     // se perdía precisión en monedas de 4 decimales (el USD del sistema).
-    let restante = redondear(total, Number(monedaVenta?.decimales ?? 2));
+    const decVenta = decimalesDeMoneda(monedaVenta);
+    let restante = redondear(total, decVenta);
     return lineasPago.map((l) => {
       const metodo = metodosPago.find((m) => m.id === (l.metodoId ?? metodoPagoSeleccionado)) || null;
       const monedaLinea = monedas.find((m) => m.codigo === metodo?.moneda_codigo) || null;
       const esMonedaVenta = !!monedaLinea && !!monedaVenta && monedaLinea.id === monedaVenta.id;
-      const decLinea = Number(monedaLinea?.decimales ?? 2);
+      const decLinea = decimalesDeMoneda(monedaLinea);
       const restanteAntes = restante;
 
       const vacio = l.montoStr.trim() === "";
@@ -1046,20 +1058,30 @@ export default function PuntoDeVentaPage() {
       const factor = monedaLinea && monedaVentaObj
         ? tasaPar(monedaLinea, monedaVentaObj, monedas, { [String(monedaVentaObj.id)]: tasaDoc })
         : 1;
-      const montoVenta = esMonedaVenta ? monto : redondear(monto * factor, Number(monedaVentaObj?.decimales ?? 2));
-      const aplicado = Math.min(montoVenta, restante);
-      // Lo que cubre esta línea se mide sobre el SALDO (sin redondear) levado a
-      // la moneda de la línea, no dividiendo `aplicado` —que ya viene redondeado
-      // en la moneda de la venta— porque eso reintroducía el error de centavos
-      // (4.500,55 COP → 1.500,18 Bs volvían como 4.500,54 COP).
-      const restanteLinea = esMonedaVenta ? restante : restante / (factor || 1);
-      const aplicadoLinea = Math.min(monto, redondear(restanteLinea, decLinea));
-      const vuelto = redondear(Math.max(0, monto - aplicadoLinea));
-      restante = redondear(restante - aplicado);
+      const restanteLineaBruto = esMonedaVenta ? restante : restante / (factor || 1);
+      const restanteLineaRedondeado = esMonedaVenta
+        ? redondear(restanteLineaBruto, decLinea)
+        : redondearSegunMoneda(restanteLineaBruto, monedaLinea, reglasConversionPos.redondeo, decLinea);
+      const multiploLinea =
+        decLinea === 0 && reglasConversionPos.redondeo?.activo && Number(reglasConversionPos.redondeo?.multiplo) > 0
+          ? Number(reglasConversionPos.redondeo.multiplo)
+          : 0;
+      const tolLinea = multiploLinea > 0 ? Math.max(0.5, multiploLinea / 2) : decLinea === 0 ? 0.5 : 0.01;
+
+      const cubreTotalRestante = !esMonedaVenta && restante > 0 && monto >= restanteLineaRedondeado - tolLinea;
+      const montoVenta = esMonedaVenta
+        ? monto
+        : cubreTotalRestante && Math.abs(monto - restanteLineaRedondeado) <= tolLinea
+          ? restante
+          : redondear(monto * factor, decVenta);
+      const aplicado = cubreTotalRestante ? restante : Math.min(montoVenta, restante);
+      const aplicadoLinea = Math.min(monto, restanteLineaRedondeado);
+      const vuelto = redondear(Math.max(0, monto - aplicadoLinea), decLinea);
+      restante = redondear(Math.max(0, restante - aplicado), decVenta);
 
       return { key: l.key, metodo, monedaLinea, vacio, monto, montoVenta, aplicado, vuelto, restanteAntes };
     });
-  }, [lineasPago, total, cart, descuento, monedas, metodosPago, monedaSeleccionada, tasaCustomStr, metodoPagoSeleccionado, isPagoMixto]);
+  }, [lineasPago, total, cart, descuento, monedas, metodosPago, monedaSeleccionada, tasaCustomStr, metodoPagoSeleccionado, isPagoMixto, reglasConversionPos.redondeo]);
 
   const pagadoTotal = useMemo(
     () => redondear(pagosResueltos.reduce((s, l) => s + l.aplicado, 0)),

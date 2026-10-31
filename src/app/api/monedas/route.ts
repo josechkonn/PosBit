@@ -33,6 +33,9 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "Campos requeridos: nombre, codigo, simbolo, tasa" }, { status: 400 });
     }
 
+    const esCop = String(codigo || "").trim().toUpperCase() === "COP";
+    const decParsed = Number(decimales);
+    const decEf = esCop ? 0 : Number.isFinite(decParsed) && decParsed >= 0 ? Math.trunc(decParsed) : 2;
     const directaValor = Number(tasa_usd_directa);
     const directaActiva = !es_base && usa_tasa_usd_directa === true;
 
@@ -46,7 +49,7 @@ export async function POST(request: Request) {
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) 
          RETURNING *`,
         [
-          nombre, codigo, simbolo, tasa, tasa_ref_moneda_id || null, decimales ?? 2, es_base || false, activo !== false,
+          nombre, codigo, simbolo, tasa, tasa_ref_moneda_id || null, decEf, es_base || false, activo !== false,
           directaActiva, directaActiva && Number.isFinite(directaValor) && directaValor > 0 ? directaValor : null,
         ]
       );
@@ -116,6 +119,9 @@ export async function PUT(request: Request) {
         await client.query("UPDATE monedas SET es_base = false WHERE es_base = true AND id != $1", [id]);
       }
 
+      const codFinal = String(codigo ?? antesRes.rows[0].codigo ?? "").trim().toUpperCase();
+      const decPut = codFinal === "COP" ? 0 : decimales !== undefined && decimales !== null ? Math.max(0, Math.trunc(Number(decimales))) : null;
+
       const res = await client.query(
         `UPDATE monedas 
          SET nombre = COALESCE($2, nombre), 
@@ -131,7 +137,7 @@ export async function PUT(request: Request) {
          WHERE id = $1 
          RETURNING *`,
         [
-          id, nombre, codigo, simbolo, tasa, decimales, es_base, activo,
+          id, nombre, codigo, simbolo, tasa, decPut, es_base, activo,
           vieneRef, vieneRef ? tasa_ref_moneda_id || null : null,
           directaActiva,
           vieneDirecta,

@@ -8,6 +8,7 @@ import { Input } from "@/components/ui/input";
 import { Field } from "@/components/ui/label";
 import { MetodoPagoSelect } from "@/components/ui/metodo-pago-select";
 import { fmt, fechaLocalISO } from "@/lib/format";
+import { decimalesDeMoneda, redondear, redondearSegunMoneda } from "@/lib/money";
 import { useReglasConversion } from "@/lib/use-reglas-conversion";
 import { cn } from "@/lib/utils";
 
@@ -91,7 +92,7 @@ export function PagarDeudaModal({
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
 
-  const { convertirProducto } = useReglasConversion(monedas);
+  const { reglas, convertirProducto } = useReglasConversion(monedas);
 
   useEffect(() => {
     if (open) {
@@ -162,6 +163,8 @@ export function PagarDeudaModal({
     [creditos]
   );
 
+  const decPago = decimalesDeMoneda(monedaPago);
+
   const preview = useMemo<{ lineas: LineaPreview[]; restoBase: number }>(() => {
     const lineas: LineaPreview[] = [];
     if (!monedaPago || valor <= 0 || pendientesFifo.length === 0) {
@@ -170,26 +173,33 @@ export function PagarDeudaModal({
         restoBase: 0,
       };
     }
-    const decPago = Number(monedaPago.decimales ?? 2);
+    const multiploEf =
+      decPago === 0 && reglas.redondeo?.activo && Number(reglas.redondeo?.multiplo) > 0
+        ? Number(reglas.redondeo.multiplo)
+        : 0;
+    const tolPago = multiploEf > 0 ? Math.max(0.5, multiploEf / 2) : decPago === 0 ? 0.5 : 0.05;
+
     let pool = valor;
     for (const c of pendientesFifo) {
       const mCredito = monedas.find((m) => m.id === c.moneda_id) ?? monedaPago;
       const saldo = Number(c.saldo);
-      const decCredito = Number(mCredito.decimales ?? 2);
+      const decCredito = decimalesDeMoneda(mCredito);
       const costoEnPago =
         String(mCredito.id) === String(monedaPago.id)
-          ? saldo
-          : (monedas.length > 0 ? convertirProducto(saldo, mCredito, monedaPago, "venta", 6) : saldo);
+          ? redondear(saldo, decPago)
+          : monedas.length > 0
+            ? convertirProducto(saldo, mCredito, monedaPago, "venta", decPago)
+            : saldo;
 
       if (pool <= 0.0005) {
         lineas.push({ credito: c, estado: "pendiente", monto: 0 });
         continue;
       }
 
-      // Si el pool cubre el costo (con tolerancia de 0.05 para redondeos de centavos/paridades)
-      const isCompleta = pool >= costoEnPago - 0.05;
+      // Si el pool cubre el costo (con tolerancia para redondeos de centavos o múltiplo COP)
+      const isCompleta = pool >= costoEnPago - tolPago;
       if (isCompleta) {
-        pool = Math.max(0, pool - costoEnPago);
+        pool = Math.max(0, redondear(pool - costoEnPago, decPago));
         lineas.push({
           credito: c,
           estado: "completa",
@@ -209,7 +219,7 @@ export function PagarDeudaModal({
       }
     }
     return { lineas, restoBase: pool > 0 ? pool : 0 };
-  }, [monedaPago, valor, pendientesFifo, monedas, convertirProducto]);
+  }, [monedaPago, valor, pendientesFifo, monedas, convertirProducto, decPago, reglas.redondeo]);
 
   const deudaTotalBase = useMemo(
     () =>
@@ -223,25 +233,35 @@ export function PagarDeudaModal({
     [pendientesFifo, monedas, baseMoneda, convertirProducto]
   );
 
-  const deudaTotalEnMonedaPago = useMemo(
-    () =>
-      pendientesFifo.reduce((s, c) => {
-        if (!monedaPago) return s;
-        const mCredito = monedas.find((m) => m.id === c.moneda_id) ?? monedaPago;
-        const saldo = Number(c.saldo);
-        if (saldo <= 0) return s;
-        if (String(mCredito.id) === String(monedaPago.id)) {
-          return s + saldo;
-        }
-        return s + (monedas.length > 0 ? convertirProducto(saldo, mCredito, monedaPago, "venta", 6) : saldo);
-      }, 0),
-    [pendientesFifo, monedas, monedaPago, convertirProducto]
-  );
+  const deudaTotalEnMonedaPago = useMemo(() => {
+    if (!monedaPago) return 0;
+    const dec = decimalesDeMoneda(monedaPago);
+    const suma = pendientesFifo.reduce((s, c) => {
+      const mCredito = monedas.find((m) => m.id === c.moneda_id) ?? monedaPago;
+      const saldo = Number(c.saldo);
+      if (saldo <= 0) return s;
+      if (String(mCredito.id) === String(monedaPago.id)) {
+        return s + redondear(saldo, dec);
+      }
+      return s + (monedas.length > 0 ? convertirProducto(saldo, mCredito, monedaPago, "venta", dec) : saldo);
+    }, 0);
+    return redondearSegunMoneda(suma, monedaPago, reglas.redondeo, dec);
+  }, [pendientesFifo, monedas, monedaPago, convertirProducto, reglas.redondeo]);
 
-  const comoBase =
-    monedaPago && baseMoneda && valor > 0 && String(monedaPago.id) !== String(baseMoneda.id)
-      ? convertirProducto(valor, monedaPago, baseMoneda, "venta", 2)
-      : null;
+  const comoBase = useMemo(() => {
+    if (!monedaPago || !baseMoneda || valor <= 0 || String(monedaPago.id) === String(baseMoneda.id)) {
+      return null;
+    }
+    const multiploEf =
+      decPago === 0 && reglas.redondeo?.activo && Number(reglas.redondeo?.multiplo) > 0
+        ? Number(reglas.redondeo.multiplo)
+        : 0;
+    const tol = multiploEf > 0 ? Math.max(0.5, multiploEf / 2) : decPago === 0 ? 0.5 : 0.05;
+    if (deudaTotalEnMonedaPago > 0 && Math.abs(valor - deudaTotalEnMonedaPago) <= tol) {
+      return redondear(deudaTotalBase, decimalesDeMoneda(baseMoneda, 2));
+    }
+    return convertirProducto(valor, monedaPago, baseMoneda, "venta", decimalesDeMoneda(baseMoneda, 2));
+  }, [monedaPago, baseMoneda, valor, decPago, reglas.redondeo, deudaTotalEnMonedaPago, deudaTotalBase, convertirProducto]);
 
   const handleMetodoChange = (id: string) => {
     const metodoAnterior = metodosPago.find((m) => m.id === metodoPagoId);
@@ -260,9 +280,28 @@ export function PagarDeudaModal({
       setMonedaId(mNuevo.id);
       const num = parseFloat(monto.replace(",", "."));
       if (Number.isFinite(num) && num > 0 && mAnterior && mAnterior.id !== mNuevo.id) {
-        const dec = Number(mNuevo.decimales ?? 2);
-        const convertido = convertirProducto(num, mAnterior, mNuevo, "venta", dec);
-        setMonto(String(convertido));
+        const decNuevo = decimalesDeMoneda(mNuevo);
+        const decAnt = decimalesDeMoneda(mAnterior);
+        const multiploAnt =
+          decAnt === 0 && reglas.redondeo?.activo && Number(reglas.redondeo?.multiplo) > 0
+            ? Number(reglas.redondeo.multiplo)
+            : 0;
+        const tolAnt = multiploAnt > 0 ? Math.max(0.5, multiploAnt / 2) : decAnt === 0 ? 0.5 : 0.05;
+
+        // Si el monto equivalía al total de la deuda en la moneda anterior, calcular directo en la nueva moneda
+        if (deudaTotalEnMonedaPago > 0 && Math.abs(num - deudaTotalEnMonedaPago) <= tolAnt) {
+          const nuevoTotal = pendientesFifo.reduce((s, c) => {
+            const mCredito = monedas.find((m) => m.id === c.moneda_id) ?? mNuevo;
+            const saldo = Number(c.saldo);
+            if (saldo <= 0) return s;
+            if (String(mCredito.id) === String(mNuevo.id)) return s + redondear(saldo, decNuevo);
+            return s + convertirProducto(saldo, mCredito, mNuevo, "venta", decNuevo);
+          }, 0);
+          setMonto(String(redondearSegunMoneda(nuevoTotal, mNuevo, reglas.redondeo, decNuevo)));
+        } else {
+          const convertido = convertirProducto(num, mAnterior, mNuevo, "venta", decNuevo);
+          setMonto(String(convertido));
+        }
       }
     }
   };
@@ -270,8 +309,8 @@ export function PagarDeudaModal({
   /** Rellena el monto con la deuda total, expresada en la moneda seleccionada. */
   const rellenarTotal = () => {
     if (!monedaPago || deudaTotalEnMonedaPago <= 0) return;
-    const dec = Number(monedaPago.decimales ?? 2);
-    const totalEnMoneda = Math.round(deudaTotalEnMonedaPago * 100) / 100;
+    const dec = decimalesDeMoneda(monedaPago);
+    const totalEnMoneda = redondearSegunMoneda(deudaTotalEnMonedaPago, monedaPago, reglas.redondeo, dec);
     setMonto(String(totalEnMoneda));
   };
 
@@ -437,8 +476,14 @@ export function PagarDeudaModal({
             onChange={(e) => setMonto(e.target.value)}
             type="number"
             min={0}
-            step="0.01"
-            placeholder="0.00"
+            step={
+              decPago === 0
+                ? reglas.redondeo?.activo && Number(reglas.redondeo?.multiplo) > 0
+                  ? String(reglas.redondeo.multiplo)
+                  : "1"
+                : "0.01"
+            }
+            placeholder={decPago === 0 ? "0" : "0.00"}
             autoFocus
             className="pl-14 font-mono text-base font-semibold"
           />
@@ -509,11 +554,11 @@ export function PagarDeudaModal({
               </div>
             ))}
           </div>
-          {preview.restoBase > 0 && baseMoneda && (
+          {preview.restoBase > 0 && monedaPago && (
             <div className="flex items-center justify-between gap-2 border-t border-border/60 bg-muted/30 px-4 py-2 text-xs">
               <span className="text-muted-foreground">Resto sin aplicar</span>
               <strong className="font-mono text-foreground">
-                {fmt(preview.restoBase, baseMoneda.codigo)}
+                {fmt(preview.restoBase, monedaPago.codigo)}
               </strong>
             </div>
           )}

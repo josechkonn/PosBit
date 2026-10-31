@@ -4,7 +4,7 @@ import { NextResponse } from "next/server";
 import { requireSession } from "@/lib/auth-server";
 import { query, queryOne, transaction } from "@/lib/db";
 import { fechaLocalISO } from "@/lib/format";
-import { aBase, convertirConMetodo, redondear, tasaUsd } from "@/lib/money";
+import { aBase, convertirConMetodo, decimalesDeMoneda, redondear, redondearSegunMoneda, tasaUsd } from "@/lib/money";
 import { getConfiguracionGlobal } from "@/lib/global-config";
 import { triggerBackgroundSync } from "@/lib/sync-engine";
 
@@ -142,8 +142,13 @@ export async function POST(
       const transitoVentas = cfg.moneda_transito_ventas_id
         ? monedasCatalogo.find((m: any) => String(m.id) === String(cfg.moneda_transito_ventas_id))
         : null;
+      const redondeoCfg = {
+        activo: cfg.redondeo_activo === true,
+        multiplo: Number(cfg.redondeo_multiplo) > 0 ? Number(cfg.redondeo_multiplo) : 0,
+      };
 
-      const decCredito = Number(monedaCredito.decimales ?? 2);
+      const decCredito = decimalesDeMoneda(monedaCredito);
+      const saldoActualCredito = parseFloat(String(credito.saldo));
 
       let totalAbonadoEnMonedaCredito = 0;
       let totalAbonadoEnBase = 0;
@@ -153,26 +158,53 @@ export async function POST(
           (m: any) => String(m.id) === String(item.moneda_id)
         );
         if (!monedaItem) throw new Error(`Moneda ${item.moneda_id} no encontrada`);
+        const decItem = decimalesDeMoneda(monedaItem);
+        const montoItem = redondear(item.monto, decItem);
+        const multiploItem =
+          decItem === 0 && redondeoCfg.activo && redondeoCfg.multiplo > 0
+            ? redondeoCfg.multiplo
+            : 0;
+        const tolItem = multiploItem > 0 ? Math.max(0.5, multiploItem / 2) : decItem === 0 ? 0.5 : 0.05;
 
-        // Convertir el monto del abono a la moneda del crédito usando la regla de ventas (directa o triangular)
-        const montoEnMonedaCredito =
+        // Saldo restante del crédito expresado en la moneda del abono (con regla de múltiplo de redondeo)
+        const saldoEnMonedaItem =
           String(monedaItem.id) === String(monedaCredito.id)
-            ? redondear(item.monto, decCredito)
+            ? redondearSegunMoneda(saldoActualCredito, monedaItem, redondeoCfg, decItem)
             : convertirConMetodo(
-                item.monto,
-                monedaItem,
+                saldoActualCredito,
                 monedaCredito,
+                monedaItem,
                 {
                   metodo: cfg.metodo_conversion_ventas,
                   monedaTransito: transitoVentas,
                   catalogo: monedasCatalogo,
+                  redondeo: redondeoCfg,
                 },
-                decCredito
+                decItem
               );
+
+        // Convertir el monto del abono a la moneda del crédito usando la regla de ventas (directa o triangular).
+        // Si el abono coincide con el saldo redondeado en la moneda de pago (ej. COP múltiplo de 100), salda el crédito completo.
+        const montoEnMonedaCredito =
+          String(monedaItem.id) === String(monedaCredito.id)
+            ? redondear(montoItem, decCredito)
+            : itemsAbono.length === 1 && Math.abs(montoItem - saldoEnMonedaItem) <= tolItem
+              ? redondear(saldoActualCredito, decCredito)
+              : convertirConMetodo(
+                  montoItem,
+                  monedaItem,
+                  monedaCredito,
+                  {
+                    metodo: cfg.metodo_conversion_ventas,
+                    monedaTransito: transitoVentas,
+                    catalogo: monedasCatalogo,
+                  },
+                  decCredito
+                );
 
         // Convertir a moneda base (USD) usando la regla de ventas
         const montoBase = convertirConMetodo(
-          item.monto,
+          montoItem,
           monedaItem,
           baseMoneda,
           {
@@ -188,15 +220,15 @@ export async function POST(
 
         return {
           ...item,
+          monto: montoItem,
           montoEnMonedaCredito,
           montoBase,
         };
       });
 
-      const saldoActualCredito = parseFloat(String(credito.saldo));
-      if (totalAbonadoEnMonedaCredito > saldoActualCredito + 0.01) {
+      if (totalAbonadoEnMonedaCredito > saldoActualCredito + 0.05) {
         throw new Error(
-          `El total abonado (${totalAbonadoEnMonedaCredito.toFixed(2)} ${monedaCredito.codigo}) excede el saldo pendiente (${saldoActualCredito.toFixed(2)} ${monedaCredito.codigo})`
+          `El total abonado (${totalAbonadoEnMonedaCredito.toFixed(decCredito)} ${monedaCredito.codigo}) excede el saldo pendiente (${saldoActualCredito.toFixed(decCredito)} ${monedaCredito.codigo})`
         );
       }
 

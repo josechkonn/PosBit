@@ -7,6 +7,7 @@ import { Input } from "@/components/ui/input";
 import { Field } from "@/components/ui/label";
 import { MetodoPagoSelect } from "@/components/ui/metodo-pago-select";
 import { fmt, fechaLocalISO } from "@/lib/format";
+import { decimalesDeMoneda, redondear, redondearSegunMoneda } from "@/lib/money";
 import { useReglasConversion } from "@/lib/use-reglas-conversion";
 
 interface Credito {
@@ -63,11 +64,13 @@ export function AbonoModal({ open, credito, onClose, onSuccess }: AbonoModalProp
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
 
-  const { convertirProducto } = useReglasConversion(monedas);
+  const { reglas, convertirProducto } = useReglasConversion(monedas);
 
   useEffect(() => {
     if (open && credito) {
-      setMonto(String(credito.saldo));
+      const decInicial = decimalesDeMoneda(credito.moneda_codigo);
+      const saldoInicial = redondear(parseFloat(String(credito.saldo ?? 0)), decInicial);
+      setMonto(String(saldoInicial));
       setFecha(fechaLocalISO());
       setMetodoPagoId("");
       setCajaId("");
@@ -99,8 +102,8 @@ export function AbonoModal({ open, credito, onClose, onSuccess }: AbonoModalProp
     if (!monedaAbono || !monedaCredito || !credito) return null;
     if (monedaAbono.id === monedaCredito.id) return null;
 
-    // saldo (moneda del crédito) → moneda del abono, con la cadena de conversiones
-    return convertirProducto(saldo, monedaCredito, monedaAbono, "venta", Number(monedaAbono.decimales ?? 2));
+    // saldo (moneda del crédito) → moneda del abono, con la cadena de conversiones y múltiplo de redondeo
+    return convertirProducto(saldo, monedaCredito, monedaAbono, "venta", decimalesDeMoneda(monedaAbono));
   };
 
   const handleMetodoChange = (id: string) => {
@@ -117,16 +120,29 @@ export function AbonoModal({ open, credito, onClose, onSuccess }: AbonoModalProp
     setCajaId(metodoNuevo?.caja_id ? String(metodoNuevo.caja_id) : "");
 
     const val = parseFloat(monto.replace(",", "."));
-    if (metodoNuevo && credito && monedas.length > 0) {
-      if (Number.isFinite(val) && val > 0 && mAnterior && mNuevo && mAnterior.id !== mNuevo.id) {
-        const dec = Number(mNuevo.decimales ?? 2);
-        setMonto(String(convertirProducto(val, mAnterior, mNuevo, "venta", dec)));
-      } else if (!val || val <= 0) {
-        const mCredito = monedas.find((m) => m.id === credito.moneda_id);
-        if (mNuevo && mCredito) {
-          const dec = Number(mNuevo.decimales ?? 2);
-          setMonto(String(convertirProducto(saldo, mCredito, mNuevo, "venta", dec)));
-        }
+    if (credito && monedas.length > 0 && mNuevo) {
+      const mCredito = monedas.find((m) => m.id === credito.moneda_id) ?? mNuevo;
+      const decNuevo = decimalesDeMoneda(mNuevo);
+      const decAnt = decimalesDeMoneda(mAnterior);
+      const multiploAnt =
+        decAnt === 0 && reglas.redondeo?.activo && Number(reglas.redondeo?.multiplo) > 0
+          ? Number(reglas.redondeo.multiplo)
+          : 0;
+      const tolAnt = multiploAnt > 0 ? Math.max(0.5, multiploAnt / 2) : decAnt === 0 ? 0.5 : 0.05;
+      const saldoEnAnt =
+        mAnterior && mAnterior.id !== mCredito.id
+          ? convertirProducto(saldo, mCredito, mAnterior, "venta", decAnt)
+          : redondear(saldo, decAnt);
+
+      // Si el usuario tenía el saldo total en la moneda anterior (o vacío), al cambiar método se pone el saldo total en la nueva moneda
+      if (!val || val <= 0 || Math.abs(val - saldoEnAnt) <= tolAnt) {
+        const nuevoSaldoConv =
+          mNuevo.id === mCredito.id
+            ? redondearSegunMoneda(saldo, mNuevo, reglas.redondeo, decNuevo)
+            : convertirProducto(saldo, mCredito, mNuevo, "venta", decNuevo);
+        setMonto(String(nuevoSaldoConv));
+      } else if (mAnterior && mAnterior.id !== mNuevo.id) {
+        setMonto(String(convertirProducto(val, mAnterior, mNuevo, "venta", decNuevo)));
       }
     }
   };
@@ -136,6 +152,12 @@ export function AbonoModal({ open, credito, onClose, onSuccess }: AbonoModalProp
   const monedaCredito = monedas.find(m => m.id === credito?.moneda_id);
 
   const saldoEnMonedaAbono = getSaldoEnMonedaAbono();
+  const decActiva = decimalesDeMoneda(monedaAbono ?? credito?.moneda_codigo);
+  const multiploActivo =
+    decActiva === 0 && reglas.redondeo?.activo && Number(reglas.redondeo?.multiplo) > 0
+      ? Number(reglas.redondeo.multiplo)
+      : 0;
+  const tolActiva = multiploActivo > 0 ? Math.max(0.5, multiploActivo / 2) : decActiva === 0 ? 0.5 : 0.05;
 
   const getEquivalente = () => {
     if (!monto || !monedaAbono || !monedaCredito || !credito) return null;
@@ -144,11 +166,16 @@ export function AbonoModal({ open, credito, onClose, onSuccess }: AbonoModalProp
     
     if (monedaAbono.id === monedaCredito.id) return null; // Misma moneda
 
+    if (saldoEnMonedaAbono !== null && Math.abs(val - saldoEnMonedaAbono) <= tolActiva) {
+      return redondear(saldo, decimalesDeMoneda(monedaCredito));
+    }
+
     // monto del abono → moneda del crédito (misma cadena que en el backend)
-    return convertirProducto(val, monedaAbono, monedaCredito, "venta", Number(monedaCredito.decimales ?? 2));
+    return convertirProducto(val, monedaAbono, monedaCredito, "venta", decimalesDeMoneda(monedaCredito));
   };
 
   const equivalente = getEquivalente();
+  const montoMaxPermitido = (saldoEnMonedaAbono !== null ? saldoEnMonedaAbono : saldo) + tolActiva;
 
   const handleSubmit = async () => {
     if (!credito) return;
@@ -171,7 +198,7 @@ export function AbonoModal({ open, credito, onClose, onSuccess }: AbonoModalProp
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Error al registrar abono");
-      onSuccess(`Abono de ${fmt(monto, credito.moneda_codigo)} registrado correctamente`);
+      onSuccess(`Abono de ${fmt(monto, monedaAbono?.codigo || credito.moneda_codigo)} registrado correctamente`);
       onClose();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Error desconocido");
@@ -196,7 +223,7 @@ export function AbonoModal({ open, credito, onClose, onSuccess }: AbonoModalProp
           <Button
             variant="primary"
             onClick={handleSubmit}
-            disabled={loading || !parseFloat(monto) || parseFloat(monto) <= 0 || parseFloat(monto) > saldo + 0.001}
+            disabled={loading || !parseFloat(monto) || parseFloat(monto) <= 0 || parseFloat(monto) > montoMaxPermitido}
             className="flex-1"
           >
             {loading ? "Registrando..." : "Registrar Abono"}
@@ -239,8 +266,8 @@ export function AbonoModal({ open, credito, onClose, onSuccess }: AbonoModalProp
             onChange={(e) => setMonto(e.target.value)}
             type="number"
             min={0}
-            step="0.01"
-            placeholder="Monto del abono"
+            step={decActiva === 0 ? (multiploActivo > 0 ? String(multiploActivo) : "1") : "0.01"}
+            placeholder={decActiva === 0 ? "0" : "Monto del abono"}
           />
           {equivalente !== null && (
             <div className="text-xs text-muted-foreground mt-1">

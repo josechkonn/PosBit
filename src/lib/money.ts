@@ -51,6 +51,65 @@ export function redondear(valor: number, decimales = 2): number {
   return Math.round((valor + Number.EPSILON) * factor) / factor;
 }
 
+/** ¿La moneda es Peso Colombiano (COP)? Los pesos colombianos no llevan decimales. */
+export function esMonedaCop(
+  monedaOrCodigo: { codigo?: string | null } | string | null | undefined
+): boolean {
+  const cod =
+    typeof monedaOrCodigo === "string"
+      ? monedaOrCodigo
+      : monedaOrCodigo?.codigo ?? "";
+  return String(cod).trim().toUpperCase() === "COP";
+}
+
+/**
+ * Decimales efectivos de una moneda: COP siempre tiene 0 decimales (incluso si
+ * en la BD quedó con el default 2). Para el resto usa `moneda.decimales` o `fallback`.
+ */
+export function decimalesDeMoneda(
+  monedaOrCodigo:
+    | { codigo?: string | null; decimales?: number | string | null }
+    | string
+    | null
+    | undefined,
+  fallback = 2
+): number {
+  if (esMonedaCop(monedaOrCodigo)) return 0;
+  if (
+    typeof monedaOrCodigo === "object" &&
+    monedaOrCodigo !== null &&
+    monedaOrCodigo.decimales !== undefined &&
+    monedaOrCodigo.decimales !== null
+  ) {
+    const d = Number(monedaOrCodigo.decimales);
+    if (Number.isFinite(d) && d >= 0) return Math.trunc(d);
+  }
+  return fallback;
+}
+
+/**
+ * Redondea un monto en `monedaTarget` respetando sus decimales (0 para COP) y,
+ * si aplica la regla de múltiplo de redondeo (para COP o monedas sin decimales),
+ * lo ajusta al múltiplo más cercano sin dejar en 0 un monto positivo.
+ */
+export function redondearSegunMoneda(
+  monto: number,
+  monedaTarget: { codigo?: string | null; decimales?: number | string | null } | string | null | undefined,
+  redondeo?: { activo?: boolean | null; multiplo?: number | string | null } | null,
+  decimalesFallback = 2
+): number {
+  if (!Number.isFinite(monto)) return 0;
+  const dec = decimalesDeMoneda(monedaTarget, decimalesFallback);
+  if (monto <= 0) return redondear(monto, dec);
+  const sinDecimales = esMonedaCop(monedaTarget) || dec === 0;
+  const multiplo = Number(redondeo?.multiplo);
+  if (sinDecimales && redondeo?.activo && Number.isFinite(multiplo) && multiplo > 0) {
+    const r = Math.round(monto / multiplo) * multiplo;
+    return redondear(r > 0 ? r : Math.max(multiplo, Math.round(monto)), 0);
+  }
+  return redondear(monto, dec);
+}
+
 /**
  * Margen (markup) sobre costo, en %: `(precio / costo - 1) × 100`. Devuelve
  * `null` si el precio o el costo no son positivos (no hay margen calculable).
@@ -183,7 +242,8 @@ export function convertir(
   decimales = 2
 ): number {
   if (!Number.isFinite(monto)) return 0;
-  return redondear(monto * tasaPar(desde, hasta, catalogo), decimales);
+  const decEf = esMonedaCop(hasta) ? 0 : decimales;
+  return redondear(monto * tasaPar(desde, hasta, catalogo), decEf);
 }
 
 /** Método de conversión configurable globalmente (regla Set & Forget). */
@@ -215,19 +275,26 @@ export function convertirConMetodo(
     monedaTransito?: MonedaConversion | null;
     catalogo?: MonedaConversion[];
     efectivas?: Record<string, number> | null;
+    redondeo?: { activo?: boolean | null; multiplo?: number | string | null } | null;
   } = {},
   decimales = 2
 ): number {
-  const { metodo = "directa", monedaTransito = null, catalogo = [], efectivas = null } = opts;
+  const { metodo = "directa", monedaTransito = null, catalogo = [], efectivas = null, redondeo = null } = opts;
   if (!Number.isFinite(monto) || !desde || !hasta) return 0;
-  if (metodo === "triangulacion" && monedaTransito) {
-    // Un solo redondeo: el paso intermedio viaja sin redondear (ver nota arriba).
-    const factor =
-      tasaPar(desde, monedaTransito, catalogo, efectivas) *
-      tasaPar(monedaTransito, hasta, catalogo, efectivas);
-    return redondear(monto * factor, decimales);
+  const decEf = esMonedaCop(hasta) ? 0 : decimales;
+  if (String(desde.id) === String(hasta.id)) {
+    return redondear(monto, decEf);
   }
-  return redondear(monto * tasaPar(desde, hasta, catalogo, efectivas), decimales);
+  const factor =
+    metodo === "triangulacion" && monedaTransito
+      ? tasaPar(desde, monedaTransito, catalogo, efectivas) *
+        tasaPar(monedaTransito, hasta, catalogo, efectivas)
+      : tasaPar(desde, hasta, catalogo, efectivas);
+  const bruto = monto * factor;
+  if (redondeo?.activo && Number(redondeo?.multiplo) > 0 && (esMonedaCop(hasta) || decEf === 0)) {
+    return redondearSegunMoneda(bruto, hasta, redondeo, decEf);
+  }
+  return redondear(bruto, decEf);
 }
 
 // ============================================================================
@@ -247,10 +314,18 @@ export interface ReglaConversion {
   monedaTransito: MonedaConversion | null;
 }
 
+/** Regla global de múltiplo de redondeo. */
+export interface ReglaRedondeoGlobal {
+  activo: boolean;
+  multiplo: number;
+  noBajarDeCosto: boolean;
+}
+
 /** Reglas completas del motor, listas para `convertirConMetodo`. */
 export interface ReglasConversionGlobal {
   compras: ReglaConversion;
   ventas: ReglaConversion;
+  redondeo?: ReglaRedondeoGlobal;
 }
 
 /**
@@ -265,6 +340,9 @@ export function reglasConversion(
         metodo_conversion_ventas?: string | null;
         moneda_transito_compras_id?: string | null;
         moneda_transito_ventas_id?: string | null;
+        redondeo_activo?: boolean | null;
+        redondeo_multiplo?: number | string | null;
+        redondeo_no_bajar_de_costo?: boolean | null;
       }
     | null
     | undefined,
@@ -282,6 +360,11 @@ export function reglasConversion(
     ventas: {
       metodo: metodo(cfg?.metodo_conversion_ventas),
       monedaTransito: transito(cfg?.moneda_transito_ventas_id),
+    },
+    redondeo: {
+      activo: cfg?.redondeo_activo === true,
+      multiplo: Number(cfg?.redondeo_multiplo) > 0 ? Number(cfg?.redondeo_multiplo) : 0,
+      noBajarDeCosto: cfg?.redondeo_no_bajar_de_costo !== false,
     },
   };
 }
@@ -420,7 +503,7 @@ export function preciosDeProducto<T extends MonedaConversion>(
     .map((mo) => {
       const esVenta = String(mo.id) === String(monedaVenta.id);
       const esCosto = String(mo.id) === String(monedaCosto.id);
-      const dec = Number(mo.decimales ?? 2);
+      const dec = decimalesDeMoneda(mo);
       return {
         moneda_id: String(mo.id),
         moneda_codigo: mo.codigo ?? null,
@@ -432,14 +515,15 @@ export function preciosDeProducto<T extends MonedaConversion>(
         // producto); el costo puede tener su propia moneda exacta aparte.
         es_base: esVenta,
         precio: esVenta
-          ? precioBase
+          ? redondear(precioBase, dec)
           : convertirConMetodo(precioBase, monedaVenta, mo, {
               metodo: reglas?.ventas?.metodo,
               monedaTransito: reglas?.ventas?.monedaTransito ?? null,
               catalogo,
+              redondeo: reglas?.redondeo ?? null,
             }, dec),
         costo: esCosto
-          ? costoBase
+          ? redondear(costoBase, dec)
           : convertirConMetodo(costoBase, monedaCosto, mo, {
               metodo: reglas?.compras?.metodo,
               monedaTransito: reglas?.compras?.monedaTransito ?? null,
@@ -504,11 +588,17 @@ export function precioPresentacionEnMoneda<T extends MonedaConversion>(
   hasta: T | null | undefined,
   catalogo: T[] = [],
   efectivas?: Record<string, number> | null,
-  decimales = 2
+  decimales = 2,
+  redondeo?: { activo?: boolean | null; multiplo?: number | string | null } | null
 ): number {
   const p = Number(precioPresentacion);
   if (!Number.isFinite(p) || !desde || !hasta) return 0;
-  return redondear(p * tasaPar(desde, hasta, catalogo, efectivas), decimales);
+  const decEf = esMonedaCop(hasta) ? 0 : decimales;
+  const bruto = p * tasaPar(desde, hasta, catalogo, efectivas);
+  if (redondeo?.activo && Number(redondeo?.multiplo) > 0 && (esMonedaCop(hasta) || decEf === 0)) {
+    return redondearSegunMoneda(bruto, hasta, redondeo, decEf);
+  }
+  return redondear(bruto, decEf);
 }
 
 // ============================================================================

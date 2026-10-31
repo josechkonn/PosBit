@@ -3,7 +3,7 @@ export const dynamic = 'force-dynamic';
 import { NextResponse } from "next/server";
 import { requireSession } from "@/lib/auth-server";
 import { query, queryOne, execute, transaction, registrarEliminacionSync } from "@/lib/db";
-import { redondear, monedaDeProducto, monedaCostoDeProducto, preciosDeProducto, presentacionesDeProducto, convertirConMetodo, reglasConversion } from "@/lib/money";
+import { redondear, monedaDeProducto, monedaCostoDeProducto, preciosDeProducto, presentacionesDeProducto, convertirConMetodo, reglasConversion, decimalesDeMoneda } from "@/lib/money";
 import { aplicarReglasRedondeo } from "@/lib/costing";
 import { getConfiguracionGlobal } from "@/lib/global-config";
 import { leerFiltros, SIN_FILTROS, construirWhere, calcularFacetas } from "@/lib/filtros-productos";
@@ -305,7 +305,7 @@ export async function GET(request: Request) {
 
     const decimalesVenta = (p: any) => {
       const m = monedaDeProducto(p, baseSistema, catalogo);
-      return Number((m as any)?.decimales ?? 2);
+      return decimalesDeMoneda(m as any);
     };
 
     const productosConPrecios = (productos as any[]).map((p) => {
@@ -396,7 +396,7 @@ export async function POST(request: Request) {
         monedaBasePre,
         catalogoPre
       );
-      const decVentaPre = Number(monedaVentaPre.decimales ?? 2);
+      const decVentaPre = decimalesDeMoneda(monedaVentaPre);
 
       // Precio de venta final: el enviado, o costo→moneda de venta × (1 + margen%).
       // La conversión del costo usa la regla de COMPRAS (la cascada es efecto de
@@ -415,7 +415,7 @@ export async function POST(request: Request) {
         // Precios): sin esto, un precio derivado del margen quedaba en 23.47
         // mientras el motor de compras lo redondeaba a 25, y el mismo producto
         // tenía dos precios según por dónde hubiera pasado.
-        precioFinal = aplicarReglasRedondeo(bruto, cfgGlobal, costoEnVenta).precio;
+        precioFinal = aplicarReglasRedondeo(bruto, cfgGlobal, costoEnVenta, decVentaPre).precio;
       }
 
       // CPP inicial: el costo estático de alta (sirve de base para el margen y
@@ -485,17 +485,18 @@ export async function POST(request: Request) {
       for (const moneda of catalogo) {
         let precio: number;
         let costo: number;
+        const decimales = decimalesDeMoneda(moneda);
 
         if (body.precios && body.precios[moneda.id]) {
-          precio = body.precios[moneda.id].precio;
-          costo = body.precios[moneda.id].costo;
+          precio = redondear(Number(body.precios[moneda.id].precio), decimales);
+          costo = redondear(Number(body.precios[moneda.id].costo), decimales);
         } else {
           // Derivación respetando el motor: precio con la regla de ventas y
           // costo con la de compras (mismo criterio que el GET y las compras).
-          const decimales = Number(moneda.decimales ?? 2);
           precio = convertirConMetodo(Number(precio_base), monedaProducto, moneda, {
             ...reglas.ventas,
             catalogo,
+            redondeo: reglas.redondeo,
           }, decimales);
           costo = convertirConMetodo(Number(costo_base), monedaCosto, moneda, {
             ...reglas.compras,
@@ -601,7 +602,7 @@ export async function PUT(request: Request) {
         const monedaBaseCalc = catalogoCalc.find((m: any) => m.es_base) || catalogoCalc[0];
         const mVen = monedaDeProducto(productoAnterior, monedaBaseCalc, catalogoCalc);
         const mCos = monedaCostoDeProducto(productoAnterior, monedaBaseCalc, catalogoCalc);
-        const decVen = Number(mVen.decimales ?? 2);
+        const decVen = decimalesDeMoneda(mVen);
         const costoN = Number(costo_base ?? productoAnterior.costo_base) || 0;
         const costoEnVenta = convertirConMetodo(costoN, mCos, mVen, {
           ...reglas.compras,
@@ -613,7 +614,7 @@ export async function PUT(request: Request) {
         // Igual que en el alta: el precio derivado del margen pasa por la regla
         // global de redondeo, o el margen guardado y el precio guardado
         // describirían utilidades distintas.
-        precioParam = aplicarReglasRedondeo(bruto, cfgGlobal, costoEnVenta).precio;
+        precioParam = aplicarReglasRedondeo(bruto, cfgGlobal, costoEnVenta, decVen).precio;
       }
 
       // Las columnas de moneda se VACÍAN si vienen explícitamente en `null`
@@ -677,17 +678,18 @@ export async function PUT(request: Request) {
       for (const moneda of catalogo) {
         let precio: number;
         let costo: number;
+        const decimales = decimalesDeMoneda(moneda);
 
         if (body.precios && body.precios[moneda.id]) {
-          precio = body.precios[moneda.id].precio;
-          costo = body.precios[moneda.id].costo;
+          precio = redondear(Number(body.precios[moneda.id].precio), decimales);
+          costo = redondear(Number(body.precios[moneda.id].costo), decimales);
         } else {
           // Derivación respetando el motor: precio con la regla de ventas y
           // costo con la de compras (mismo criterio que el GET y las compras).
-          const decimales = Number(moneda.decimales ?? 2);
           precio = convertirConMetodo(Number(nuevoPrecio), monedaProducto, moneda, {
             ...reglas.ventas,
             catalogo,
+            redondeo: reglas.redondeo,
           }, decimales);
           costo = convertirConMetodo(Number(nuevoCosto), monedaCosto, moneda, {
             ...reglas.compras,

@@ -4,7 +4,8 @@ import { NextResponse } from "next/server";
 import { requireSession } from "@/lib/auth-server";
 import { query, queryOne, execute, transaction, registrarEliminacionSync, generarNumeroUnico } from "@/lib/db";
 import { fechaLocalISO } from "@/lib/format";
-import { aBase, convertir, redondear, tasaUsd, tasaUsdDocumento, monedaDeProducto, monedaCostoDeProducto, tasaMostrada, tasaPar, desdeBase } from "@/lib/money";
+import { aBase, convertir, redondear, tasaUsd, tasaUsdDocumento, monedaDeProducto, monedaCostoDeProducto, tasaMostrada, tasaPar, desdeBase, decimalesDeMoneda, redondearSegunMoneda } from "@/lib/money";
+import { getConfiguracionGlobal } from "@/lib/global-config";
 import { triggerBackgroundSync } from "@/lib/sync-engine";
 
 function generarNumero() {
@@ -302,7 +303,14 @@ export async function POST(request: Request) {
       // Suma de los descuentos por línea (en la moneda de la venta). El descuento
       // final de la venta = `descuento` (global del documento) + esto.
       let descuentoItemsTotal = 0;
-      const decVenta = Number(monedaVenta.decimales ?? 2);
+      const decVenta = decimalesDeMoneda(monedaVenta);
+      const cfgGlobal = await getConfiguracionGlobal({
+        query: (text: string, params?: any[]) => client.query(text, params),
+      });
+      const redondeoCfg = {
+        activo: cfgGlobal.redondeo_activo,
+        multiplo: cfgGlobal.redondeo_multiplo,
+      };
 
       for (const item of items) {
         const producto = await client.query(`SELECT * FROM productos WHERE id = $1`, [item.producto_id]);
@@ -426,17 +434,14 @@ export async function POST(request: Request) {
 
       if (lineasPagoReq) {
         // El saldo se lleva con los decimales de la moneda de la venta (no 2 fijos).
-        let restante = redondear(total, Number(monedaVenta.decimales ?? 2));
+        let restante = redondear(total, decVenta);
         for (const p of lineasPagoReq) {
-          const montoLinea = redondear(Number(p?.monto));
-          if (!p?.metodo_pago_id || !Number.isFinite(montoLinea) || montoLinea <= 0) continue;
-
           const metRes = await client.query(
             `SELECT mp.id, mp.nombre, mp.caja_id, ca.moneda_id
              FROM metodos_pago mp
              LEFT JOIN cajas ca ON mp.caja_id = ca.id
              WHERE mp.id = $1`,
-            [p.metodo_pago_id]
+            [p?.metodo_pago_id]
           );
           if (metRes.rows.length === 0) {
             throw new Error("Método de pago no encontrado");
@@ -449,6 +454,10 @@ export async function POST(request: Request) {
           if (!monedaLinea) {
             throw new Error("Moneda del método de pago no encontrada");
           }
+          const decLineaPago = decimalesDeMoneda(monedaLinea);
+          const montoLinea = redondear(Number(p?.monto), decLineaPago);
+          if (!p?.metodo_pago_id || !Number.isFinite(montoLinea) || montoLinea <= 0) continue;
+
           const tasaUsdLinea = tasaUsd(monedaLinea, monedasCatalogo);
           const esMonedaVenta = String(met.moneda_id) === String(moneda_id);
 
@@ -459,22 +468,38 @@ export async function POST(request: Request) {
             [String(monedaVenta.id)]: tasaUsdVenta,
           });
 
+          const restanteLineaExacto = esMonedaVenta ? restante : restante / (factorPago || 1);
+          const restanteLineaRedondeado = redondearSegunMoneda(restanteLineaExacto, monedaLinea, redondeoCfg);
+          const tolLinea =
+            decLineaPago === 0 && redondeoCfg.activo && redondeoCfg.multiplo > 1
+              ? redondeoCfg.multiplo / 2 + 1
+              : decLineaPago === 0
+                ? 1
+                : 0.01;
+          const saldaRestanteConRedondeo =
+            !esMonedaVenta &&
+            restante > 0 &&
+            (Math.abs(montoLinea - restanteLineaRedondeado) <= 0.001 ||
+              Math.abs(montoLinea - restanteLineaExacto) <= tolLinea);
+
           // Entregado → moneda de la venta.
           const montoVenta = esMonedaVenta
             ? montoLinea
-            : redondear(montoLinea * factorPago, Number(monedaVenta.decimales ?? 2));
+            : saldaRestanteConRedondeo
+              ? restante
+              : redondear(montoLinea * factorPago, decVenta);
           const aplicado = Math.min(montoVenta, restante);
           // Lo que cubre la línea se mide sobre el SALDO (sin redondear) llevado a
           // la moneda del método, no dividiendo `aplicado` —que ya viene redondeado
           // en la moneda de la venta— porque eso reintroducía el error de centavos
           // en el vuelto (misma regla que aplica el POS).
-          const decLineaPago = Number(monedaLinea.decimales ?? 2);
-          const restanteLinea = esMonedaVenta ? restante : restante / (factorPago || 1);
-          const aplicadoLinea = Math.min(montoLinea, redondear(restanteLinea, decLineaPago));
-          const vuelto = redondear(Math.max(0, montoLinea - aplicadoLinea));
+          const aplicadoLinea = saldaRestanteConRedondeo
+            ? montoLinea
+            : Math.min(montoLinea, redondear(restanteLineaExacto, decLineaPago));
+          const vuelto = redondear(Math.max(0, montoLinea - aplicadoLinea), decLineaPago);
 
-          restante = redondear(restante - aplicado);
-          pagado = redondear(pagado + aplicado);
+          restante = redondear(restante - aplicado, decVenta);
+          pagado = redondear(pagado + aplicado, decVenta);
           lineasPago.push({
             metodoId: String(met.id),
             cajaId: String(met.caja_id),

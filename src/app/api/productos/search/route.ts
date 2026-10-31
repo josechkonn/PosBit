@@ -3,7 +3,7 @@ export const dynamic = 'force-dynamic';
 import { NextResponse } from "next/server";
 import { requireSession } from "@/lib/auth-server";
 import { query } from "@/lib/db";
-import { preciosDeProducto, presentacionesDeProducto, monedaDeProducto, reglasConversion, convertirConMetodo } from "@/lib/money";
+import { preciosDeProducto, presentacionesDeProducto, monedaDeProducto, reglasConversion, convertirConMetodo, decimalesDeMoneda } from "@/lib/money";
 import { getConfiguracionGlobal } from "@/lib/global-config";
 
 /**
@@ -82,7 +82,7 @@ export async function GET(request: Request) {
 
     const decimalesVenta = (p: any) => {
       const m = monedaDeProducto(p, baseSistema, catalogo);
-      return Number((m as any)?.decimales ?? 2);
+      return decimalesDeMoneda(m as any);
     };
 
     const conPrecios = (productos as any[]).map((p) => {

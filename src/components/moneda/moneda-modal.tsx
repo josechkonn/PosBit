@@ -73,7 +73,7 @@ export function MonedaModal({ open, mode, moneda, onClose, onSuccess }: MonedaMo
           ? String(parseFloat(String(moneda.tasa_usd_directa)))
           : ""
       );
-      setDecimales(String(moneda.decimales ?? 2));
+      setDecimales(String(moneda.codigo?.toUpperCase() === "COP" ? 0 : (moneda.decimales ?? 2)));
       setEsBase(moneda.es_base);
       setActivo(moneda.activo);
     } else if (mode === "create") {
@@ -107,7 +107,12 @@ export function MonedaModal({ open, mode, moneda, onClose, onSuccess }: MonedaMo
             tasa: esBase ? 1 : parseFloat(tasa),
             // NULL = la tasa es contra la moneda base (USD)
             tasa_ref_moneda_id: esBase ? null : tasaRefId || null,
-            decimales: parseInt(decimales) || 2,
+            decimales:
+              codigo.trim().toUpperCase() === "COP"
+                ? 0
+                : Number.isFinite(parseInt(decimales, 10))
+                  ? Math.max(0, parseInt(decimales, 10))
+                  : 2,
             es_base: esBase,
             activo,
             usa_tasa_usd_directa: !esBase && usaDirecta,
@@ -129,7 +134,12 @@ export function MonedaModal({ open, mode, moneda, onClose, onSuccess }: MonedaMo
             // NULL = la tasa es contra la moneda base (USD); el PUT distingue
             // "no vino" de "vino null", así que siempre se envía
             tasa_ref_moneda_id: esBase ? null : tasaRefId || null,
-            decimales: parseInt(decimales) || 2,
+            decimales:
+              codigo.trim().toUpperCase() === "COP"
+                ? 0
+                : Number.isFinite(parseInt(decimales, 10))
+                  ? Math.max(0, parseInt(decimales, 10))
+                  : 2,
             es_base: esBase,
             activo,
             usa_tasa_usd_directa: !esBase && usaDirecta,

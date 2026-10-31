@@ -3,7 +3,7 @@ export const dynamic = 'force-dynamic';
 import { NextResponse } from "next/server";
 import { requireSession } from "@/lib/auth-server";
 import { query } from "@/lib/db";
-import { preciosDeProducto, presentacionesDeProducto, monedaDeProducto, reglasConversion, convertirConMetodo } from "@/lib/money";
+import { preciosDeProducto, presentacionesDeProducto, monedaDeProducto, reglasConversion, convertirConMetodo, decimalesDeMoneda } from "@/lib/money";
 import { getConfiguracionGlobal } from "@/lib/global-config";
 
 /**
@@ -171,7 +171,7 @@ async function armarRespuesta(producto: any, presentacionRow: any | null, tipo: 
   const presentaciones = presentacionesDeProducto(
     producto,
     filas as any[],
-    Number((monedaVenta as any)?.decimales ?? 2),
+    decimalesDeMoneda(monedaVenta as any),
     costoUnitarioVenta
   );
 

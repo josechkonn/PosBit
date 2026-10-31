@@ -20,7 +20,7 @@ import {
   FileText,
   Wallet,
 } from "lucide-react";
-import { tasaUsd, aBase, redondear, convertirConMetodo } from "@/lib/money";
+import { tasaUsd, aBase, redondear, convertirConMetodo, decimalesDeMoneda, redondearSegunMoneda } from "@/lib/money";
 
 interface Venta {
   id: string;
@@ -245,6 +245,14 @@ export function VentaPagoModal({
     return monedas.find((m) => String(m.id) === String(cfgGlobal.moneda_transito_ventas_id)) || null;
   }, [cfgGlobal, monedas]);
 
+  const redondeoVentas = useMemo(
+    () => ({
+      activo: cfgGlobal?.redondeo_activo === true,
+      multiplo: Number(cfgGlobal?.redondeo_multiplo) > 0 ? Number(cfgGlobal.redondeo_multiplo) : 0,
+    }),
+    [cfgGlobal]
+  );
+
   // Método simple seleccionado
   const metodoSimple = useMemo(() => {
     return metodosPago.find((m) => String(m.id) === String(metodoSeleccionadoId)) || metodosPago[0];
@@ -256,11 +264,19 @@ export function VentaPagoModal({
     return monedas.find((m) => m.codigo === metodoSimple.moneda_codigo) || monedaBase;
   }, [metodoSimple, monedas, monedaBase]);
 
+  const decSimple = decimalesDeMoneda(monedaSimpleObj);
+  const decVenta = decimalesDeMoneda(monedaVenta);
+  const multiploSimple =
+    decSimple === 0 && redondeoVentas.activo && redondeoVentas.multiplo > 0
+      ? redondeoVentas.multiplo
+      : 0;
+  const tolSimple = multiploSimple > 0 ? Math.max(0.5, multiploSimple / 2) : decSimple === 0 ? 0.5 : 0.05;
+
   // Saldo pendiente equivalente en la moneda del método de pago seleccionado
   const saldoPendienteEnMonedaSimple = useMemo(() => {
     if (saldoPendienteEnMonedaCredito <= 0) return 0;
     if (String(monedaVenta.id) === String(monedaSimpleObj.id)) {
-      return redondear(saldoPendienteEnMonedaCredito, Number(monedaSimpleObj.decimales ?? 2));
+      return redondearSegunMoneda(saldoPendienteEnMonedaCredito, monedaSimpleObj, redondeoVentas, decSimple);
     }
     return convertirConMetodo(
       saldoPendienteEnMonedaCredito,
@@ -270,13 +286,53 @@ export function VentaPagoModal({
         metodo: metodoConversionVentas,
         monedaTransito: monedaTransitoVentas,
         catalogo: monedas,
+        redondeo: redondeoVentas,
       },
-      Number(monedaSimpleObj.decimales ?? 2)
+      decSimple
     );
-  }, [saldoPendienteEnMonedaCredito, monedaVenta, monedaSimpleObj, metodoConversionVentas, monedaTransitoVentas, monedas]);
+  }, [saldoPendienteEnMonedaCredito, monedaVenta, monedaSimpleObj, metodoConversionVentas, monedaTransitoVentas, monedas, redondeoVentas, decSimple]);
 
   // Manejo de cambio de método de pago simple
   const handleSelectMetodoSimple = (metodo: MetodoPago) => {
+    const monedaNueva = metodo.moneda_codigo
+      ? monedas.find((m) => m.codigo === metodo.moneda_codigo) || monedaBase
+      : monedaBase;
+    const valActual = parseFloat(montoSimpleStr);
+    if (Number.isFinite(valActual) && valActual > 0 && String(monedaSimpleObj.id) !== String(monedaNueva.id)) {
+      const decNueva = decimalesDeMoneda(monedaNueva);
+      if (Math.abs(valActual - saldoPendienteEnMonedaSimple) <= tolSimple) {
+        const nuevoSaldoConv =
+          String(monedaVenta.id) === String(monedaNueva.id)
+            ? redondearSegunMoneda(saldoPendienteEnMonedaCredito, monedaNueva, redondeoVentas, decNueva)
+            : convertirConMetodo(
+                saldoPendienteEnMonedaCredito,
+                monedaVenta,
+                monedaNueva,
+                {
+                  metodo: metodoConversionVentas,
+                  monedaTransito: monedaTransitoVentas,
+                  catalogo: monedas,
+                  redondeo: redondeoVentas,
+                },
+                decNueva
+              );
+        setMontoSimpleStr(String(nuevoSaldoConv));
+      } else {
+        const conv = convertirConMetodo(
+          valActual,
+          monedaSimpleObj,
+          monedaNueva,
+          {
+            metodo: metodoConversionVentas,
+            monedaTransito: monedaTransitoVentas,
+            catalogo: monedas,
+            redondeo: redondeoVentas,
+          },
+          decNueva
+        );
+        setMontoSimpleStr(String(conv));
+      }
+    }
     setMetodoSeleccionadoId(metodo.id);
     if (metodo.caja_id) {
       setCajaSeleccionadaId(metodo.caja_id);
@@ -290,7 +346,10 @@ export function VentaPagoModal({
     }
     const montoVal = parseFloat(montoSimpleStr);
     if (String(monedaSimpleObj.id) === String(monedaVenta.id)) {
-      return redondear(montoVal, Number(monedaVenta.decimales ?? 2));
+      return redondear(montoVal, decVenta);
+    }
+    if (saldoPendienteEnMonedaSimple > 0 && Math.abs(montoVal - saldoPendienteEnMonedaSimple) <= tolSimple) {
+      return redondear(saldoPendienteEnMonedaCredito, decVenta);
     }
     return convertirConMetodo(
       montoVal,
@@ -301,9 +360,9 @@ export function VentaPagoModal({
         monedaTransito: monedaTransitoVentas,
         catalogo: monedas,
       },
-      Number(monedaVenta.decimales ?? 2)
+      decVenta
     );
-  }, [montoSimpleStr, monedaSimpleObj, monedaVenta, metodoConversionVentas, monedaTransitoVentas, monedas]);
+  }, [montoSimpleStr, monedaSimpleObj, monedaVenta, metodoConversionVentas, monedaTransitoVentas, monedas, decVenta, saldoPendienteEnMonedaSimple, tolSimple, saldoPendienteEnMonedaCredito]);
 
   // Cálculo en modo mixto
   const pagosMixtosResueltos = useMemo(() => {
@@ -320,7 +379,7 @@ export function VentaPagoModal({
           monedaTransito: monedaTransitoVentas,
           catalogo: monedas,
         },
-        Number(monedaVenta.decimales ?? 2)
+        decVenta
       );
       return {
         ...l,
@@ -330,7 +389,7 @@ export function VentaPagoModal({
         montoEnMonedaCredito,
       };
     });
-  }, [lineasPago, metodosPago, monedas, monedaBase, monedaVenta, metodoConversionVentas, monedaTransitoVentas]);
+  }, [lineasPago, metodosPago, monedas, monedaBase, monedaVenta, metodoConversionVentas, monedaTransitoVentas, decVenta]);
 
   const totalMontoEnMonedaCreditoMixto = useMemo(() => {
     return pagosMixtosResueltos.reduce((acc, curr) => acc + curr.montoEnMonedaCredito, 0);
@@ -350,7 +409,10 @@ export function VentaPagoModal({
 
   // Llenar porcentaje rápido
   const handleSetPorcentaje = (pct: number) => {
-    const montoEnMoneda = redondear(saldoPendienteEnMonedaSimple * pct, 2);
+    const montoEnMoneda =
+      pct >= 0.999
+        ? saldoPendienteEnMonedaSimple
+        : redondearSegunMoneda(saldoPendienteEnMonedaSimple * pct, monedaSimpleObj, redondeoVentas, decSimple);
     setMontoSimpleStr(montoEnMoneda.toString());
   };
 
@@ -396,17 +458,22 @@ export function VentaPagoModal({
         ? parseFloat(montoSimpleStr)
         : saldoPendienteEnMonedaSimple;
 
-      const montoEnMonedaCreditoFinal = convertirConMetodo(
-        montoFinal,
-        monedaSimpleObj,
-        monedaVenta,
-        {
-          metodo: metodoConversionVentas,
-          monedaTransito: monedaTransitoVentas,
-          catalogo: monedas,
-        },
-        Number(monedaVenta.decimales ?? 2)
-      );
+      const montoEnMonedaCreditoFinal =
+        String(monedaSimpleObj.id) !== String(monedaVenta.id) &&
+        saldoPendienteEnMonedaSimple > 0 &&
+        Math.abs(montoFinal - saldoPendienteEnMonedaSimple) <= tolSimple
+          ? redondear(saldoPendienteEnMonedaCredito, decVenta)
+          : convertirConMetodo(
+              montoFinal,
+              monedaSimpleObj,
+              monedaVenta,
+              {
+                metodo: metodoConversionVentas,
+                monedaTransito: monedaTransitoVentas,
+                catalogo: monedas,
+              },
+              decVenta
+            );
 
       if (montoEnMonedaCreditoFinal > saldoPendienteEnMonedaCredito + 0.01) {
         toast(
@@ -675,13 +742,13 @@ export function VentaPagoModal({
                     Monto a Cobrar ({monedaSimpleObj?.codigo || "USD"})
                   </label>
                   <span className="text-[11px] text-muted-foreground italic">
-                    Saldo: {saldoPendienteEnMonedaSimple} {monedaSimpleObj?.codigo}
+                    Saldo: {fmt(saldoPendienteEnMonedaSimple, monedaSimpleObj?.codigo)}
                   </span>
                 </div>
                 <Input
                   className="h-14 text-right font-mono text-xl font-black border-2 border-primary/40 focus:border-primary shadow-xs"
                   type="number"
-                  step="any"
+                  step={decSimple === 0 ? (multiploSimple > 0 ? String(multiploSimple) : "1") : "any"}
                   min="0"
                   value={montoSimpleStr}
                   placeholder={saldoPendienteEnMonedaSimple.toString()}

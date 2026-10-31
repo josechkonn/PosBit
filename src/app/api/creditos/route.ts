@@ -3,7 +3,8 @@ export const dynamic = 'force-dynamic';
 import { NextResponse } from "next/server";
 import { requireSession } from "@/lib/auth-server";
 import { query, queryOne, transaction } from "@/lib/db";
-import { aBase, convertir, redondear, tasaUsd } from "@/lib/money";
+import { aBase, convertir, convertirConMetodo, decimalesDeMoneda, redondear, redondearSegunMoneda, tasaUsd } from "@/lib/money";
+import { getConfiguracionGlobal } from "@/lib/global-config";
 import { triggerBackgroundSync } from "@/lib/sync-engine";
 
 function generarNumero() {
@@ -170,26 +171,71 @@ export async function POST(request: Request) {
       const monedaCredito = monedaCreditoRes.rows[0];
 
       const monedasCatalogo = (await client.query(`SELECT * FROM monedas`)).rows;
+      const cfg = await getConfiguracionGlobal(client);
+      const transitoVentas = cfg.moneda_transito_ventas_id
+        ? monedasCatalogo.find((m: any) => String(m.id) === String(cfg.moneda_transito_ventas_id))
+        : null;
+      const redondeoCfg = {
+        activo: cfg.redondeo_activo === true,
+        multiplo: Number(cfg.redondeo_multiplo) > 0 ? Number(cfg.redondeo_multiplo) : 0,
+      };
 
-      const montoAbono = redondear(parseFloat(monto));
+      const decAbono = decimalesDeMoneda(monedaAbono);
+      const decCredito = decimalesDeMoneda(monedaCredito);
+      const montoAbono = redondear(parseFloat(monto), decAbono);
+      const saldoActual = parseFloat(String(credito.saldo));
+
+      const multiploAbono =
+        decAbono === 0 && redondeoCfg.activo && redondeoCfg.multiplo > 0
+          ? redondeoCfg.multiplo
+          : 0;
+      const tolAbono = multiploAbono > 0 ? Math.max(0.5, multiploAbono / 2) : decAbono === 0 ? 0.5 : 0.05;
+
+      const saldoEnMonedaAbono =
+        String(monedaAbono.id) === String(monedaCredito.id)
+          ? redondearSegunMoneda(saldoActual, monedaAbono, redondeoCfg, decAbono)
+          : convertirConMetodo(
+              saldoActual,
+              monedaCredito,
+              monedaAbono,
+              {
+                metodo: cfg.metodo_conversion_ventas,
+                monedaTransito: transitoVentas,
+                catalogo: monedasCatalogo,
+                redondeo: redondeoCfg,
+              },
+              decAbono
+            );
 
       // Convertir el monto del abono a la moneda del crédito para comparar
-      // con el saldo (misma cadena de conversiones que en todo el sistema)
+      // con el saldo (misma cadena de conversiones y tolerancia de múltiplo de redondeo)
       const montoEnMonedaCredito =
         String(monedaAbono.id) === String(monedaCredito.id)
           ? montoAbono
-          : convertir(montoAbono, monedaAbono, monedaCredito, monedasCatalogo, Number(monedaCredito.decimales ?? 2));
+          : Math.abs(montoAbono - saldoEnMonedaAbono) <= tolAbono
+            ? redondear(saldoActual, decCredito)
+            : convertirConMetodo(
+                montoAbono,
+                monedaAbono,
+                monedaCredito,
+                {
+                  metodo: cfg.metodo_conversion_ventas,
+                  monedaTransito: transitoVentas,
+                  catalogo: monedasCatalogo,
+                },
+                decCredito
+              );
 
-      if (montoEnMonedaCredito > parseFloat(credito.saldo) + 0.01) {
-        throw new Error(`El monto equivalente (${montoEnMonedaCredito.toFixed(2)} ${monedaCredito.codigo}) excede el saldo pendiente (${credito.saldo} ${monedaCredito.codigo})`);
+      if (montoEnMonedaCredito > saldoActual + 0.05) {
+        throw new Error(`El monto equivalente (${montoEnMonedaCredito.toFixed(decCredito)} ${monedaCredito.codigo}) excede el saldo pendiente (${credito.saldo} ${monedaCredito.codigo})`);
       }
 
       // Monto en moneda base (USD) para saldo_base
       const montoBase = aBase(montoAbono, tasaUsd(monedaAbono, monedasCatalogo));
 
-      const restante = Math.max(0, parseFloat(credito.saldo) - montoEnMonedaCredito);
+      const restante = Math.max(0, saldoActual - montoEnMonedaCredito);
       const nuevoEstado = restante <= 0.01 ? "Pagado" : "Parcial";
-      const nuevoSaldo = nuevoEstado === "Pagado" ? 0 : redondear(restante, Number(monedaCredito.decimales ?? 2));
+      const nuevoSaldo = nuevoEstado === "Pagado" ? 0 : redondear(restante, decCredito);
       const nuevoSaldoBase =
         nuevoEstado === "Pagado"
           ? 0
@@ -205,6 +251,10 @@ export async function POST(request: Request) {
         `UPDATE creditos SET saldo = $1, saldo_base = $2, estado = $3, actualizado_en = NOW() WHERE id = $4`,
         [nuevoSaldo, nuevoSaldoBase, nuevoEstado, credito.id]
       );
+
+      if (nuevoEstado === "Pagado" && credito.venta_id) {
+        await client.query(`UPDATE ventas SET estado = 'Pagada' WHERE id = $1`, [credito.venta_id]);
+      }
 
       if (caja_id) {
         await client.query(

@@ -45,7 +45,8 @@ function redondearA(valor: number, decimales: number): number {
 export function aplicarReglasRedondeo(
   precio: number,
   cfg: ReglasRedondeo,
-  costoUnitarioVenta: number
+  costoUnitarioVenta: number,
+  decimales = 2
 ): { precio: number; redondeado: boolean } {
   let p = Number(precio);
   let redondeado = false;
@@ -56,10 +57,10 @@ export function aplicarReglasRedondeo(
     redondeado = Math.abs(r - p) > 1e-9;
     p = r;
   }
-  p = redondearA(p, 2);
+  p = redondearA(p, decimales);
 
   if (cfg.redondeo_no_bajar_de_costo && Number(costoUnitarioVenta) > 0 && p < costoUnitarioVenta) {
-    p = redondearA(costoUnitarioVenta, 2);
+    p = redondearA(costoUnitarioVenta, decimales);
     redondeado = true; // el redondeo pretendía bajar del costo; lo fijamos en costo
   }
   return { precio: p, redondeado };

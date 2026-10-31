@@ -417,6 +417,7 @@ export async function ensureSchemaAndMigrate(customPool?: Pool | PoolClient): Pr
 
           -- ── J. MONEDAS Y CONFIGURACION ───────────────────────────────────────
           ALTER TABLE monedas ADD COLUMN IF NOT EXISTS decimales INT NOT NULL DEFAULT 2;
+          UPDATE monedas SET decimales = 0 WHERE UPPER(TRIM(codigo)) = 'COP' AND decimales <> 0;
           ALTER TABLE monedas ADD COLUMN IF NOT EXISTS usa_tasa_usd_directa BOOLEAN NOT NULL DEFAULT false;
           ALTER TABLE monedas ADD COLUMN IF NOT EXISTS tasa_usd_directa DECIMAL(18, 6);
           IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='monedas' AND column_name='tasa_ref_moneda_id') THEN

@@ -1,14 +1,18 @@
 export const fmt = (n: number | string, currency = "USD") => {
   const num = typeof n === "string" ? parseFloat(n) : n;
   if (isNaN(num)) return "N/A";
+  const isCop = String(currency || "").trim().toUpperCase() === "COP";
+  const dec = isCop ? 0 : 2;
+  const val = isCop ? Math.round(num) : num;
   try {
     return new Intl.NumberFormat("es-BO", {
       style: "currency",
       currency,
-      minimumFractionDigits: 2,
-    }).format(num);
+      minimumFractionDigits: dec,
+      maximumFractionDigits: dec,
+    }).format(val);
   } catch {
-    return `${currency} ${num.toFixed(2)}`;
+    return `${currency} ${val.toFixed(dec)}`;
   }
 };
 

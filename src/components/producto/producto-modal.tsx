@@ -18,7 +18,7 @@ import { Switch } from "@/components/ui/switch";
 import { StatusBadge } from "@/components/ui/badge";
 import { Alert } from "@/components/ui/alert";
 import { fmt, fmtDateTime } from "@/lib/format";
-import { redondear, precioUnidadDesdePresentacion, margenSobreCosto, precioPresentacionSegunModo, type ModoVentaPresentacion } from "@/lib/money";
+import { redondear, precioUnidadDesdePresentacion, margenSobreCosto, precioPresentacionSegunModo, decimalesDeMoneda, type ModoVentaPresentacion } from "@/lib/money";
 import { aplicarReglasRedondeo, type ReglasRedondeo } from "@/lib/redondeo";
 import { useReglasConversion } from "@/lib/use-reglas-conversion";
 
@@ -600,7 +600,7 @@ export function ProductoModal({ open, mode, producto, monedas: monedasProp, defa
       const next = { ...prev };
       for (const m of effectiveMonedas) {
         if (m.id === refId) continue;
-        const dec = m.decimales ?? 2;
+        const dec = decimalesDeMoneda(m);
         const current = prev[m.id] || { precioVenta: "", precioCompra: "" };
         const nuevo =
           valor > 0
@@ -642,7 +642,7 @@ export function ProductoModal({ open, mode, producto, monedas: monedasProp, defa
    */
   const compraEnVentaMoneda = (compra: number): number => {
     if (!costoMoneda || !ventaMoneda) return compra;
-    return convertirProducto(compra, costoMoneda, ventaMoneda, "compra", Number(ventaMoneda.decimales ?? 2));
+    return convertirProducto(compra, costoMoneda, ventaMoneda, "compra", decimalesDeMoneda(ventaMoneda));
   };
 
   // Regla global de redondeo de precios (Configuración → Precios). Se pide por
@@ -730,13 +730,13 @@ export function ProductoModal({ open, mode, producto, monedas: monedasProp, defa
    * pantalla muestra un precio que al guardar cambia solo.
    */
   const precioDesdeMargen = (costoEnVenta: number, margen: number): number => {
-    const dec = Number(ventaMoneda?.decimales ?? 2);
+    const dec = decimalesDeMoneda(ventaMoneda);
     const bruto =
       margen > 0
         ? redondear(costoEnVenta * (1 + margen / 100), dec)
         : redondear(costoEnVenta, dec);
     return cfgRedondeo
-      ? aplicarReglasRedondeo(bruto, cfgRedondeo, costoEnVenta).precio
+      ? aplicarReglasRedondeo(bruto, cfgRedondeo, costoEnVenta, dec).precio
       : bruto;
   };
 
@@ -785,7 +785,7 @@ export function ProductoModal({ open, mode, producto, monedas: monedasProp, defa
   // del precio unitario de la moneda de VENTA. En el formulario ambos son
   // editables (bidireccional): escribir el precio de la caja reescribe el
   // unitario y re-deriva las demás monedas.
-  const decVenta = Number(ventaMoneda?.decimales ?? 2);
+  const decVenta = decimalesDeMoneda(ventaMoneda);
   const precioUnidadVenta = () => parseFloat(preciosPorMoneda[ventaMonedaId || ""]?.precioVenta || "") || 0;
 
   /** Al escribir el precio de una presentación → despeja el precio unitario. */
@@ -805,7 +805,7 @@ export function ProductoModal({ open, mode, producto, monedas: monedasProp, defa
   // Costo de presentación (moneda de COMPRA): escribir el costo de la caja
   // (p. ej. 480) despeja el costo unitario (480 ÷ 24 = 20). El CPP real que
   // sale del inventario se muestra aparte, como referencia.
-  const decCosto = Number(costoMoneda?.decimales ?? 2);
+  const decCosto = decimalesDeMoneda(costoMoneda);
   const precioUnidadCosto = () => parseFloat(preciosPorMoneda[costoMonedaId || ""]?.precioCompra || "") || 0;
 
   /** CPP real del producto por unidad, en la moneda de COMPRA. */
@@ -1125,7 +1125,7 @@ const agregarPresentacionDesdePicker = () => {
       ? parseFloat(preciosPorMoneda[costoMonedaId]?.precioCompra || "") || 0
       : 0;
     const suelo = compraEnVentaMoneda(costoCompra);
-    const { precio, redondeado } = aplicarReglasRedondeo(actual, cfgRedondeo, suelo);
+    const { precio, redondeado } = aplicarReglasRedondeo(actual, cfgRedondeo, suelo, decVenta);
     if (!redondeado) {
       setMsgRedondeo(`El precio ${fmt(actual, ventaMoneda?.codigo)} ya es múltiplo de ${cfgRedondeo.redondeo_multiplo}`);
       return;
@@ -1397,14 +1397,14 @@ const agregarPresentacionDesdePicker = () => {
 
       // `precio_base` se guarda EN LA MONEDA DE VENTA (moneda_base_id) y
       // `costo_base` EN LA DE COMPRA (moneda_costo_id), tal cual se escribieron
-      const decVenta = Number(ventaMoneda?.decimales ?? 2);
-      const decCosto = Number(costoMoneda?.decimales ?? 2);
+      const decVentaSubmit = decimalesDeMoneda(ventaMoneda);
+      const decCostoSubmit = decimalesDeMoneda(costoMoneda);
 
       if (mode === "create") {
         if (!ventaMonedaId) throw new Error("Selecciona una moneda de venta");
         if (!costoMonedaId) throw new Error("Selecciona una moneda de compra");
-        body.precio_base = precioVenta;
-        body.costo_base = precioCompra;
+        body.precio_base = redondear(precioVenta, decVentaSubmit);
+        body.costo_base = redondear(precioCompra, decCostoSubmit);
 
         const res = await fetch("/api/productos", {
           method: "POST",
@@ -1428,10 +1428,10 @@ const agregarPresentacionDesdePicker = () => {
       } else if (mode === "edit" && producto) {
         body.id = producto.id;
         if (ventaMonedaId && ventaEntry?.precioVenta) {
-          body.precio_base = redondear(precioVenta, decVenta);
+          body.precio_base = redondear(precioVenta, decVentaSubmit);
         }
         if (costoMonedaId && costoEntry?.precioCompra) {
-          body.costo_base = redondear(precioCompra, decCosto);
+          body.costo_base = redondear(precioCompra, decCostoSubmit);
         }
 
         const res = await fetch("/api/productos", {

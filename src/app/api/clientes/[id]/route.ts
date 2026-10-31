@@ -3,6 +3,7 @@ export const dynamic = "force-dynamic";
 import { NextResponse } from "next/server";
 import { requireSession } from "@/lib/auth-server";
 import { query, queryOne } from "@/lib/db";
+import { decimalesDeMoneda, redondear } from "@/lib/money";
 
 /**
  * Detalle completo de un cliente para su perfil: datos, límite de crédito y
@@ -83,15 +84,18 @@ export async function GET(
     return NextResponse.json({
       cliente: {
         ...cliente,
-        monedas: monedas.map((m: any) => ({
-          moneda_id: m.id,
-          codigo: m.codigo,
-          simbolo: m.simbolo,
-          es_base: m.es_base,
-          decimales: m.decimales,
-          limite: parseFloat(m.limite || "0") || 0,
-          deuda: parseFloat(m.deuda || "0") || 0,
-        })),
+        monedas: monedas.map((m: any) => {
+          const dec = decimalesDeMoneda(m);
+          return {
+            moneda_id: m.id,
+            codigo: m.codigo,
+            simbolo: m.simbolo,
+            es_base: m.es_base,
+            decimales: dec,
+            limite: redondear(parseFloat(m.limite || "0") || 0, dec),
+            deuda: redondear(parseFloat(m.deuda || "0") || 0, dec),
+          };
+        }),
       },
       stats: {
         ventas_count: ventasCount,

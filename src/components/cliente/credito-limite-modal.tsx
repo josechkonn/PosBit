@@ -10,7 +10,7 @@ import { Select } from "@/components/ui/select";
 import { cn } from "@/lib/utils";
 import { fmt } from "@/lib/format";
 import { useReglasConversion } from "@/lib/use-reglas-conversion";
-import type { MonedaConversion } from "@/lib/money";
+import { decimalesDeMoneda, redondearSegunMoneda, type MonedaConversion } from "@/lib/money";
 
 export interface MonedaCredito {
   moneda_id: string;
@@ -55,7 +55,7 @@ export function CreditoLimiteModal({
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
 
-  const { convertirProducto } = useReglasConversion(catalogoMonedas);
+  const { reglas, convertirProducto } = useReglasConversion(catalogoMonedas);
 
   useEffect(() => {
     if (open) {
@@ -95,9 +95,9 @@ export function CreditoLimiteModal({
       const actualMon = catalogoMonedas.find((m) => String(m.id) === String(monedaId));
       const nuevaMon = catalogoMonedas.find((m) => String(m.id) === String(nuevaMonedaId));
       if (actualMon && nuevaMon) {
-        const dec = Number(nuevaMon.decimales ?? 2);
+        const dec = decimalesDeMoneda(nuevaMon);
         const conv = convertirProducto(num, actualMon, nuevaMon, "venta", dec);
-        setMonto(String(conv));
+        setMonto(String(redondearSegunMoneda(conv, nuevaMon, reglas.redondeo, dec)));
       }
     }
     setMonedaId(nuevaMonedaId);
@@ -234,8 +234,14 @@ export function CreditoLimiteModal({
           onChange={(e) => setMonto(e.target.value)}
           type="number"
           min={0}
-          step="0.01"
-          placeholder="0.00"
+          step={
+            decimalesDeMoneda(moneda) === 0
+              ? reglas.redondeo?.activo && Number(reglas.redondeo?.multiplo) > 0
+                ? String(reglas.redondeo.multiplo)
+                : "1"
+              : "0.01"
+          }
+          placeholder={decimalesDeMoneda(moneda) === 0 ? "0" : "0.00"}
           autoFocus
         />
       </Field>

@@ -4,7 +4,7 @@ import { NextResponse } from "next/server";
 import { requireSession } from "@/lib/auth-server";
 import { transaction } from "@/lib/db";
 import { fechaLocalISO } from "@/lib/format";
-import { convertirConMetodo, redondear } from "@/lib/money";
+import { convertirConMetodo, decimalesDeMoneda, redondear, redondearSegunMoneda } from "@/lib/money";
 import { getConfiguracionGlobal } from "@/lib/global-config";
 import { triggerBackgroundSync } from "@/lib/sync-engine";
 
@@ -71,15 +71,27 @@ export async function POST(request: Request) {
       const transitoVentas = cfg.moneda_transito_ventas_id
         ? monedasCatalogo.find((m: any) => String(m.id) === String(cfg.moneda_transito_ventas_id))
         : null;
+      const redondeoCfg = {
+        activo: cfg.redondeo_activo === true,
+        multiplo: Number(cfg.redondeo_multiplo) > 0 ? Number(cfg.redondeo_multiplo) : 0,
+      };
       const regla = {
         metodo: metodoVentas,
         monedaTransito: transitoVentas ?? null,
         catalogo: monedasCatalogo,
+        redondeo: redondeoCfg,
       };
+      const decPago = decimalesDeMoneda(monedaPago);
+      const montoPagoEf = redondear(montoPago, decPago);
+      const multiploPago =
+        decPago === 0 && redondeoCfg.activo && redondeoCfg.multiplo > 0
+          ? redondeoCfg.multiplo
+          : 0;
+      const tolPago = multiploPago > 0 ? Math.max(0.5, multiploPago / 2) : decPago === 0 ? 0.5 : 0.05;
 
       // Monto base contable en USD (para transacciones y métricas)
       const montoBasePago = redondear(
-        convertirConMetodo(montoPago, monedaPago, baseMoneda, regla, 6),
+        convertirConMetodo(montoPagoEf, monedaPago, baseMoneda, regla, 6),
         6
       );
       if (montoBasePago <= 0.0005) {
@@ -88,7 +100,7 @@ export async function POST(request: Request) {
 
       // El pool del pago se mantiene directamente en la moneda en que paga el cliente
       // para evitar triangulación por USD si el sistema está configurado en modo directo.
-      let poolPago = montoPago;
+      let poolPago = montoPagoEf;
       const aplicado: Array<{
         credito_id: string;
         numero: string;
@@ -107,28 +119,32 @@ export async function POST(request: Request) {
           (m: any) => String(m.id) === String(credito.moneda_id)
         );
         if (!monedaCredito) continue;
-        const dec = Number(monedaCredito.decimales ?? 2);
+        const dec = decimalesDeMoneda(monedaCredito);
 
-        // Convertir el saldo del crédito a la moneda de pago usando la regla de ventas
+        // Convertir el saldo del crédito a la moneda de pago usando la regla de ventas y múltiplo de redondeo
         const esMismaMoneda = String(monedaCredito.id) === String(monedaPago.id);
         const costoEnMonedaPago = esMismaMoneda
-          ? saldo
-          : convertirConMetodo(saldo, monedaCredito, monedaPago, regla, 6);
+          ? redondearSegunMoneda(saldo, monedaPago, redondeoCfg, decPago)
+          : convertirConMetodo(saldo, monedaCredito, monedaPago, regla, decPago);
 
         if (poolPago <= 0.0005) break;
 
-        // Tolerancia de 0.05 por redondeo de centavos o enteros
-        const isCompleta = poolPago >= (costoEnMonedaPago - 0.05);
+        // Tolerancia por redondeo de centavos o múltiplo de redondeo (ej. COP múltiplo 100)
+        const isCompleta = poolPago >= (costoEnMonedaPago - tolPago);
         let takeCurrency: number;
 
         if (isCompleta) {
           takeCurrency = saldo;
-          poolPago = Math.max(0, poolPago - costoEnMonedaPago);
+          poolPago = Math.max(0, redondear(poolPago - costoEnMonedaPago, decPago));
         } else {
           takeCurrency = esMismaMoneda
-            ? poolPago
+            ? redondear(poolPago, dec)
             : redondear(
-                convertirConMetodo(poolPago, monedaPago, monedaCredito, regla, dec),
+                convertirConMetodo(poolPago, monedaPago, monedaCredito, {
+                  metodo: metodoVentas,
+                  monedaTransito: transitoVentas ?? null,
+                  catalogo: monedasCatalogo,
+                }, dec),
                 dec
               );
           takeCurrency = Math.min(takeCurrency, saldo);
@@ -193,14 +209,14 @@ export async function POST(request: Request) {
            VALUES ($1, NOW(), 'Entrada', $2, $3, $4, $5, 'pago_deuda', NULL)`,
           [
             caja_id,
-            montoPago,
+            montoPagoEf,
             monedaPago.id,
             montoBasePago,
             `Pago de deuda de ${cliente.nombre}`,
           ]
         );
         await client.query(`UPDATE cajas SET saldo_actual = saldo_actual + $1 WHERE id = $2`, [
-          montoPago,
+          montoPagoEf,
           caja_id,
         ]);
       }
