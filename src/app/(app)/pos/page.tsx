@@ -13,7 +13,7 @@ import { MetodoPagoSelect, ordenarMetodosPorMoneda } from "@/components/ui/metod
 import { Combobox } from "@/components/ui/combobox";
 import { useToast } from "@/components/ui/toast";
 import { fmt, fmtDateTime, fmtNumber, fechaLocalISO } from "@/lib/format";
-import { redondear, decimalesDeMoneda, redondearSegunMoneda, tasaUsd, tasaUsdDocumento, tasaMostrada, tasaPar, precioPresentacionEnMoneda } from "@/lib/money";
+import { redondear, decimalesDeMoneda, redondearSegunMoneda, tasaUsd, tasaUsdDocumento, tasaMostrada, tasaPar, precioPresentacionEnMoneda, esMonedaCop } from "@/lib/money";
 import { useReglasConversion } from "@/lib/use-reglas-conversion";
 import { ReceiptPrinter } from "@/components/pos/receipt-printer";
 import { ClienteModal } from "@/components/cliente/cliente-modal";
@@ -107,6 +107,12 @@ interface CartItem {
    * (en la moneda de la venta) o "10%" = porcentaje sobre el bruto de la línea.
    */
   descuentoStr?: string;
+  /**
+   * Ancla del descuento plano: monto numérico sin redondear y la moneda en la que
+   * se escribió. Se preserva al cambiar de método/moneda para no acumular pérdidas.
+   */
+  descuentoMontoAncla?: number;
+  descuentoMonedaAncla?: string;
 }
 
 // Línea de pago mixto: una o varias, cada una en la moneda de SU método
@@ -241,6 +247,7 @@ export default function PuntoDeVentaPage() {
   // Descuentos
   const [descuento, setDescuento] = useState<number>(0);
   const [descuentoStr, setDescuentoStr] = useState<string>("");
+  const [descuentoAncla, setDescuentoAncla] = useState<{ monto: number; moneda: string } | null>(null);
   const [observaciones, setObservaciones] = useState<string>("");
   const [isPagoMixto, setIsPagoMixto] = useState<boolean>(false);
 
@@ -540,9 +547,10 @@ export default function PuntoDeVentaPage() {
       setMetodoPagoSeleccionado(metodo.id);
       setCajaSeleccionada(metodo.caja_id);
       if (metodo.moneda_codigo) {
-        // El método arrastra la moneda del documento: los cobros extra se
-        // rebasean para mostrar el importe ya convertido en la nueva moneda.
+        // El método arrastra la moneda del documento: los cobros extra y
+        // descuentos planos se rebasean para mostrar el importe ya convertido en la nueva moneda.
         rebasarCobrosExtra(metodo.moneda_codigo);
+        rebasarDescuentos(metodo.moneda_codigo);
         setMonedaSeleccionada(metodo.moneda_codigo);
       }
       // Al cambiar de moneda vuelve la tasa por defecto
@@ -689,6 +697,36 @@ export default function PuntoDeVentaPage() {
   const totalLinea = (item: CartItem): number => totalLineaEnMoneda(item, monedaSeleccionada);
 
   /**
+   * Convierte un importe anclado (`montoAncla` en `monedaAncla`) a una moneda destino.
+   * Si la moneda destino es COP, respeta estrictamente 0 decimales y el múltiplo de
+   * redondeo si estuviera activo en la configuración global.
+   */
+  const convertirMontoAncla = (
+    montoAncla: number,
+    monedaAncla: string,
+    codDestino: string,
+    tasaCustom = parseFloat(tasaCustomStr)
+  ): number => {
+    const destino = codDestino || monedaAncla;
+    if (!montoAncla || montoAncla <= 0) return 0;
+    const dec = decMoneda(destino);
+    if (!destino || destino === monedaAncla) {
+      return redondearSegunMoneda(montoAncla, destino, reglasConversionPos.redondeo, dec);
+    }
+
+    const desde = monedas.find((m) => m.codigo === monedaAncla);
+    const hasta = monedas.find((m) => m.codigo === destino);
+    if (!desde || !hasta) {
+      return redondearSegunMoneda(montoAncla, destino, reglasConversionPos.redondeo, dec);
+    }
+
+    const tasaCustomNum = Number.isFinite(tasaCustom) && tasaCustom > 0 ? tasaCustom : null;
+    const tasaHasta = tasaUsdDocumento(hasta, tasaCustomNum, monedas);
+    const factor = tasaPar(desde, hasta, monedas, { [String(hasta.id)]: tasaHasta });
+    return redondearSegunMoneda(montoAncla * factor, hasta, reglasConversionPos.redondeo, dec);
+  };
+
+  /**
    * Descuento de la línea en la moneda dada. El valor se escribe libre: si
    * termina en "%" es un porcentaje sobre el bruto de la línea; si no, es un
    * monto plano. Se acota para que el total nunca quede negativo (100% / monto
@@ -702,7 +740,12 @@ export default function PuntoDeVentaPage() {
     const bruto = totalLineaEnMoneda(item, codMoneda);
     const dec = decMoneda(codMoneda);
     if (raw.includes("%")) return redondear(bruto * (Math.min(100, num) / 100), dec);
-    return redondear(Math.min(bruto, num), dec);
+
+    let montoPlano = num;
+    if (codMoneda !== monedaSeleccionada && item.descuentoMontoAncla && item.descuentoMonedaAncla) {
+      montoPlano = convertirMontoAncla(item.descuentoMontoAncla, item.descuentoMonedaAncla, codMoneda);
+    }
+    return redondearSegunMoneda(Math.min(bruto, montoPlano), codMoneda, reglasConversionPos.redondeo, dec);
   };
 
   /** Subtotal de la línea ya descontado: lo que realmente se cobra. */
@@ -732,7 +775,9 @@ export default function PuntoDeVentaPage() {
    */
   const editarMontoCobroExtra = (key: number, montoStr: string) => {
     const num = parseFloat(montoStr.trim().replace(",", "."));
-    const montoAncla = Number.isFinite(num) && num > 0 ? num : 0;
+    const montoAncla = Number.isFinite(num) && num > 0
+      ? (esMonedaCop(monedaSeleccionada) ? Math.round(num) : num)
+      : 0;
     setCobrosExtra((prev) =>
       prev.map((c) =>
         c.key === key ? { ...c, montoStr, montoAncla, monedaAncla: monedaSeleccionada } : c
@@ -752,26 +797,9 @@ export default function PuntoDeVentaPage() {
    * extra); si no, se convierte con la tasa vigente. Se convierte SIEMPRE desde
    * el ancla sin redondear, nunca desde el valor ya mostrado, para que cambiar
    * de moneda y volver sea una operación idempotente.
-   *
-   * `tasaCustom` permite forzar la tasa por defecto (0 = ignorarla), necesario
-   * al rebasear porque la tasa personalizada se resetea al cambiar de método de
-   * pago en el mismo gesto.
    */
-  const montoCobroEnMoneda = (c: CobroExtra, codMoneda: string, tasaCustom = parseFloat(tasaCustomStr)): number => {
-    const destino = codMoneda || c.monedaAncla;
-    if (!c.montoAncla || c.montoAncla <= 0) return 0;
-    if (!destino || destino === c.monedaAncla) return redondear(c.montoAncla, decMoneda(destino));
-
-    const desde = monedas.find((m) => m.codigo === c.monedaAncla);
-    const hasta = monedas.find((m) => m.codigo === destino);
-    // Sin alguna de las dos monedas no hay conversión posible: se usa el número.
-    if (!desde || !hasta) return redondear(c.montoAncla, decMoneda(destino));
-
-    const tasaCustomNum = Number.isFinite(tasaCustom) && tasaCustom > 0 ? tasaCustom : null;
-    const tasaHasta = tasaUsdDocumento(hasta, tasaCustomNum, monedas);
-    const factor = tasaPar(desde, hasta, monedas, { [String(hasta.id)]: tasaHasta });
-    return redondear(c.montoAncla * factor, decMoneda(destino));
-  };
+  const montoCobroEnMoneda = (c: CobroExtra, codMoneda: string, tasaCustom = parseFloat(tasaCustomStr)): number =>
+    convertirMontoAncla(c.montoAncla, c.monedaAncla, codMoneda, tasaCustom);
 
   /** Suma de todos los cobros extra en la moneda pedida (la del documento por defecto). */
   const totalCobrosExtra = (codMoneda: string = monedaSeleccionada): number => {
@@ -791,14 +819,73 @@ export default function PuntoDeVentaPage() {
    */
   const rebasarCobrosExtra = (codDestino: string) => {
     if (!codDestino) return;
+    const esCop = esMonedaCop(codDestino);
     setCobrosExtra((prev) => {
       if (prev.length === 0) return prev;
-      return prev.map((c) =>
-        // Tasa 0 = la de por defecto de la moneda destino: la personalizada se
-        // resetea junto con el cambio de método, así que no debe aplicar aquí.
-        c.montoAncla > 0 ? { ...c, montoStr: String(montoCobroEnMoneda(c, codDestino, 0)) } : c
-      );
+      return prev.map((c) => {
+        if (c.montoAncla <= 0) return c;
+        const val = montoCobroEnMoneda(c, codDestino, 0);
+        return {
+          ...c,
+          montoStr: esCop ? String(Math.round(val)) : String(val),
+        };
+      });
     });
+  };
+
+  /**
+   * Actualiza el importe MOSTRADO de los descuentos si son montos planos al cambiar la
+   * moneda del documento. Los porcentajes (ej. "10%") no se tocan porque son invariantes
+   * ante la moneda. El ancla (`descuentoMontoAncla`/`descuentoMonedaAncla`) queda intacta
+   * para que la reconversión sea idempotente y no acumule centavos.
+   */
+  const rebasarDescuentos = (codDestino: string) => {
+    if (!codDestino) return;
+    const esCop = esMonedaCop(codDestino);
+
+    // 1. Descuentos planos de líneas del carrito
+    setCart((prev) => {
+      if (prev.length === 0) return prev;
+      return prev.map((c) => {
+        const raw = (c.descuentoStr ?? "").trim();
+        if (!raw || raw.includes("%")) return c;
+
+        const num = parseFloat(raw.replace(",", "."));
+        const montoAncla =
+          typeof c.descuentoMontoAncla === "number" && c.descuentoMontoAncla > 0
+            ? c.descuentoMontoAncla
+            : Number.isFinite(num) && num > 0
+            ? num
+            : 0;
+        const monedaAncla = c.descuentoMonedaAncla || monedaSeleccionada;
+
+        if (montoAncla <= 0) return c;
+
+        const conv = convertirMontoAncla(montoAncla, monedaAncla, codDestino, 0);
+        const nuevoStr = conv > 0 ? (esCop ? String(Math.round(conv)) : String(conv)) : "";
+
+        return {
+          ...c,
+          descuentoStr: nuevoStr,
+          descuentoMontoAncla: montoAncla,
+          descuentoMonedaAncla: monedaAncla,
+        };
+      });
+    });
+
+    // 2. Descuento global del modal de checkout
+    if (descuentoAncla && descuentoAncla.monto > 0) {
+      const conv = convertirMontoAncla(descuentoAncla.monto, descuentoAncla.moneda, codDestino, 0);
+      const convFinal = conv > 0 ? (esCop ? Math.round(conv) : conv) : 0;
+      setDescuento(convFinal);
+      setDescuentoStr(convFinal > 0 ? (esCop ? String(Math.round(convFinal)) : String(convFinal)) : "");
+    } else if (descuento > 0) {
+      const conv = convertirMontoAncla(descuento, monedaSeleccionada, codDestino, 0);
+      const convFinal = conv > 0 ? (esCop ? Math.round(conv) : conv) : 0;
+      setDescuento(convFinal);
+      setDescuentoStr(convFinal > 0 ? (esCop ? String(Math.round(convFinal)) : String(convFinal)) : "");
+      setDescuentoAncla({ monto: descuento, moneda: monedaSeleccionada });
+    }
   };
 
   // Tasa efectiva de la venta en "unidades de la moneda por su referencia"
@@ -908,11 +995,48 @@ export default function PuntoDeVentaPage() {
    * Escribe el descuento de una línea. Se permite texto libre pero solo con
    * dígitos, separadores decimales y "%": así el campo acepta tanto "10" (monto)
    * como "10%" (porcentaje) sin dejar entrar letras.
+   * Si es monto plano, se ancla a la moneda actual de la venta para permitir su
+   * reconversión automática si el cajero cambia de método de pago.
    */
   const setDescuentoLinea = (clave: string, valor: string) => {
     const limpio = valor.replace(/[^0-9.,%]/g, "").slice(0, 12);
+    const esPorcentaje = limpio.includes("%");
+    const num = parseFloat(limpio.replace("%", "").replace(",", "."));
+    const montoAncla = !esPorcentaje && Number.isFinite(num) && num > 0 ? num : 0;
+    const monedaAncla = !esPorcentaje && montoAncla > 0 ? monedaSeleccionada : undefined;
+
     setCart((prev) =>
-      prev.map((c) => (claveDe(c) === clave ? { ...c, descuentoStr: limpio } : c))
+      prev.map((c) =>
+        claveDe(c) === clave
+          ? {
+              ...c,
+              descuentoStr: limpio,
+              descuentoMontoAncla: montoAncla > 0 ? montoAncla : undefined,
+              descuentoMonedaAncla: monedaAncla,
+            }
+          : c
+      )
+    );
+  };
+
+  /** Al perder el foco, si la moneda es COP y es monto plano, formatea a entero sin decimales. */
+  const handleBlurDescuentoLinea = (clave: string) => {
+    if (!esMonedaCop(monedaSeleccionada)) return;
+    setCart((prev) =>
+      prev.map((c) => {
+        if (claveDe(c) !== clave) return c;
+        const raw = (c.descuentoStr ?? "").trim();
+        if (!raw || raw.includes("%")) return c;
+        const num = parseFloat(raw.replace(",", "."));
+        if (!Number.isFinite(num) || num <= 0) return c;
+        const redondeado = Math.round(num);
+        return {
+          ...c,
+          descuentoStr: String(redondeado),
+          descuentoMontoAncla: redondeado,
+          descuentoMonedaAncla: monedaSeleccionada,
+        };
+      })
     );
   };
 
@@ -1146,6 +1270,9 @@ export default function PuntoDeVentaPage() {
       const newCarts = heldCarts.filter(h => h.id !== heldId);
       saveHeldCarts(newCarts);
       setShowHoldListModal(false);
+      if (monedaSeleccionada) {
+        setTimeout(() => rebasarDescuentos(monedaSeleccionada), 0);
+      }
       toast("Venta recuperada", "success");
     }
   };
@@ -1403,6 +1530,7 @@ export default function PuntoDeVentaPage() {
         setLineasPago([nuevaLineaPago()]);
         setDescuento(0);
         setDescuentoStr("");
+        setDescuentoAncla(null);
         setCobrosExtra([]);
         setObservaciones("");
         setIsPagoMixto(false);
@@ -1816,6 +1944,7 @@ export default function PuntoDeVentaPage() {
                               type="text"
                               value={c.descuentoStr ?? ""}
                               onChange={(e) => setDescuentoLinea(clave, e.target.value)}
+                              onBlur={() => handleBlurDescuentoLinea(clave)}
                               placeholder="0 o 10%"
                               title="Descuento: escribe un monto (ej. 5) o un porcentaje (ej. 10%)"
                               className="h-8 w-full rounded-md border border-border/60 bg-muted/40 px-1 text-center font-mono text-sm text-foreground placeholder:text-[11px] placeholder:text-muted-foreground/60 focus:border-primary focus:bg-background focus:outline-none"
@@ -2152,9 +2281,9 @@ export default function PuntoDeVentaPage() {
                           <Input
                             className="h-10 flex-1 min-w-0 text-right font-mono text-base font-black"
                             type="number"
-                            step="any"
+                            step={decMoneda(monedaSeleccionada) === 0 ? "1" : "any"}
                             min="0"
-                            placeholder="0.00"
+                            placeholder={decMoneda(monedaSeleccionada) === 0 ? "0" : "0.00"}
                             value={c.montoStr}
                             onChange={(e) => editarMontoCobroExtra(c.key, e.target.value)}
                           />
@@ -2474,11 +2603,27 @@ export default function PuntoDeVentaPage() {
                     <Input
                       className="w-28 h-8 text-right font-mono text-xs p-1.5 font-bold"
                       value={descuentoStr}
-                      placeholder="0.00"
+                      placeholder={decMoneda(monedaSeleccionada) === 0 ? "0" : "0.00"}
                       onChange={(e) => {
-                        setDescuentoStr(e.target.value);
-                        const val = parseFloat(e.target.value);
-                        setDescuento(isNaN(val) ? 0 : val);
+                        const valStr = e.target.value;
+                        setDescuentoStr(valStr);
+                        const num = parseFloat(valStr.replace(",", "."));
+                        if (Number.isFinite(num) && num > 0) {
+                          const montoFinal = esMonedaCop(monedaSeleccionada) ? Math.round(num) : num;
+                          setDescuento(montoFinal);
+                          setDescuentoAncla({ monto: montoFinal, moneda: monedaSeleccionada });
+                        } else {
+                          setDescuento(0);
+                          setDescuentoAncla(null);
+                        }
+                      }}
+                      onBlur={() => {
+                        if (esMonedaCop(monedaSeleccionada) && descuento > 0) {
+                          const redondeado = Math.round(descuento);
+                          setDescuento(redondeado);
+                          setDescuentoStr(String(redondeado));
+                          setDescuentoAncla({ monto: redondeado, moneda: monedaSeleccionada });
+                        }
                       }}
                     />
                   </div>

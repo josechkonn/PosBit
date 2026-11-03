@@ -212,6 +212,8 @@ interface CartItem {
   qty: number;
   presentacion: LocalPresentacion | null;
   descuentoStr?: string;
+  descuentoMontoAncla?: number;
+  descuentoMonedaAncla?: string;
 }
 
 interface HeldCart {
@@ -946,6 +948,8 @@ export default function App() {
 
   const decMoneda = useCallback(
     (cod?: string) => {
+      const codigo = (cod || monedaSeleccionada || "").trim().toUpperCase();
+      if (codigo === "COP") return 0;
       const m = monedas.find((x) => x.codigo === (cod || monedaSeleccionada));
       return Number(m?.decimales ?? 2);
     },
@@ -1093,9 +1097,10 @@ export default function App() {
       const cod = codMoneda || monedaSeleccionada;
       const m = monedas.find((x) => x.codigo === cod) || activeMonedaObj;
       const sym = m?.simbolo || "$";
-      const dec = Number(m?.decimales ?? 2);
+      const isCop = cod.trim().toUpperCase() === "COP";
+      const dec = isCop ? 0 : Number(m?.decimales ?? 2);
       return `${sym} ${(Number(val) || 0).toLocaleString("es-VE", {
-        minimumFractionDigits: Math.min(2, dec),
+        minimumFractionDigits: isCop ? 0 : Math.min(2, dec),
         maximumFractionDigits: dec,
       })}`;
     },
@@ -1162,16 +1167,61 @@ export default function App() {
       if (!raw) return 0;
       const bruto = totalLineaEnMoneda(item, codMoneda);
       if (bruto <= 0) return 0;
-      const esPct = raw.endsWith("%");
-      const numStr = (esPct ? raw.slice(0, -1) : raw).replace(",", ".");
+      const esPct = raw.endsWith("%") || raw.includes("%");
+      const numStr = (esPct ? raw.replace("%", "") : raw).replace(",", ".");
       const val = parseFloat(numStr);
       if (!Number.isFinite(val) || val <= 0) return 0;
-      const monto = esPct ? bruto * (Math.min(100, val) / 100) : val;
-      const dec = decMoneda(codMoneda);
+
+      let monto = val;
+      if (esPct) {
+        monto = bruto * (Math.min(100, val) / 100);
+      } else if (codMoneda !== monedaSeleccionada && item.descuentoMontoAncla && item.descuentoMonedaAncla) {
+        monto = convertirMonto(item.descuentoMontoAncla, item.descuentoMonedaAncla, codMoneda);
+      }
+
+      const isCop = codMoneda.trim().toUpperCase() === "COP";
+      const dec = isCop ? 0 : decMoneda(codMoneda);
       const factor = Math.pow(10, dec);
       return Math.min(bruto, Math.round(monto * factor) / factor);
     },
-    [totalLineaEnMoneda, decMoneda, monedaSeleccionada]
+    [totalLineaEnMoneda, decMoneda, monedaSeleccionada, convertirMonto]
+  );
+
+  const rebasarDescuentos = useCallback(
+    (codDestino: string) => {
+      if (!codDestino) return;
+      const esCop = codDestino.trim().toUpperCase() === "COP";
+
+      setCart((prev) => {
+        if (prev.length === 0) return prev;
+        return prev.map((c) => {
+          const raw = (c.descuentoStr ?? "").trim();
+          if (!raw || raw.includes("%")) return c;
+
+          const num = parseFloat(raw.replace(",", "."));
+          const montoAncla =
+            typeof c.descuentoMontoAncla === "number" && c.descuentoMontoAncla > 0
+              ? c.descuentoMontoAncla
+              : Number.isFinite(num) && num > 0
+              ? num
+              : 0;
+          const monedaAncla = c.descuentoMonedaAncla || monedaSeleccionada;
+
+          if (montoAncla <= 0) return c;
+
+          const conv = convertirMonto(montoAncla, monedaAncla, codDestino);
+          const nuevoStr = conv > 0 ? (esCop ? String(Math.round(conv)) : String(conv)) : "";
+
+          return {
+            ...c,
+            descuentoStr: nuevoStr,
+            descuentoMontoAncla: montoAncla,
+            descuentoMonedaAncla: monedaAncla,
+          };
+        });
+      });
+    },
+    [monedaSeleccionada, convertirMonto]
   );
 
   // ── Selección de Método de Pago (cambia moneda igual que en la web) ──
@@ -1182,14 +1232,18 @@ export default function App() {
       if (mp) {
         if (mp.caja_id) setCajaSeleccionada(String(mp.caja_id));
         if (mp.moneda_codigo) {
+          rebasarDescuentos(mp.moneda_codigo);
           setMonedaSeleccionada(mp.moneda_codigo);
         } else if (mp.moneda_id) {
           const mon = monedas.find((x) => String(x.id) === String(mp.moneda_id));
-          if (mon) setMonedaSeleccionada(mon.codigo);
+          if (mon) {
+            rebasarDescuentos(mon.codigo);
+            setMonedaSeleccionada(mon.codigo);
+          }
         }
       }
     },
-    [metodosPago, monedas]
+    [metodosPago, monedas, rebasarDescuentos]
   );
 
   // ── Funciones del Carrito POS ──
@@ -1270,10 +1324,24 @@ export default function App() {
 
   const setDescuentoLinea = useCallback((clave: string, val: string) => {
     const limpio = val.replace(/[^0-9.,%]/g, "").slice(0, 10);
+    const esPorcentaje = limpio.includes("%");
+    const num = parseFloat(limpio.replace("%", "").replace(",", "."));
+    const montoAncla = !esPorcentaje && Number.isFinite(num) && num > 0 ? num : 0;
+    const monedaAncla = !esPorcentaje && montoAncla > 0 ? monedaSeleccionada : undefined;
+
     setCart((prev) =>
-      prev.map((c) => (claveDe(c) === clave ? { ...c, descuentoStr: limpio } : c))
+      prev.map((c) =>
+        claveDe(c) === clave
+          ? {
+              ...c,
+              descuentoStr: limpio,
+              descuentoMontoAncla: montoAncla > 0 ? montoAncla : undefined,
+              descuentoMonedaAncla: monedaAncla,
+            }
+          : c
+      )
     );
-  }, []);
+  }, [monedaSeleccionada]);
 
   const handlePauseCart = useCallback(() => {
     if (cart.length === 0) return;
@@ -1780,6 +1848,7 @@ export default function App() {
     const mpObj = metodosPago.find((x) => String(x.id) === String(mpDefaultId));
     const codMetodo = mpObj?.moneda_codigo || monedaSeleccionada;
     if (codMetodo && codMetodo !== monedaSeleccionada) {
+      rebasarDescuentos(codMetodo);
       setMonedaSeleccionada(codMetodo);
     }
     const totalEnMonedaMetodo = calcularTotalEnMoneda(codMetodo);
@@ -1809,6 +1878,7 @@ export default function App() {
     decMoneda,
     infoCreditoCliente,
     showToast,
+    rebasarDescuentos,
   ]);
 
   const handleSelectMetodoCheckout = useCallback(
@@ -1818,7 +1888,8 @@ export default function App() {
       if (mp) {
         if (mp.caja_id) setCajaSeleccionada(String(mp.caja_id));
         const codNuevo = mp.moneda_codigo || monedaSeleccionada;
-        if (codNuevo) {
+        if (codNuevo && codNuevo !== monedaSeleccionada) {
+          rebasarDescuentos(codNuevo);
           setMonedaSeleccionada(codNuevo);
         }
         const totalEnMoneda = calcularTotalEnMoneda(codNuevo);
@@ -1832,7 +1903,7 @@ export default function App() {
         ]);
       }
     },
-    [metodosPago, monedaSeleccionada, calcularTotalEnMoneda, decMoneda]
+    [metodosPago, monedaSeleccionada, calcularTotalEnMoneda, decMoneda, rebasarDescuentos]
   );
 
   // Otorgar o ajustar límite de crédito directamente desde el Checkout
