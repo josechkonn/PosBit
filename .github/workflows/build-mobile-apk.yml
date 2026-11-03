@@ -30,6 +30,8 @@ jobs:
   build-apk:
     runs-on: ubuntu-latest
     timeout-minutes: 35
+    env:
+      GRADLE_OPTS: "-Dorg.gradle.jvmargs=-Xmx4096m -XX:MaxMetaspaceSize=1024m"
 
     steps:
       # ---------------------------------------------------------------
@@ -58,10 +60,13 @@ jobs:
           java-version: '17'
 
       # ---------------------------------------------------------------
-      # 4. Configurar Android SDK
+      # 4. Configurar Android SDK (usando el SDK oficial preinstalado en el runner)
       # ---------------------------------------------------------------
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
+      - name: Setup Android SDK Environment
+        run: |
+          echo "ANDROID_HOME=$ANDROID_HOME" >> $GITHUB_ENV
+          echo "ANDROID_SDK_ROOT=$ANDROID_HOME" >> $GITHUB_ENV
+          yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses 2>/dev/null || true
 
       # ---------------------------------------------------------------
       # 5. Obtener versión de mobile/app.json
