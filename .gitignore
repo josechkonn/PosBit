@@ -49,6 +49,8 @@ Thumbs.db
 .expo/
 mobile/.expo/
 mobile/dist/
+mobile/android/
+mobile/ios/
 
 # Agent skills
 .agents/

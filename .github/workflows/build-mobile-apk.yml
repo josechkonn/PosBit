@@ -1,0 +1,154 @@
+# ============================================================================
+# PosBit Mobile — Build & Release de APK para Android (Expo Standalone)
+# ============================================================================
+# Se ejecuta automáticamente en la nube (GitHub Actions) al hacer push a las
+# ramas 'main' o 'nube' cuando hay cambios en mobile/**, o de forma manual con
+# workflow_dispatch.
+#
+# Flujo:
+#   1. Prepara Node.js, Java JDK 17 y Android SDK en ubuntu-latest
+#   2. Instala dependencias de la app móvil (Expo 52 / React Native)
+#   3. Ejecuta 'expo prebuild' para generar el proyecto nativo Android
+#   4. Compila el APK de Release con Gradle
+#   5. Publica el APK como artefacto de la acción y lo añade al GitHub Release
+# ============================================================================
+
+name: Build Mobile APK & Release
+
+on:
+  push:
+    branches: [main, nube]
+    paths:
+      - 'mobile/**'
+      - '.github/workflows/build-mobile-apk.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-apk:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+
+    steps:
+      # ---------------------------------------------------------------
+      # 1. Checkout del código
+      # ---------------------------------------------------------------
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # ---------------------------------------------------------------
+      # 2. Configurar Node.js
+      # ---------------------------------------------------------------
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: mobile/package-lock.json
+
+      # ---------------------------------------------------------------
+      # 3. Configurar Java JDK 17 (requerido por React Native / Gradle 8)
+      # ---------------------------------------------------------------
+      - name: Setup Java JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      # ---------------------------------------------------------------
+      # 4. Configurar Android SDK
+      # ---------------------------------------------------------------
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      # ---------------------------------------------------------------
+      # 5. Obtener versión de mobile/app.json
+      # ---------------------------------------------------------------
+      - name: Read Mobile Version
+        id: version
+        run: |
+          VERSION=$(node -p "require('./mobile/app.json').expo.version")
+          VERSION_CODE=$(node -p "require('./mobile/app.json').expo.android.versionCode")
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "version_code=$VERSION_CODE" >> $GITHUB_OUTPUT
+          echo "tag=mobile-v$VERSION" >> $GITHUB_OUTPUT
+          echo "Versión móvil: v$VERSION (código $VERSION_CODE)"
+
+      # ---------------------------------------------------------------
+      # 6. Instalar dependencias en mobile/
+      # ---------------------------------------------------------------
+      - name: Install Mobile Dependencies
+        run: |
+          cd mobile
+          npm ci --legacy-peer-deps
+
+      # ---------------------------------------------------------------
+      # 7. Expo Prebuild para Android (genera el proyecto nativo Gradle)
+      # ---------------------------------------------------------------
+      - name: Expo Prebuild Android
+        run: |
+          cd mobile
+          npx expo prebuild --platform android --no-install
+
+      # ---------------------------------------------------------------
+      # 8. Compilar APK de Release con Gradle
+      # ---------------------------------------------------------------
+      - name: Build Android APK with Gradle
+        run: |
+          cd mobile/android
+          chmod +x gradlew
+          ./gradlew assembleRelease --no-daemon -x lint -x test
+
+      # ---------------------------------------------------------------
+      # 9. Copiar y renombrar APK
+      # ---------------------------------------------------------------
+      - name: Package APK
+        run: |
+          APK_SOURCE="mobile/android/app/build/outputs/apk/release/app-release.apk"
+          APK_TARGET="mobile/PosBit-Mobile-v${{ steps.version.outputs.version }}.apk"
+          if [ -f "$APK_SOURCE" ]; then
+            cp "$APK_SOURCE" "$APK_TARGET"
+            echo "APK generado con éxito: $APK_TARGET"
+            ls -lh "$APK_TARGET"
+          else
+            echo "Error: No se encontró el archivo $APK_SOURCE"
+            exit 1
+          fi
+
+      # ---------------------------------------------------------------
+      # 10. Subir APK como artefacto de GitHub Actions
+      # ---------------------------------------------------------------
+      - name: Upload APK Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: PosBit-Mobile-v${{ steps.version.outputs.version }}.apk
+          path: mobile/PosBit-Mobile-*.apk
+          if-no-files-found: error
+          retention-days: 30
+
+      # ---------------------------------------------------------------
+      # 11. Publicar o Actualizar GitHub Release con el APK
+      # ---------------------------------------------------------------
+      - name: Create / Update GitHub Release with APK
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: PosBit Mobile v${{ steps.version.outputs.version }}
+          body: |
+            ## PosBit Mobile v${{ steps.version.outputs.version }} (Android APK)
+
+            ### 📱 Instalación
+            1. Descarga el archivo adjunto `PosBit-Mobile-v${{ steps.version.outputs.version }}.apk`.
+            2. Transfiérelo o ábrelo directamente en tu dispositivo Android para instalar la aplicación.
+
+            ---
+            *Compilación automática generada en la nube desde la rama `${{ github.ref_name }}` (commit `${{ github.sha }}`)*
+          draft: false
+          prerelease: ${{ github.ref_name != 'main' }}
+          files: |
+            mobile/PosBit-Mobile-*.apk
+          fail_on_unmatched_files: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
